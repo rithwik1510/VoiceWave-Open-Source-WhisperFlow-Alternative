@@ -157,7 +157,7 @@ fn long_utterance_ms() -> u64 {
         "VOICEWAVE_POLICY_LONG_UTTERANCE_MS",
         LONG_UTTERANCE_MS_DEFAULT,
         2_500,
-        30_000,
+        60_000,
     )
 }
 

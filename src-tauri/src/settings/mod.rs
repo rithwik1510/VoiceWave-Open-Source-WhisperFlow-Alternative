@@ -153,7 +153,7 @@ impl Default for VoiceWaveSettings {
             active_model: "fw-small.en".to_string(),
             show_floating_hud: true,
             vad_threshold: 0.014,
-            max_utterance_ms: 30_000,
+            max_utterance_ms: 60_000,
             release_tail_ms: 350,
             decode_mode: DecodeMode::Balanced,
             diagnostics_opt_in: false,
@@ -247,7 +247,9 @@ pub fn normalize_pro_settings(settings: &mut VoiceWaveSettings) {
     normalize_behavior(&mut settings.app_profile_overrides.desktop);
 
     let mut seen = std::collections::HashSet::new();
-    settings.active_domain_packs.retain(|pack| seen.insert(*pack));
+    settings
+        .active_domain_packs
+        .retain(|pack| seen.insert(*pack));
 }
 
 pub const LOCKED_TOGGLE_HOTKEY: &str = "Ctrl+Alt+X";
@@ -362,7 +364,10 @@ mod tests {
     #[test]
     fn normalize_pro_settings_clamps_behavior_and_deduplicates_domain_packs() {
         let mut settings = VoiceWaveSettings::default();
-        settings.app_profile_overrides.editor.punctuation_aggressiveness = 9;
+        settings
+            .app_profile_overrides
+            .editor
+            .punctuation_aggressiveness = 9;
         settings.app_profile_overrides.browser.sentence_compactness = 7;
         settings.active_domain_packs = vec![
             DomainPackId::Coding,
@@ -374,8 +379,17 @@ mod tests {
 
         normalize_pro_settings(&mut settings);
 
-        assert_eq!(settings.app_profile_overrides.editor.punctuation_aggressiveness, 2);
-        assert_eq!(settings.app_profile_overrides.browser.sentence_compactness, 2);
+        assert_eq!(
+            settings
+                .app_profile_overrides
+                .editor
+                .punctuation_aggressiveness,
+            2
+        );
+        assert_eq!(
+            settings.app_profile_overrides.browser.sentence_compactness,
+            2
+        );
         assert_eq!(
             settings.active_domain_packs,
             vec![

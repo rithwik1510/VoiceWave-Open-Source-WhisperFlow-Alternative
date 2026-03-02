@@ -1927,7 +1927,7 @@ function App() {
                         className="mt-2 w-full accent-[#18181B]"
                         type="range"
                         min={5000}
-                        max={30000}
+                        max={60000}
                         step={250}
                         value={settings.maxUtteranceMs}
                         onChange={(event) => void setMaxUtteranceMs(Number(event.target.value))}

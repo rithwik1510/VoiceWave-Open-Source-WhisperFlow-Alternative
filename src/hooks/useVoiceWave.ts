@@ -103,9 +103,9 @@ import type {
   VoiceWaveSnapshot
 } from "../types/voicewave";
 
-const DEFAULT_MAX_UTTERANCE_MS = 30_000;
+const DEFAULT_MAX_UTTERANCE_MS = 60_000;
 const MIN_MAX_UTTERANCE_MS = 5_000;
-const MAX_MAX_UTTERANCE_MS = 30_000;
+const MAX_MAX_UTTERANCE_MS = 60_000;
 const DEFAULT_RELEASE_TAIL_MS = 350;
 const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;
@@ -239,9 +239,16 @@ const MODIFIER_TOKENS = [
   "WIN",
   "WINDOWS"
 ];
-const AGENT_DEBUG_INGEST_URL = "http://127.0.0.1:7699/ingest/e16a906a-0c4b-4fc5-af3e-3101124f2a4d";
+const AGENT_DEBUG_INGEST_URL = (
+  import.meta.env.VITE_AGENT_DEBUG_INGEST_URL as string | undefined
+)?.trim() ?? "";
+const AGENT_DEBUG_SESSION_ID =
+  (import.meta.env.VITE_AGENT_DEBUG_SESSION_ID as string | undefined)?.trim() || "local-debug";
+const AGENT_DEBUG_RUN_ID =
+  (import.meta.env.VITE_AGENT_DEBUG_RUN_ID as string | undefined)?.trim() || "default";
 const AGENT_DEBUG_ENABLED =
-  import.meta.env.DEV || import.meta.env.VITE_ENABLE_AGENT_DEBUG_LOGS === "true";
+  import.meta.env.VITE_ENABLE_AGENT_DEBUG_LOGS === "true" &&
+  AGENT_DEBUG_INGEST_URL.length > 0;
 
 export interface MicQualityWarning {
   currentDevice: string;
@@ -341,7 +348,7 @@ function sendAgentDebugLog(payload: Record<string, unknown>): void {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Debug-Session-Id": "c0db10"
+      "X-Debug-Session-Id": AGENT_DEBUG_SESSION_ID
     },
     body: JSON.stringify(payload)
   }).catch(() => {});
@@ -529,8 +536,8 @@ export function useVoiceWave() {
   useEffect(() => {
     // #region agent log
     sendAgentDebugLog({
-      sessionId: "c0db10",
-      runId: "pre-fix",
+      sessionId: AGENT_DEBUG_SESSION_ID,
+      runId: AGENT_DEBUG_RUN_ID,
       hypothesisId: "INIT",
       location: "src/hooks/useVoiceWave.ts:512",
       message: "useVoiceWave init",
@@ -810,8 +817,8 @@ export function useVoiceWave() {
 
         // #region agent log
         sendAgentDebugLog({
-          sessionId: "c0db10",
-          runId: "pre-fix",
+          sessionId: AGENT_DEBUG_SESSION_ID,
+          runId: AGENT_DEBUG_RUN_ID,
           hypothesisId: "A",
           location: "src/hooks/useVoiceWave.ts:773",
           message: "runDictation start",
@@ -1827,8 +1834,8 @@ export function useVoiceWave() {
 
         // #region agent log
         sendAgentDebugLog({
-          sessionId: "c0db10",
-          runId: "pre-fix",
+          sessionId: AGENT_DEBUG_SESSION_ID,
+          runId: AGENT_DEBUG_RUN_ID,
           hypothesisId: "B",
           location: "src/hooks/useVoiceWave.ts:1767",
           message: "latency breakdown",
