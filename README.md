@@ -6,6 +6,12 @@ VoiceWave is a privacy-first desktop dictation system built for low-latency loca
 
 Current v1 runtime path is local-only (`whisper.cpp` through Rust) with a Windows-first execution scope in this branch.
 
+## ![Overview](docs/assets/readme/section-overview.svg) Live Demo
+
+[Watch the VoiceWave demo (MP4)](Voice%20Wave.mp4)
+
+Recorded walkthrough showing the current pill interaction and translation flow in the app.
+
 ## ![Overview](docs/assets/readme/section-overview.svg) Product At A Glance
 
 | Area | Summary |
