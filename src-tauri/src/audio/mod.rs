@@ -13,6 +13,7 @@ const FRAME_SIZE: usize = 320;
 const STOP_SIGNAL_DEBOUNCE_MS: u64 = 160;
 const RELEASE_TAIL_MIN_WAIT_MS: u64 = 70;
 const RELEASE_TAIL_SILENCE_CONFIRM_MS: u64 = 60;
+const VAD_PRE_ROLL_FRAMES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
@@ -165,21 +166,24 @@ impl AudioCaptureService {
             options,
             should_cancel,
             should_stop,
+            || {},
             |_normalized_chunk, _voiced_chunk| {},
         )
     }
 
-    pub fn capture_segments_from_microphone_with_signals_and_observer<F, G, H>(
+    pub fn capture_segments_from_microphone_with_signals_and_observer<F, G, H, I>(
         &self,
         requested_device_name: Option<&str>,
         options: CaptureOptions,
         should_cancel: F,
         should_stop: G,
+        mut on_stream_ready: I,
         mut on_normalized_chunk: H,
     ) -> Result<Vec<Vec<f32>>, AudioError>
     where
         F: Fn() -> bool,
         G: Fn() -> bool,
+        I: FnMut(),
         H: FnMut(&[f32], bool),
     {
         let host = cpal::default_host();
@@ -199,6 +203,7 @@ impl AudioCaptureService {
         let stream =
             build_input_stream(&device, &stream_config, sample_format, audio_tx, error_tx)?;
         stream.play().map_err(AudioError::PlayStream)?;
+        on_stream_ready();
 
         let segments = self.collect_segments_from_stream(
             sample_rate,
@@ -319,7 +324,8 @@ impl AudioCaptureService {
         let mut last_voice_at: Option<Instant> = None;
         let mut stop_requested_at: Option<Instant> = None;
         let mut post_release_last_voiced_at: Option<Instant> = None;
-        let mut heard_speech = false;
+        let mut voiced_frame_count = 0usize;
+        let mut speech_detected = false;
 
         while started.elapsed() <= options.max_capture_duration {
             if should_cancel() {
@@ -340,11 +346,13 @@ impl AudioCaptureService {
                 if elapsed >= options.release_tail {
                     break;
                 }
-                let min_wait_ms = RELEASE_TAIL_MIN_WAIT_MS.min(options.release_tail.as_millis() as u64);
+                let min_wait_ms =
+                    RELEASE_TAIL_MIN_WAIT_MS.min(options.release_tail.as_millis() as u64);
                 let min_wait = Duration::from_millis(min_wait_ms);
                 if elapsed >= min_wait {
-                    let recent_post_release_voice = post_release_last_voiced_at
-                        .is_some_and(|at| at.elapsed() <= Duration::from_millis(RELEASE_TAIL_SILENCE_CONFIRM_MS));
+                    let recent_post_release_voice = post_release_last_voiced_at.is_some_and(|at| {
+                        at.elapsed() <= Duration::from_millis(RELEASE_TAIL_SILENCE_CONFIRM_MS)
+                    });
                     if !recent_post_release_voice {
                         break;
                     }
@@ -374,7 +382,10 @@ impl AudioCaptureService {
                         let frame: Vec<f32> = normalized_pending.drain(..FRAME_SIZE).collect();
                         if rms(&frame) >= options.vad_config.threshold {
                             last_voice_at = Some(Instant::now());
-                            heard_speech = true;
+                            voiced_frame_count = voiced_frame_count.saturating_add(1);
+                            if voiced_frame_count >= options.vad_config.min_speech_frames {
+                                speech_detected = true;
+                            }
                         }
 
                         if let Some(segment) = vad.push_frame(&frame) {
@@ -386,7 +397,7 @@ impl AudioCaptureService {
                     if stop_requested_at.is_some() {
                         continue;
                     }
-                    if !heard_speech {
+                    if !speech_detected {
                         if started.elapsed() >= options.silence_timeout {
                             break;
                         }
@@ -412,6 +423,9 @@ impl AudioCaptureService {
                 segments.push(segment);
             }
         }
+        if !speech_detected {
+            return Ok(Vec::new());
+        }
 
         if options.preserve_full_capture && !capture_accum.is_empty() {
             let preserve_threshold = (options.vad_config.threshold * 0.55).clamp(0.0015, 0.02);
@@ -423,8 +437,7 @@ impl AudioCaptureService {
         }
 
         if segments.is_empty() && !capture_accum.is_empty() {
-            let fallback_len =
-                (self.target_sample_rate as usize * 3).min(capture_accum.len());
+            let fallback_len = (self.target_sample_rate as usize * 3).min(capture_accum.len());
             if fallback_len > 0 {
                 let start = capture_accum.len() - fallback_len;
                 let slice = &capture_accum[start..];
@@ -615,6 +628,7 @@ impl Default for VadConfig {
 pub struct VadSegmenter {
     config: VadConfig,
     active_buffer: Vec<f32>,
+    pre_roll_frames: Vec<Vec<f32>>,
     voiced_frames: usize,
     silence_frames: usize,
     in_speech: bool,
@@ -625,6 +639,7 @@ impl VadSegmenter {
         Self {
             config,
             active_buffer: Vec::new(),
+            pre_roll_frames: Vec::new(),
             voiced_frames: 0,
             silence_frames: 0,
             in_speech: false,
@@ -638,6 +653,16 @@ impl VadSegmenter {
         let energy = rms(frame);
 
         if energy >= self.config.threshold {
+            if !self.in_speech
+                && self.voiced_frames == 0
+                && self.active_buffer.is_empty()
+                && !self.pre_roll_frames.is_empty()
+            {
+                for pre_roll in &self.pre_roll_frames {
+                    self.active_buffer.extend_from_slice(pre_roll);
+                }
+            }
+            self.pre_roll_frames.clear();
             self.voiced_frames += 1;
             self.silence_frames = 0;
             self.active_buffer.extend_from_slice(frame);
@@ -656,6 +681,7 @@ impl VadSegmenter {
                 self.silence_frames = 0;
                 let mut segment = Vec::new();
                 std::mem::swap(&mut segment, &mut self.active_buffer);
+                self.pre_roll_frames.clear();
                 return if segment.is_empty() {
                     None
                 } else {
@@ -664,6 +690,10 @@ impl VadSegmenter {
             }
         } else {
             self.active_buffer.clear();
+            if self.pre_roll_frames.len() >= VAD_PRE_ROLL_FRAMES {
+                self.pre_roll_frames.remove(0);
+            }
+            self.pre_roll_frames.push(frame.to_vec());
         }
         None
     }
@@ -675,6 +705,7 @@ impl VadSegmenter {
         self.in_speech = false;
         self.voiced_frames = 0;
         self.silence_frames = 0;
+        self.pre_roll_frames.clear();
         let mut segment = Vec::new();
         std::mem::swap(&mut segment, &mut self.active_buffer);
         Some(segment)
@@ -811,10 +842,7 @@ pub fn analyze_captured_segments(
     let peak = samples
         .iter()
         .fold(0.0_f32, |acc, sample| acc.max(sample.abs()));
-    let clipping_count = samples
-        .iter()
-        .filter(|sample| sample.abs() >= 0.98)
-        .count();
+    let clipping_count = samples.iter().filter(|sample| sample.abs() >= 0.98).count();
     let clipping_ratio = clipping_count as f32 / samples.len() as f32;
 
     let mut frame_rms = Vec::new();
@@ -836,7 +864,8 @@ pub fn analyze_captured_segments(
     };
 
     let mut sorted_frame_rms = frame_rms.clone();
-    sorted_frame_rms.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_frame_rms
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let noise_floor = percentile(&sorted_frame_rms, 0.15).max(1.0e-5);
     let speech_level = percentile(&sorted_frame_rms, 0.85).max(noise_floor);
     let estimated_snr_db = 20.0 * (speech_level / noise_floor).log10();
@@ -848,15 +877,13 @@ pub fn analyze_captured_segments(
     if rms_value < 0.010 {
         score -= 40;
         issues.push("Captured audio chunks are very quiet.".to_string());
-        recommendations.push(
-            "Increase microphone input gain or move closer to the microphone.".to_string(),
-        );
+        recommendations
+            .push("Increase microphone input gain or move closer to the microphone.".to_string());
     } else if rms_value < 0.018 {
         score -= 22;
         issues.push("Captured audio level is lower than recommended.".to_string());
-        recommendations.push(
-            "Use a closer/wired mic path and keep speaking volume steady.".to_string(),
-        );
+        recommendations
+            .push("Use a closer/wired mic path and keep speaking volume steady.".to_string());
     }
 
     if clipping_ratio > 0.030 {
@@ -868,9 +895,7 @@ pub fn analyze_captured_segments(
     } else if clipping_ratio > 0.010 {
         score -= 14;
         issues.push("Some clipping is present in the captured chunks.".to_string());
-        recommendations.push(
-            "Lower input volume slightly to avoid peak distortion.".to_string(),
-        );
+        recommendations.push("Lower input volume slightly to avoid peak distortion.".to_string());
     }
 
     if low_energy_frame_ratio > 0.70 {
@@ -897,13 +922,11 @@ pub fn analyze_captured_segments(
 
     if peak < 0.03 {
         score -= 10;
-        if !issues
-            .iter()
-            .any(|issue| issue.contains("quiet"))
-        {
+        if !issues.iter().any(|issue| issue.contains("quiet")) {
             issues.push("Peak speech amplitude is very low.".to_string());
             recommendations.push(
-                "Raise capture level so spoken words consistently clear background floor.".to_string(),
+                "Raise capture level so spoken words consistently clear background floor."
+                    .to_string(),
             );
         }
     }
@@ -917,9 +940,8 @@ pub fn analyze_captured_segments(
     };
 
     if issues.is_empty() {
-        recommendations.push(
-            "Audio chunk quality looks healthy for on-device transcription.".to_string(),
-        );
+        recommendations
+            .push("Audio chunk quality looks healthy for on-device transcription.".to_string());
     }
 
     AudioQualityReport {
@@ -982,6 +1004,30 @@ mod tests {
     }
 
     #[test]
+    fn vad_pre_roll_preserves_quiet_onset() {
+        let mut vad = VadSegmenter::new(VadConfig {
+            threshold: 0.010,
+            min_speech_frames: 2,
+            max_silence_frames: 2,
+        });
+        let quiet_onset = vec![0.006_f32; FRAME_SIZE];
+        let voiced = vec![0.022_f32; FRAME_SIZE];
+        let silence = vec![0.0_f32; FRAME_SIZE];
+
+        assert!(vad.push_frame(&quiet_onset).is_none());
+        assert!(vad.push_frame(&voiced).is_none());
+        assert!(vad.push_frame(&voiced).is_none());
+        assert!(vad.push_frame(&silence).is_none());
+        let segment = vad
+            .push_frame(&silence)
+            .or_else(|| vad.flush())
+            .expect("segment should include onset");
+
+        assert!(segment.len() >= FRAME_SIZE * 3);
+        assert!(segment[..FRAME_SIZE].iter().all(|sample| *sample >= 0.005));
+    }
+
+    #[test]
     fn capture_options_default_is_phase_one_sane() {
         let options = CaptureOptions::default();
         assert!(options.max_capture_duration >= Duration::from_secs(10));
@@ -1006,7 +1052,7 @@ mod tests {
         };
 
         audio_tx
-            .send(vec![0.08_f32; FRAME_SIZE])
+            .send(vec![0.08_f32; FRAME_SIZE * 3])
             .expect("test frame should be queued");
 
         let started = Instant::now();
@@ -1031,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_preserve_full_capture_keeps_audio_when_vad_is_too_strict() {
+    fn capture_preserve_full_capture_requires_speech_evidence() {
         let service = AudioCaptureService::default();
         let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
         let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
@@ -1048,6 +1094,43 @@ mod tests {
 
         audio_tx
             .send(vec![0.03_f32; FRAME_SIZE * 3])
+            .expect("test frame should be queued");
+        drop(audio_tx);
+
+        let segments = service
+            .collect_segments_from_stream(
+                service.target_sample_rate,
+                1,
+                audio_rx,
+                error_rx,
+                options,
+                || false,
+                || false,
+                |_normalized_chunk, _voiced_chunk| {},
+            )
+            .expect("capture should complete");
+
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn capture_preserve_full_capture_keeps_audio_when_speech_is_detected() {
+        let service = AudioCaptureService::default();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let options = CaptureOptions {
+            vad_config: VadConfig {
+                threshold: 0.04,
+                ..VadConfig::default()
+            },
+            max_capture_duration: Duration::from_millis(200),
+            silence_timeout: Duration::from_millis(40),
+            release_tail: Duration::from_millis(0),
+            preserve_full_capture: true,
+        };
+
+        audio_tx
+            .send(vec![0.06_f32; FRAME_SIZE * 4])
             .expect("test frame should be queued");
         drop(audio_tx);
 
@@ -1098,7 +1181,10 @@ mod tests {
             .collect::<Vec<_>>();
         let report = analyze_captured_segments(&[clean], TARGET_SAMPLE_RATE, 0.014);
 
-        assert!(matches!(report.quality, AudioQualityBand::Good | AudioQualityBand::Fair));
+        assert!(matches!(
+            report.quality,
+            AudioQualityBand::Good | AudioQualityBand::Fair
+        ));
         assert!(report.rms > 0.02);
     }
 }

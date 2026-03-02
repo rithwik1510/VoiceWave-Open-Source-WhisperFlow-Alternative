@@ -58,7 +58,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -222,7 +222,7 @@ fn clamp_vad_threshold(value: f32) -> f32 {
 }
 
 const MIN_MAX_UTTERANCE_MS: u64 = 5_000;
-const MAX_MAX_UTTERANCE_MS: u64 = 30_000;
+const MAX_MAX_UTTERANCE_MS: u64 = 60_000;
 const MIN_RELEASE_TAIL_MS: u64 = 120;
 const MAX_RELEASE_TAIL_MS: u64 = 1_500;
 const RELEASE_WATCHDOG_MS: u64 = 300;
@@ -486,6 +486,35 @@ fn asr_integrity_metrics(raw_transcript: &str, final_transcript: &str) -> (f32, 
     (integrity.clamp(0.0, 100.0), raw_count, final_count)
 }
 
+fn should_reject_low_confidence_transcript_as_no_speech(
+    use_faster_whisper: bool,
+    captured_audio_ms: u64,
+    transcript: &str,
+    fw_no_speech_prob: Option<f32>,
+) -> bool {
+    if !use_faster_whisper {
+        return false;
+    }
+
+    let Some(no_speech_prob) = fw_no_speech_prob else {
+        return false;
+    };
+    let word_count = tokenize_transcript_words(transcript).len();
+    if word_count == 0 {
+        return true;
+    }
+
+    if no_speech_prob >= 0.86 {
+        return true;
+    }
+
+    if captured_audio_ms <= 1_800 && word_count <= 3 && no_speech_prob >= 0.68 {
+        return true;
+    }
+
+    captured_audio_ms <= 1_200 && word_count <= 5 && no_speech_prob >= 0.60
+}
+
 fn build_terminology_hint_from_texts(terms: &[String], limit: usize) -> Option<String> {
     if terms.is_empty() || limit == 0 {
         return None;
@@ -607,27 +636,48 @@ fn play_hotkey_phase_cue(action: &HotkeyAction, phase: &HotkeyPhase) {
     #[cfg(target_os = "windows")]
     {
         let cue = match (action, phase) {
-            (HotkeyAction::PushToTalk, HotkeyPhase::Pressed) => Some(HOTKEY_CUE_PRESS_WAV),
             (HotkeyAction::PushToTalk, HotkeyPhase::Released) => Some(HOTKEY_CUE_RELEASE_WAV),
-            (HotkeyAction::ToggleDictation, HotkeyPhase::Triggered) => Some(HOTKEY_CUE_RELEASE_WAV),
             _ => None,
         };
         if let Some(sound_bytes) = cue {
-            tauri::async_runtime::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || unsafe {
-                    use windows_sys::Win32::Media::Audio::{
-                        PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
-                    };
+            unsafe {
+                use windows_sys::Win32::Media::Audio::{
+                    PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
+                };
 
-                    // SAFETY: `sound_bytes` points to static WAV data for the process lifetime.
-                    PlaySoundA(
-                        sound_bytes.as_ptr(),
-                        std::ptr::null_mut(),
-                        SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
-                    )
-                })
-                .await;
-            });
+                // SAFETY: `sound_bytes` points to static WAV data for the process lifetime.
+                PlaySoundA(
+                    sound_bytes.as_ptr(),
+                    std::ptr::null_mut(),
+                    SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+                );
+            }
+        }
+    }
+}
+
+fn play_hotkey_listening_ready_cue(trigger: DictationStartTrigger) {
+    let _ = trigger;
+    #[cfg(target_os = "windows")]
+    {
+        let cue = match trigger {
+            DictationStartTrigger::PushToTalk => Some(HOTKEY_CUE_PRESS_WAV),
+            DictationStartTrigger::ToggleHotkey => Some(HOTKEY_CUE_RELEASE_WAV),
+            DictationStartTrigger::Manual => None,
+        };
+        if let Some(sound_bytes) = cue {
+            unsafe {
+                use windows_sys::Win32::Media::Audio::{
+                    PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
+                };
+
+                // SAFETY: `sound_bytes` points to static WAV data for the process lifetime.
+                PlaySoundA(
+                    sound_bytes.as_ptr(),
+                    std::ptr::null_mut(),
+                    SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+                );
+            }
         }
     }
 }
@@ -1075,7 +1125,7 @@ impl VoiceWaveController {
         };
 
         let run_result = self
-            .run_dictation_flow(app.clone(), mode, session_id, cancel_token, stop_flag)
+            .run_dictation_flow(app.clone(), mode, session_id, trigger, cancel_token, stop_flag)
             .await;
         {
             let mut token_slot = self.cancel_token.lock().await;
@@ -1590,7 +1640,6 @@ impl VoiceWaveController {
         action: HotkeyAction,
         phase: HotkeyPhase,
     ) -> Result<(), ControllerError> {
-        play_hotkey_phase_cue(&action, &phase);
         let _ = app.emit(
             "voicewave://hotkey",
             HotkeyEvent {
@@ -1599,9 +1648,10 @@ impl VoiceWaveController {
             },
         );
 
-        match (action, phase) {
+        match (&action, &phase) {
             (HotkeyAction::ToggleDictation, HotkeyPhase::Triggered) => {
                 if self.is_dictation_active().await {
+                    play_hotkey_phase_cue(&HotkeyAction::ToggleDictation, &HotkeyPhase::Triggered);
                     self.stop_dictation(app).await;
                     Ok(())
                 } else {
@@ -1633,6 +1683,7 @@ impl VoiceWaveController {
                 }
             }
             (HotkeyAction::PushToTalk, HotkeyPhase::Released) => {
+                play_hotkey_phase_cue(&HotkeyAction::PushToTalk, &HotkeyPhase::Released);
                 let still_pressed = {
                     let manager = self.hotkey_manager.lock().await;
                     manager.is_action_pressed(HotkeyAction::PushToTalk)
@@ -1648,7 +1699,10 @@ impl VoiceWaveController {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => {
+                play_hotkey_phase_cue(&action, &phase);
+                Ok(())
+            }
         }
     }
 
@@ -2395,16 +2449,20 @@ impl VoiceWaveController {
         app: AppHandle,
         mode: DictationMode,
         session_id: u64,
+        trigger: DictationStartTrigger,
         cancel_token: CancellationToken,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<(), ControllerError> {
         let flow_started = Instant::now();
-        self.update_state(
-            &app,
-            VoiceWaveHudState::Listening,
-            Some("Listening for speech...".to_string()),
-        )
-        .await;
+        if mode == DictationMode::Fixture {
+            play_hotkey_listening_ready_cue(trigger);
+            self.update_state(
+                &app,
+                VoiceWaveHudState::Listening,
+                Some("Listening for speech...".to_string()),
+            )
+            .await;
+        }
         self.set_session_state(session_id, DictationLifecycleState::Listening, None, None)
             .await;
 
@@ -2487,13 +2545,19 @@ impl VoiceWaveController {
                 let tx_for_capture = incremental_tx.clone();
                 let app_for_capture = app.clone();
                 let mut last_level_emit = Instant::now();
-
-                let captured = tokio::task::spawn_blocking(move || {
+                let (ready_tx, ready_rx) = oneshot::channel::<()>();
+                let captured_task = tokio::task::spawn_blocking(move || {
+                    let mut ready_tx = Some(ready_tx);
                     audio.capture_segments_from_microphone_with_signals_and_observer(
                         input_device.as_deref(),
                         capture_options,
                         || cancel_for_capture.is_cancelled(),
                         || stop_for_capture.load(Ordering::Relaxed),
+                        move || {
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        },
                         move |normalized_chunk, voiced_chunk| {
                             if let Some(sender) = tx_for_capture.as_ref() {
                                 let _ = sender.send(IncrementalAudioChunk {
@@ -2517,9 +2581,17 @@ impl VoiceWaveController {
                             }
                         },
                     )
-                })
-                .await
-                .map_err(|err| {
+                });
+                if ready_rx.await.is_ok() {
+                    play_hotkey_listening_ready_cue(trigger);
+                    self.update_state(
+                        &app,
+                        VoiceWaveHudState::Listening,
+                        Some("Listening for speech...".to_string()),
+                    )
+                    .await;
+                }
+                let captured = captured_task.await.map_err(|err| {
                     ControllerError::Runtime(format!("audio task join failure: {err}"))
                 })?;
 
@@ -2956,6 +3028,27 @@ impl VoiceWaveController {
                 "Inference finished without final transcript.".to_string(),
             ));
         }
+        if mode == DictationMode::Microphone
+            && should_reject_low_confidence_transcript_as_no_speech(
+                use_faster_whisper,
+                captured_audio_ms,
+                &final_transcript,
+                decode_telemetry.fw_no_speech_prob,
+            )
+        {
+            self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
+                .await;
+            self.update_state(
+                &app,
+                VoiceWaveHudState::Idle,
+                Some(
+                    "No speech detected. Hold push-to-talk while speaking, then release."
+                        .to_string(),
+                ),
+            )
+            .await;
+            return Ok(());
+        }
 
         let post_started = Instant::now();
         let _ = app.emit(
@@ -3344,13 +3437,16 @@ impl VoiceWaveController {
                     }
                     let hint = {
                         let manager = self.dictionary_manager.lock().await;
+                        // Build in ascending priority because hint builder reads terms in reverse:
+                        // pending queue < env terms < approved dictionary terms.
                         let mut terms = manager
-                            .get_terms(None)
+                            .get_queue(Some(12))
                             .into_iter()
                             .map(|row| row.term)
                             .collect::<Vec<_>>();
-                        terms.extend(manager.get_queue(Some(12)).into_iter().map(|row| row.term));
+                        terms.reverse();
                         terms.extend(env_technical_terms());
+                        terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
                         build_terminology_hint_from_texts(&terms, 10)
                     };
                     Ok(InferenceWorker::new_faster_whisper_with_mode_and_hint(
@@ -3605,7 +3701,8 @@ mod tests {
         asr_integrity_metrics, build_terminology_hint_from_texts, clamp_vad_threshold,
         classify_insertion_target, decode_mode_key, derive_correction_candidates,
         floor_decode_mode, insertion_method_key, is_likely_low_quality_input_name, now_utc_ms,
-        push_release_allowed, DictationStartTrigger, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
+        push_release_allowed, should_reject_low_confidence_transcript_as_no_speech,
+        DictationStartTrigger, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
         RECOMMENDED_VAD_THRESHOLD,
     };
     use crate::insertion::InsertionMethod;
@@ -3643,6 +3740,26 @@ mod tests {
         assert!(push_release_allowed(
             DictationStartTrigger::PushToTalk,
             Duration::from_millis(0)
+        ));
+    }
+
+    #[test]
+    fn no_speech_guard_rejects_short_high_no_speech_probability_output() {
+        assert!(should_reject_low_confidence_transcript_as_no_speech(
+            true,
+            1_100,
+            "hello there",
+            Some(0.78),
+        ));
+    }
+
+    #[test]
+    fn no_speech_guard_accepts_low_probability_valid_short_output() {
+        assert!(!should_reject_low_confidence_transcript_as_no_speech(
+            true,
+            1_200,
+            "start recording",
+            Some(0.22),
         ));
     }
 
@@ -3729,6 +3846,26 @@ mod tests {
         let hint = build_terminology_hint_from_texts(&terms, 4).expect("hint should exist");
         assert!(hint.contains("gRPC"));
         assert!(hint.to_ascii_lowercase().contains("kubernetes"));
+    }
+
+    #[test]
+    fn terminology_hint_prioritizes_approved_terms_over_pending_queue() {
+        let mut terms = vec![
+            "AUDIO".to_string(),
+            "BLANK".to_string(),
+            "whisper.cpp".to_string(),
+            "VoiceWave".to_string(),
+        ];
+        // Mimic runtime ordering: pending < env < approved.
+        // The hint helper reads from the end, so approved terms should win first.
+        let hint = build_terminology_hint_from_texts(&terms, 1).expect("hint should exist");
+        assert_eq!(hint, "VoiceWave");
+
+        // Ensure we still pick the next approved-style term before pending placeholders.
+        terms.push("VoiceWave".to_string());
+        let hint_two = build_terminology_hint_from_texts(&terms, 2).expect("hint should exist");
+        assert!(hint_two.contains("VoiceWave"));
+        assert!(hint_two.contains("whisper.cpp"));
     }
 
     #[test]
