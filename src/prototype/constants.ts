@@ -11,9 +11,6 @@ import {
   Zap
 } from "lucide-react";
 
-const COLOR_L = "#38BDF8";
-const COLOR_R = "#A3E635";
-
 const BaseIcon = ({ children, ...props }: any) =>
   React.createElement(
     "svg",
@@ -34,12 +31,12 @@ const WaveLogo = (props: any) =>
   React.createElement(
     BaseIcon,
     props,
-    React.createElement("path", { d: "M2 10v4", stroke: COLOR_L }),
-    React.createElement("path", { d: "M6 7v10", stroke: COLOR_L }),
-    React.createElement("path", { d: "M10 3v18", stroke: COLOR_L }),
-    React.createElement("path", { d: "M14 3v18", stroke: COLOR_R }),
-    React.createElement("path", { d: "M18 7v10", stroke: COLOR_R }),
-    React.createElement("path", { d: "M22 10v4", stroke: COLOR_R })
+    React.createElement("path", { d: "M2 10v4", stroke: "currentColor" }),
+    React.createElement("path", { d: "M6 7v10", stroke: "currentColor" }),
+    React.createElement("path", { d: "M10 3v18", stroke: "currentColor" }),
+    React.createElement("path", { d: "M14 3v18", stroke: "currentColor" }),
+    React.createElement("path", { d: "M18 7v10", stroke: "currentColor" }),
+    React.createElement("path", { d: "M22 10v4", stroke: "currentColor" })
   );
 
 const ONYX_PALETTE = {
@@ -64,10 +61,10 @@ const ONYX_PALETTE = {
   canvasBorder: "border-transparent",
   surfaceBorder: "border-[#E4E4E7]",
   divider: "border-[#D4D4D8]",
-  accentBlue: "#38BDF8",
-  accentLime: "#A3E635",
-  accentGradient: "linear-gradient(90deg, #38BDF8 0%, #A3E635 100%)",
-  accentGradientSoft: "linear-gradient(135deg, rgba(56,189,248,0.14) 0%, rgba(163,230,53,0.12) 100%)"
+  accentBlue: "#1B8EFF",
+  accentCyan: "#7ED8FF",
+  accentGradient: "linear-gradient(96deg, #0A2A8C 8%, #1B8EFF 52%, #6FD4FF 84%, #A7E8FF 100%)",
+  accentGradientSoft: "linear-gradient(135deg, rgba(10,42,140,0.1) 8%, rgba(27,142,255,0.16) 54%, rgba(126,216,255,0.2) 82%, rgba(167,232,255,0.18) 100%)"
 };
 
 const SHARED_STRUCTURE = {

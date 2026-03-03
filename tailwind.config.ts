@@ -6,17 +6,17 @@ const config: Config = {
     extend: {
       colors: {
         pine: {
-          50: "#f2f7f5",
-          100: "#dfece6",
-          200: "#c8ddd3",
-          300: "#a4c6b6",
-          500: "#2f6a5b",
-          700: "#214f43",
-          900: "#173c33"
+          50: "#f3f8ff",
+          100: "#e1ecff",
+          200: "#c8dcff",
+          300: "#a6c5ff",
+          500: "#3568b3",
+          700: "#244b83",
+          900: "#132b57"
         }
       },
       boxShadow: {
-        card: "0 10px 32px -18px rgba(47, 106, 91, 0.45)"
+        card: "0 10px 32px -18px rgba(36, 75, 131, 0.45)"
       },
       fontFamily: {
         display: ["\"Fraunces\"", "Georgia", "serif"],

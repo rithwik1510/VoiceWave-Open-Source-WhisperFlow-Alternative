@@ -28,7 +28,7 @@ export interface ThemeConfig {
     surfaceBorder: string;
     divider: string;
     accentBlue: string;
-    accentLime: string;
+    accentCyan: string;
     accentGradient: string;
     accentGradientSoft: string;
   };
