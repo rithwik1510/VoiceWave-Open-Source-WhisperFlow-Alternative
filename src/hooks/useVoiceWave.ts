@@ -103,9 +103,9 @@ import type {
   VoiceWaveSnapshot
 } from "../types/voicewave";
 
-const DEFAULT_MAX_UTTERANCE_MS = 60_000;
+const DEFAULT_MAX_UTTERANCE_MS = 120_000;
 const MIN_MAX_UTTERANCE_MS = 5_000;
-const MAX_MAX_UTTERANCE_MS = 60_000;
+const MAX_MAX_UTTERANCE_MS = 180_000;
 const DEFAULT_RELEASE_TAIL_MS = 350;
 const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;

@@ -222,7 +222,8 @@ fn clamp_vad_threshold(value: f32) -> f32 {
 }
 
 const MIN_MAX_UTTERANCE_MS: u64 = 5_000;
-const MAX_MAX_UTTERANCE_MS: u64 = 60_000;
+const MAX_MAX_UTTERANCE_MS: u64 = 180_000;
+const LEGACY_MAX_UTTERANCE_MS: u64 = 30_000;
 const MIN_RELEASE_TAIL_MS: u64 = 120;
 const MAX_RELEASE_TAIL_MS: u64 = 1_500;
 const RELEASE_WATCHDOG_MS: u64 = 300;
@@ -834,6 +835,11 @@ impl VoiceWaveController {
         let audio = AudioCaptureService::default();
         let settings_store = SettingsStore::new()?;
         let mut settings = settings_store.load()?;
+        let mut settings_changed = false;
+        if settings.max_utterance_ms == LEGACY_MAX_UTTERANCE_MS {
+            settings.max_utterance_ms = VoiceWaveSettings::default().max_utterance_ms;
+            settings_changed = true;
+        }
         let clamped_vad = clamp_vad_threshold(settings.vad_threshold);
         let clamped_max_utterance = clamp_max_utterance_ms(settings.max_utterance_ms);
         let clamped_release_tail = clamp_release_tail_ms(settings.release_tail_ms);
@@ -842,7 +848,6 @@ impl VoiceWaveController {
         let previous_push_to_talk_hotkey = settings.push_to_talk_hotkey.clone();
         normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
-        let mut settings_changed = false;
         if (clamped_vad - settings.vad_threshold).abs() > f32::EPSILON {
             settings.vad_threshold = clamped_vad;
             settings_changed = true;

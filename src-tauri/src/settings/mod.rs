@@ -153,7 +153,7 @@ impl Default for VoiceWaveSettings {
             active_model: "fw-small.en".to_string(),
             show_floating_hud: true,
             vad_threshold: 0.014,
-            max_utterance_ms: 60_000,
+            max_utterance_ms: 120_000,
             release_tail_ms: 350,
             decode_mode: DecodeMode::Balanced,
             diagnostics_opt_in: false,
