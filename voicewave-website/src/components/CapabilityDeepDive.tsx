@@ -3,6 +3,141 @@ import { Bot, Gauge, Server } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import VoiceWaveLogo from './VoiceWaveLogo'
 
+type FlowPhase = 'idle' | 'capture' | 'decode' | 'inserted'
+
+function PrivacyFlowDiagram() {
+  const [animKey, setAnimKey] = useState(0)
+  const [phase, setPhase] = useState<FlowPhase>('idle')
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    const sequence: Array<[FlowPhase, number]> = [
+      ['capture', 900],
+      ['decode', 1000],
+      ['inserted', 1400],
+      ['idle', 1300],
+    ]
+    let step = 0
+    const next = () => {
+      const [ph, delay] = sequence[step % sequence.length]
+      setPhase(ph)
+      if (ph === 'idle') setAnimKey(k => k + 1)
+      step++
+      timerRef.current = setTimeout(next, delay)
+    }
+    timerRef.current = setTimeout(next, 800)
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  const micActive = phase === 'capture' || phase === 'decode' || phase === 'inserted'
+  const chipActive = phase === 'decode' || phase === 'inserted'
+  const textActive = phase === 'inserted'
+
+  return (
+    <div className="relative w-full overflow-hidden rounded-2xl border border-[#1e3557] bg-[#080f1e] p-4">
+      <style>{`
+        @keyframes pvd-flow-mic {
+          0% { stroke-dashoffset: 112; }
+          100% { stroke-dashoffset: 0; }
+        }
+        @keyframes pvd-flow-chip {
+          0% { stroke-dashoffset: 90; }
+          100% { stroke-dashoffset: 0; }
+        }
+      `}</style>
+
+      <svg viewBox="0 0 300 100" className="w-full" aria-hidden="true">
+        {/* Cloud (always visible, always blocked) */}
+        <ellipse cx="150" cy="14" rx="15" ry="8" fill="#0a1528" stroke="#1c3356" strokeWidth="1" />
+        <ellipse cx="139" cy="18" rx="9" ry="7" fill="#0a1528" stroke="#1c3356" strokeWidth="1" />
+        <ellipse cx="161" cy="18" rx="9" ry="7" fill="#0a1528" stroke="#1c3356" strokeWidth="1" />
+        <text x="150" y="20" textAnchor="middle" fill="#233d64" fontSize="5" fontFamily="monospace" letterSpacing="0.5">CLOUD</text>
+
+        {/* Red X over cloud */}
+        <line x1="139" y1="8" x2="161" y2="26" stroke="#ef4444" strokeWidth="1.8" strokeLinecap="round" />
+        <line x1="161" y1="8" x2="139" y2="26" stroke="#ef4444" strokeWidth="1.8" strokeLinecap="round" />
+
+        {/* Dotted blocked path chip→cloud */}
+        <line x1="150" y1="42" x2="150" y2="27" stroke="#1c3356" strokeWidth="1.5" strokeDasharray="2.5 2" />
+
+        {/* MIC icon */}
+        <rect x="23" y="38" width="16" height="20" rx="8" fill="#0a1528"
+          stroke={micActive ? '#7ed8ff' : '#1c3356'} strokeWidth={micActive ? 1.8 : 1.2}
+          style={{ transition: 'stroke 400ms ease' }}
+        />
+        <line x1="31" y1="58" x2="31" y2="65" stroke={micActive ? '#7ed8ff' : '#1c3356'} strokeWidth="1.5" style={{ transition: 'stroke 400ms ease' }} />
+        <line x1="24" y1="65" x2="38" y2="65" stroke={micActive ? '#7ed8ff' : '#1c3356'} strokeWidth="1.5" style={{ transition: 'stroke 400ms ease' }} />
+
+        {/* CHIP icon */}
+        <rect x="138" y="38" width="24" height="24" rx="5" fill="#0a1528"
+          stroke={chipActive ? '#7ed8ff' : '#1c3356'} strokeWidth={chipActive ? 1.8 : 1.2}
+          style={{ transition: 'stroke 400ms ease' }}
+        />
+        <rect x="143" y="43" width="4" height="4" rx="1" fill={chipActive ? '#7ed8ff' : '#1c3356'} style={{ transition: 'fill 400ms ease' }} />
+        <rect x="151" y="43" width="4" height="4" rx="1" fill={chipActive ? '#7ed8ff' : '#1c3356'} style={{ transition: 'fill 400ms ease' }} />
+        <rect x="143" y="51" width="4" height="4" rx="1" fill={chipActive ? '#7ed8ff' : '#1c3356'} style={{ transition: 'fill 400ms ease' }} />
+        <rect x="151" y="51" width="4" height="4" rx="1" fill={chipActive ? '#7ed8ff' : '#1c3356'} style={{ transition: 'fill 400ms ease' }} />
+
+        {/* TEXT OUTPUT box */}
+        <rect x="248" y="40" width="34" height="20" rx="5" fill="#0a1528"
+          stroke={textActive ? '#bef264' : '#1c3356'} strokeWidth={textActive ? 1.8 : 1.2}
+          style={{ transition: 'stroke 400ms ease' }}
+        />
+        <line x1="253" y1="47" x2="278" y2="47" stroke={textActive ? '#bef264' : '#1c3356'} strokeWidth="1.5" strokeLinecap="round" style={{ transition: 'stroke 300ms ease' }} />
+        <line x1="253" y1="53" x2="271" y2="53" stroke={textActive ? '#9dd87a' : '#1c3356'} strokeWidth="1.5" strokeLinecap="round" style={{ transition: 'stroke 300ms 100ms ease' }} />
+
+        {/* Rail lines */}
+        <line x1="39" y1="50" x2="138" y2="50" stroke="#1c3356" strokeWidth="1.5" />
+        <line x1="162" y1="50" x2="248" y2="50" stroke="#1c3356" strokeWidth="1.5" />
+
+        {/* Animated flow: mic → chip */}
+        {phase === 'capture' && (
+          <line
+            key={`mic-${animKey}`}
+            x1="39" y1="50" x2="138" y2="50"
+            stroke="#7ed8ff" strokeWidth="2" strokeLinecap="round"
+            strokeDasharray="112"
+            style={{ animation: 'pvd-flow-mic 0.85s ease-out forwards' }}
+          />
+        )}
+        {/* Keep mic→chip lit during later phases */}
+        {(phase === 'decode' || phase === 'inserted') && (
+          <line x1="39" y1="50" x2="138" y2="50" stroke="#7ed8ff" strokeWidth="2" strokeLinecap="round" strokeOpacity="0.7" />
+        )}
+
+        {/* Animated flow: chip → text */}
+        {phase === 'decode' && (
+          <line
+            key={`chip-${animKey}`}
+            x1="162" y1="50" x2="248" y2="50"
+            stroke="#bef264" strokeWidth="2" strokeLinecap="round"
+            strokeDasharray="90"
+            style={{ animation: 'pvd-flow-chip 0.85s ease-out forwards' }}
+          />
+        )}
+        {phase === 'inserted' && (
+          <line x1="162" y1="50" x2="248" y2="50" stroke="#bef264" strokeWidth="2" strokeLinecap="round" strokeOpacity="0.8" />
+        )}
+
+        {/* Labels */}
+        <text x="31" y="80" textAnchor="middle" fill="#2d4d76" fontSize="5.5" fontFamily="monospace" letterSpacing="0.5">MIC</text>
+        <text x="150" y="80" textAnchor="middle" fill="#2d4d76" fontSize="5.5" fontFamily="monospace" letterSpacing="0.5">WHISPER</text>
+        <text x="265" y="72" textAnchor="middle" fill="#2d4d76" fontSize="5.5" fontFamily="monospace" letterSpacing="0.5">APP</text>
+      </svg>
+
+      <p className="mt-1 text-center font-mono text-[9px] uppercase tracking-[0.15em] text-[#2d4d76]">
+        {phase === 'idle' || phase === 'capture'
+          ? 'audio path \u2014 local only'
+          : phase === 'decode'
+            ? 'decoding on-device\u2026'
+            : 'text inserted \u2014 no cloud'}
+      </p>
+    </div>
+  )
+}
+
 const LATENCY_BAR_LEVELS = Array.from({ length: 40 }, (_, i) => {
   if (i > 15 && i < 25) {
     return `${82 + (i % 5) * 4}%`
@@ -105,13 +240,13 @@ function DeepDiveD() {
           </div>
         </div>
 
-        <div className="lg:col-span-7 flex flex-col gap-10 sm:gap-16 mt-8 lg:mt-0 relative pb-24 sm:pb-36 perspective-1000">
+        <div className="lg:col-span-7 flex flex-col gap-10 sm:gap-16 mt-8 lg:mt-0 relative pb-24 sm:pb-36">
           <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: '-100px' }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-            className="group lg:sticky lg:top-32 z-10 w-full bg-[#FFFFFF]/90 backdrop-blur-xl vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-10px_40px_-10px_rgba(0,0,0,0.05)] border border-[#d8e5f4] transform-gpu transition-all duration-300 hover:-translate-y-0.5 hover:border-[#1b8eff]/58 hover:shadow-[0_-10px_48px_-10px_rgba(27,142,255,0.25)]"
+            initial={{ opacity: 0 }}
+            whileInView={{ opacity: 1 }}
+            viewport={{ once: true, margin: '-80px' }}
+            transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+            className="group lg:sticky lg:top-32 z-10 w-full bg-[#FFFFFF] vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-10px_40px_-10px_rgba(0,0,0,0.05)] border border-[#d8e5f4] transform-gpu transition-[border-color,box-shadow] duration-300 hover:border-[#1b8eff]/58 hover:shadow-[0_-10px_48px_-10px_rgba(27,142,255,0.25)]"
           >
             <div className="flex justify-between items-start mb-8 sm:mb-12">
               <div className="w-14 h-14 sm:w-16 sm:h-16 vw-radius-tab bg-[#FAFCFF] border border-[#d8e5f5] flex items-center justify-center shadow-inner transition-colors duration-300 group-hover:border-[#7ed8ff] group-hover:bg-[#ebf6ff]">
@@ -136,11 +271,11 @@ function DeepDiveD() {
           </motion.div>
 
           <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: '-100px' }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-            className="group lg:sticky lg:top-40 z-20 w-full bg-[#f7fbff]/95 backdrop-blur-xl vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-20px_40px_-10px_rgba(0,0,0,0.08)] border border-[#d4e2f2] transform-gpu transition-all duration-300 hover:-translate-y-0.5 hover:border-[#1b8eff]/58 hover:shadow-[0_-20px_52px_-12px_rgba(27,142,255,0.26)]"
+            initial={{ opacity: 0 }}
+            whileInView={{ opacity: 1 }}
+            viewport={{ once: true, margin: '-80px' }}
+            transition={{ duration: 0.55, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
+            className="group lg:sticky lg:top-40 z-20 w-full bg-[#f7fbff] vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-20px_40px_-10px_rgba(0,0,0,0.08)] border border-[#d4e2f2] transform-gpu transition-[border-color,box-shadow] duration-300 hover:border-[#1b8eff]/58 hover:shadow-[0_-20px_52px_-12px_rgba(27,142,255,0.26)]"
           >
             <div className="flex justify-between items-start mb-8 sm:mb-12">
               <div className="w-14 h-14 sm:w-16 sm:h-16 vw-radius-tab bg-[#FFFFFF] border border-[#d8e5f5] flex items-center justify-center shadow-sm transition-colors duration-300 group-hover:border-[#7ed8ff] group-hover:bg-[#ebf6ff]">
@@ -159,11 +294,11 @@ function DeepDiveD() {
           </motion.div>
 
           <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: '-100px' }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-            className="group lg:sticky lg:top-48 z-30 w-full bg-[#09090B] vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-30px_60px_-10px_rgba(0,0,0,0.2)] border border-[#20345f] transform-gpu text-[#FAFAFA] transition-all duration-300 hover:-translate-y-0.5 hover:border-[#3f8dff] hover:shadow-[0_-30px_72px_-12px_rgba(27,142,255,0.32)]"
+            initial={{ opacity: 0 }}
+            whileInView={{ opacity: 1 }}
+            viewport={{ once: true, margin: '-80px' }}
+            transition={{ duration: 0.55, delay: 0.16, ease: [0.16, 1, 0.3, 1] }}
+            className="group lg:sticky lg:top-48 z-30 w-full bg-[#09090B] vw-radius-shell p-6 sm:p-8 lg:p-10 shadow-[0_-30px_60px_-10px_rgba(0,0,0,0.2)] border border-[#20345f] transform-gpu text-[#FAFAFA] transition-[border-color,box-shadow] duration-300 hover:border-[#3f8dff] hover:shadow-[0_-30px_72px_-12px_rgba(27,142,255,0.32)]"
           >
             <div className="flex justify-between items-start mb-8 sm:mb-12">
               <div className="w-14 h-14 sm:w-16 sm:h-16 vw-radius-tab bg-[#111a2b] border border-[#223b6f] flex items-center justify-center shadow-inner transition-colors duration-300 group-hover:border-[#7ed8ff]/55 group-hover:bg-[#0f2448]">
@@ -176,12 +311,7 @@ function DeepDiveD() {
               Voice stays on-device in v1. Optional diagnostics export is user-triggered.
             </p>
 
-            <div className="bg-[#111a2b] vw-radius-tab p-4 font-mono text-xs text-[#FAFAFA] border border-[#223b6f] shadow-inner relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-[#bef264]" />
-              <p className="opacity-60 mb-1">&gt; Cloud transcription path: disabled</p>
-              <p className="opacity-60 mb-1">&gt; Audio export: none by default</p>
-              <p className="text-[#bef264] mt-2">&gt; STATUS: LOCAL MODE</p>
-            </div>
+            <PrivacyFlowDiagram />
           </motion.div>
         </div>
       </div>

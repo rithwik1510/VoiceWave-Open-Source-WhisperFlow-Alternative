@@ -227,7 +227,7 @@ export default function ScrollDemo() {
             </span>
           </div>
 
-          <div className="h-[860px] overflow-hidden">
+          <div style={{ zoom: 0.8, width: 'calc(100% / 0.8)' }}>
             <Layout
               theme={THEME}
               activeNav={activeNav}
