@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import Header from './components/Header'
 import Hero from './components/Hero'
+import HoldToTalk from './components/HoldToTalk'
 import WhereItWorks from './components/WhereItWorks'
 import ComingSoonDots from './components/ComingSoonDots'
 import ScrollDemo from './components/ScrollDemo'
@@ -20,6 +21,7 @@ function App() {
       root.style.setProperty('--site-drift-y', '0px')
       root.style.setProperty('--site-grid-shift-x', '0px')
       root.style.setProperty('--site-grid-shift-y', '0px')
+      root.style.setProperty('--scroll-progress', '0')
     }
 
     if (prefersReducedMotion) {
@@ -51,6 +53,7 @@ function App() {
       root.style.setProperty('--site-drift-y', `${driftY.toFixed(2)}px`)
       root.style.setProperty('--site-grid-shift-x', `${gridX.toFixed(2)}px`)
       root.style.setProperty('--site-grid-shift-y', `${gridY.toFixed(2)}px`)
+      root.style.setProperty('--scroll-progress', progress.toFixed(4))
     }
 
     const onScroll = () => {
@@ -76,6 +79,7 @@ function App() {
 
   return (
     <div className="site-root min-h-screen w-full selection:bg-[#bfe8ff]/45 selection:text-[#071126]">
+      <div className="waveform-scroll-bar" aria-hidden />
       <FloatingNav />
 
       <section className="zone-a" data-dotted-ready="false" data-dotted-quality="desktop_high">
@@ -87,8 +91,8 @@ function App() {
         <WhereItWorks />
       </section>
 
-      <section className="coming-soon-band">
-        <ComingSoonDots />
+      <section className="bg-[#f7fbff]">
+        <HoldToTalk />
       </section>
 
       <section className="bg-[#f7fbff] py-12 sm:py-16">
@@ -98,6 +102,13 @@ function App() {
       <section className="bg-[#f7fbff] py-10 sm:py-14">
         <CapabilityDeepDive />
         <Features />
+      </section>
+
+      <section className="coming-soon-band">
+        <ComingSoonDots />
+      </section>
+
+      <section className="bg-[#f7fbff] pb-10 sm:pb-14">
         <TrustProof />
       </section>
 
