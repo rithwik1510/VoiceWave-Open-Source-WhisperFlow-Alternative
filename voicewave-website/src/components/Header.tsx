@@ -24,7 +24,7 @@ export default function Header() {
             <span className="font-display text-xl leading-none tracking-tight">VoiceWave</span>
           </a>
 
-          <nav className="hidden items-center gap-8 md:flex">
+          <nav className="hidden items-center gap-4 sm:flex sm:gap-6 md:gap-8">
             {topLinks.map((link) => (
               <a
                 key={link.href}

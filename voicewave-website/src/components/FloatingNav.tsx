@@ -68,7 +68,7 @@ export default function FloatingNav() {
                 : { type: 'spring', stiffness: 360, damping: 32, mass: 0.8 }
             }
             style={{ willChange: 'transform, opacity' }}
-            className="floating-nav-glass pointer-events-auto flex w-[min(690px,calc(100%_-_1.25rem))] items-center gap-1.5 rounded-full px-2 py-2 sm:gap-2 sm:px-2.5"
+            className="floating-nav-glass pointer-events-auto flex w-[min(690px,calc(100%_-_2rem))] items-center gap-1.5 rounded-full px-2 py-2 sm:gap-2 sm:px-2.5"
             onMouseLeave={() => setHoveredHref(null)}
             aria-label="Floating site navigation"
           >
@@ -81,7 +81,7 @@ export default function FloatingNav() {
                   onMouseEnter={() => setHoveredHref(link.href)}
                   onFocus={() => setHoveredHref(link.href)}
                   data-current={targetHref === link.href ? 'true' : 'false'}
-                  className="floating-nav-link inline-flex min-w-0 items-center justify-center rounded-full px-2 py-2.5 text-center font-mono text-[10px] font-semibold uppercase tracking-[0.11em] sm:text-xs"
+                  className="floating-nav-link inline-flex min-w-0 items-center justify-center rounded-full px-2 py-3 text-center font-mono text-[11px] font-semibold uppercase tracking-[0.11em] sm:text-xs"
                 >
                   {targetHref === link.href ? (
                     <motion.span
@@ -106,7 +106,7 @@ export default function FloatingNav() {
                 setActiveHref('#home')
                 window.scrollTo({ top: 0, behavior: 'smooth' })
               }}
-              className="floating-nav-top-btn inline-flex items-center gap-1 rounded-full px-3 py-2.5 font-mono text-[10px] font-bold uppercase tracking-[0.12em] sm:px-3.5 sm:text-xs"
+              className="floating-nav-top-btn inline-flex items-center gap-1 rounded-full px-3 py-3 font-mono text-[11px] font-bold uppercase tracking-[0.12em] sm:px-3.5 sm:text-xs"
             >
               Top
               <ArrowUp className="h-3.5 w-3.5" />
