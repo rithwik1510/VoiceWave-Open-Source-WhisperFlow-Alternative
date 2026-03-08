@@ -116,7 +116,7 @@ export default function Hero() {
     <section
       id="home"
       ref={heroSectionRef}
-      className="relative min-h-[96svh] overflow-hidden pb-20 pt-4 sm:pt-8 md:min-h-[102svh] md:pb-28 md:pt-10"
+      className="relative min-h-[92svh] overflow-hidden pb-16 pt-4 sm:min-h-[96svh] sm:pb-20 sm:pt-8 md:min-h-[102svh] md:pb-28 md:pt-10"
     >
       <div className="zone-hero-dotted-layer">
         <HeroDottedField theme="dark" safeZone={safeZone ?? undefined} topCutoffPx={topCutoffPx} />
@@ -143,7 +143,7 @@ export default function Hero() {
             </AnimatePresence>
           </div>
 
-          <ul className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[8px] font-semibold uppercase tracking-[0.12em] text-[#dff0ff] sm:text-[9px]">
+          <ul className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#dff0ff] sm:text-xs">
             {heroPoints.map((point) => (
               <li key={point} className="inline-flex items-center gap-1.5">
                 <span className="inline-block h-1 w-1 rounded-full bg-[#7ed8ff]" />
