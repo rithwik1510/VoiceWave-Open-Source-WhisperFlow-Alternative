@@ -1,0 +1,10 @@
+{
+  "date": "2026-03-08",
+  "owner": "VoiceWave Core Team",
+  "window": "2026-03-01 to 2026-03-08",
+  "insertionSuccessPercent": 98.6,
+  "correctionRatePercent": 11.4,
+  "crashFreeSessionsPercent": 99.7,
+  "p95EndToEndLatencyMs": 5720,
+  "ttfsdMinutes": 2.4
+}

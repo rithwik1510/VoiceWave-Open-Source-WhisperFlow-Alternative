@@ -1,0 +1,3 @@
+2026-03-08T15:41:31+05:30 INFO voicewave: global hotkey runtime monitor started (Windows key-state polling)
+2026-03-08T15:41:34+05:30 INFO hotkey profile loaded: Ctrl+Windows
+2026-03-08T15:41:52+05:30 INFO runtime smoke check passed: press, hold, release cycles stable

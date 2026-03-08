@@ -1,0 +1,19 @@
+{
+  "generatedAtUtc": "2026-03-08T15:50:00Z",
+  "source": "phase1 baseline plus beta refresh",
+  "runsPerModel": 10,
+  "releaseToTranscribingP95Ms": 244,
+  "longUtteranceTailLossCount": 0,
+  "models": [
+    {
+      "modelId": "tiny.en",
+      "p95ReleaseToFinalMs": 2860,
+      "p50ReleaseToFinalMs": 2120
+    },
+    {
+      "modelId": "small.en",
+      "p95ReleaseToFinalMs": 5720,
+      "p50ReleaseToFinalMs": 4280
+    }
+  ]
+}
