@@ -23,7 +23,7 @@ All primary download CTAs are controlled by one environment variable:
 
 Example:
 
-`VITE_WINDOWS_DOWNLOAD_URL=https://github.com/rithwik1510/VoiceWave/releases/latest/download/VoiceWave.Local.Core_0.1.2_x64-setup.exe`
+`VITE_WINDOWS_DOWNLOAD_URL=https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest/download/VoiceWave.Local.Core_0.2.0_x64-setup.exe`
 
 See `voicewave-website/.env.example`.
 

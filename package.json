@@ -1,7 +1,7 @@
 {
   "name": "voicewave-phase1",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -39,6 +39,7 @@
     "phaseB:fw:live": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-live-fw-report.ps1",
     "faster-whisper:setup:cpu": "powershell -ExecutionPolicy Bypass -File ./scripts/faster_whisper/setup-faster-whisper-cpu.ps1",
     "faster-whisper:reset": "powershell -ExecutionPolicy Bypass -File ./scripts/faster_whisper/reset-faster-whisper-runtime.ps1",
+    "tauri:check": "powershell -ExecutionPolicy Bypass -File ./scripts/tauri/run-cargo-check-windows.ps1 -NoDefaultFeatures",
     "tauri:dev": "powershell -ExecutionPolicy Bypass -File ./scripts/tauri/run-tauri-dev-windows.ps1",
     "tauri:build": "powershell -ExecutionPolicy Bypass -File ./scripts/tauri/run-tauri-build-windows.ps1"
   },
