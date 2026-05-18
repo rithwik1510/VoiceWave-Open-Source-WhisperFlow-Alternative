@@ -2710,6 +2710,13 @@ impl VoiceWaveController {
                     silence_timeout: Duration::from_millis(silence_timeout_ms),
                     release_tail: Duration::from_millis(release_tail_ms),
                     preserve_full_capture: use_faster_whisper,
+                    // Adaptive VAD warmup: for the first 2 seconds, use a
+                    // lower threshold (60% of normal) so quiet speakers and
+                    // mics at distance don't get missed before the system
+                    // can detect their voice. After warmup, the full
+                    // threshold applies to prevent ambient noise triggers.
+                    vad_warmup_threshold: Some(clamp_vad_threshold(threshold * 0.6)),
+                    vad_warmup_duration: Duration::from_millis(2_000),
                 };
                 let tx_for_capture = incremental_tx.clone();
                 let app_for_capture = app.clone();
@@ -2799,13 +2806,25 @@ impl VoiceWaveController {
                             None,
                         )
                         .await;
+                        let device_label = input_device
+                            .as_deref()
+                            .unwrap_or("system default");
+                        let warmup_peak_msg = if threshold > 0.0 {
+                            format!(
+                                " (warmup threshold {:.4}, full threshold {:.4})",
+                                clamp_vad_threshold(threshold * 0.6),
+                                threshold
+                            )
+                        } else {
+                            String::new()
+                        };
                         self.update_state(
                             &app,
                             VoiceWaveHudState::Idle,
-                            Some(
-                                "No speech detected. Hold push-to-talk and speak, then release to transcribe."
-                                    .to_string(),
-                            ),
+                            Some(format!(
+                                "No speech on '{}'{}. Hold push-to-talk and speak. Try lowering VAD threshold in Settings if this persists.",
+                                device_label, warmup_peak_msg
+                            )),
                         )
                         .await;
                         return Ok(());
@@ -3242,6 +3261,7 @@ impl VoiceWaveController {
             text: final_transcript.clone(),
             target_app: None,
             prefer_clipboard: settings.prefer_clipboard_fallback,
+            force_clipboard_only: false,
         };
         let insert_started = Instant::now();
         let (insertion_success, insertion_method, insertion_target_class) =

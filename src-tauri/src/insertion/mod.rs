@@ -19,6 +19,7 @@ pub struct InsertTextRequest {
     pub text: String,
     pub target_app: Option<String>,
     pub prefer_clipboard: bool,
+    pub force_clipboard_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,7 +143,9 @@ impl InsertionEngine {
         let prefer_clipboard =
             request.prefer_clipboard || should_auto_prefer_clipboard(&request.text, target_ref);
 
-        let method_order = if prefer_clipboard {
+        let method_order = if request.force_clipboard_only {
+            vec![InsertionMethod::ClipboardOnly]
+        } else if prefer_clipboard {
             vec![
                 InsertionMethod::ClipboardPaste,
                 InsertionMethod::ClipboardOnly,
@@ -305,6 +308,51 @@ fn is_clipboard_preferred_target(app: &str) -> bool {
         || normalized.contains("notion")
 }
 
+/// Returns true if the foreground window title suggests the target is a
+/// terminal/console application where SendInput keystroke injection is
+/// unreliable (ConPTY, raw stdin mode, etc.). When true, the insertion
+/// engine should skip Direct and ClipboardPaste and go straight to
+/// ClipboardOnly.
+pub fn is_terminal_target(window_title: Option<&str>) -> bool {
+    let Some(title) = window_title else {
+        return false;
+    };
+    let lowered = title.to_ascii_lowercase();
+    // Match on window title fragments that identify terminal emulators
+    // and CLI tools running inside them. Keep this list focused on actual
+    // terminals — false positives mean unnecessary clipboard-only fallback.
+    const TERMINAL_TITLE_FRAGMENTS: &[&str] = &[
+        // Windows Terminal
+        "windows terminal",
+        // PowerShell (standalone or in WT tabs)
+        "windows powershell",
+        "powershell",
+        "pwsh",
+        // Command Prompt
+        "command prompt",
+        "cmd.exe",
+        // ConHost (legacy console host)
+        "conhost",
+        // Third-party terminals
+        "alacritty",
+        "wezterm",
+        "kitty",
+        // Claude Code CLI (user's reported target)
+        "claude code",
+        "claude-code",
+        // OpenCode / Codex CLI agents
+        "opencode",
+        "codex",
+        // Cursor terminal
+        "cursor terminal",
+        // Generic CLI indicators
+        "administrator: ",
+    ];
+    TERMINAL_TITLE_FRAGMENTS
+        .iter()
+        .any(|fragment| lowered.contains(fragment))
+}
+
 // Clipboard restore was previously scheduled by clipboard_paste to put the
 // user's prior clipboard contents back ~90-210 ms after dictation pasted.
 // Two user-visible problems came from that design:
@@ -416,6 +464,16 @@ impl InsertionBackend for PlatformInsertionBackend {
                     current_title
                 ));
             }
+            // SendInput keystroke injection is unreliable for terminal
+            // applications (ConPTY translation, raw stdin mode). Route
+            // through clipboard instead.
+            if is_terminal_target(current_title.as_deref()) {
+                return Err(format!(
+                    "Terminal target detected ({:?}); \
+                     falling back to clipboard.",
+                    current_title
+                ));
+            }
             send_unicode_text(text)?;
             return Ok(BackendInsertSuccess {
                 message: None,
@@ -443,6 +501,14 @@ impl InsertionBackend for PlatformInsertionBackend {
             // caused either stale content to be pasted into slow targets
             // or the wrong text on repeat Ctrl+V. Dictation text stays in
             // the clipboard.
+            let current_title = self.detect_target_app();
+            if is_terminal_target(current_title.as_deref()) {
+                return Err(format!(
+                    "Terminal target detected ({:?}); \
+                     falling back to clipboard-only.",
+                    current_title
+                ));
+            }
             let mut clipboard =
                 arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
             clipboard
@@ -859,6 +925,7 @@ mod tests {
                 text: "hello voicewave".to_string(),
                 target_app: Some("Notepad".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -879,6 +946,7 @@ mod tests {
                 text: "test".to_string(),
                 target_app: Some("VS Code".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("fallback should work");
         assert!(result.success);
@@ -894,6 +962,7 @@ mod tests {
                 text: "short text".to_string(),
                 target_app: Some("Visual Studio Code".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -909,6 +978,7 @@ mod tests {
                 text: "short text".to_string(),
                 target_app: Some("Google AI Studio - Google Chrome".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -924,6 +994,7 @@ mod tests {
                 text: "hello".to_string(),
                 target_app: None,
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -940,6 +1011,7 @@ mod tests {
                 text: long_text.to_string(),
                 target_app: Some("Notepad".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -973,6 +1045,7 @@ mod tests {
                 text: "test".to_string(),
                 target_app: Some("Cursor".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("history fallback should still return result");
         assert!(!result.success);
@@ -991,6 +1064,7 @@ mod tests {
                 text: "test".to_string(),
                 target_app: Some("Cursor".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("history fallback should still return result");
         assert!(!result.success);
@@ -1009,6 +1083,7 @@ mod tests {
             text: "hello".to_string(),
             target_app: Some("Notepad".to_string()),
             prefer_clipboard: false,
+                force_clipboard_only: false,
         });
 
         let first = engine.undo_last();
@@ -1025,6 +1100,7 @@ mod tests {
             text: "hello".to_string(),
             target_app: Some("Notepad".to_string()),
             prefer_clipboard: false,
+                force_clipboard_only: false,
         });
 
         let result = engine.undo_last();
@@ -1062,6 +1138,7 @@ mod tests {
                         text: format!("matrix run {idx} for {app}"),
                         target_app: Some(app.to_string()),
                         prefer_clipboard: false,
+                force_clipboard_only: false,
                     })
                     .expect("insertion should return a deterministic result");
                 if result.success {
@@ -1090,6 +1167,7 @@ mod tests {
                 text: "chaos run focus changed".to_string(),
                 target_app: Some("Chrome".to_string()),
                 prefer_clipboard: false,
+                force_clipboard_only: false,
             })
             .expect("failure should be represented as history fallback");
         assert!(!failed.success);
@@ -1099,5 +1177,137 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].method, InsertionMethod::HistoryFallback);
         assert!(history[0].preview.contains("chaos run"));
+    }
+
+    // --- Terminal detection tests ---
+
+    #[test]
+    fn terminal_detection_matches_windows_terminal() {
+        assert!(is_terminal_target(Some("Windows Terminal")));
+        assert!(is_terminal_target(Some("Administrator: Windows Terminal")));
+    }
+
+    #[test]
+    fn terminal_detection_matches_powershell_variants() {
+        assert!(is_terminal_target(Some("Windows PowerShell")));
+        assert!(is_terminal_target(Some("PowerShell 7 (x64)")));
+        assert!(is_terminal_target(Some("pwsh.exe")));
+    }
+
+    #[test]
+    fn terminal_detection_matches_cmd() {
+        assert!(is_terminal_target(Some("Command Prompt")));
+        assert!(is_terminal_target(Some("C:\\Windows\\system32\\cmd.exe")));
+        assert!(is_terminal_target(Some("Administrator: Command Prompt")));
+    }
+
+    #[test]
+    fn terminal_detection_matches_claude_code() {
+        assert!(is_terminal_target(Some("Claude Code")));
+        assert!(is_terminal_target(Some("claude-code")));
+    }
+
+    #[test]
+    fn terminal_detection_matches_opencode_codex() {
+        assert!(is_terminal_target(Some("opencode")));
+        assert!(is_terminal_target(Some("codex terminal")));
+    }
+
+    #[test]
+    fn terminal_detection_matches_third_party_terminals() {
+        assert!(is_terminal_target(Some("Alacritty")));
+        assert!(is_terminal_target(Some("wezterm")));
+    }
+
+    #[test]
+    fn terminal_detection_rejects_gui_apps() {
+        assert!(!is_terminal_target(Some("Visual Studio Code")));
+        assert!(!is_terminal_target(Some("Google Chrome")));
+        assert!(!is_terminal_target(Some("Notion")));
+        assert!(!is_terminal_target(Some("Slack")));
+        assert!(!is_terminal_target(Some("Notepad")));
+    }
+
+    #[test]
+    fn terminal_detection_handles_none() {
+        assert!(!is_terminal_target(None));
+    }
+
+    #[test]
+    fn terminal_detection_handles_empty() {
+        assert!(!is_terminal_target(Some("")));
+    }
+
+    // --- force_clipboard_only tests ---
+
+    #[test]
+    fn force_clipboard_only_skips_direct_and_clipboard_paste() {
+        let backend = DeterministicMatrixBackend::new()
+            .with_active_app(Some("Windows Terminal"));
+        let mut engine = InsertionEngine::new(Box::new(backend));
+
+        let result = engine
+            .insert_text(InsertTextRequest {
+                text: "hello from dictation".to_string(),
+                target_app: Some("Windows Terminal".to_string()),
+                prefer_clipboard: false,
+                force_clipboard_only: true,
+            })
+            .expect("insertion should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.method, InsertionMethod::ClipboardOnly);
+    }
+
+    #[test]
+    fn force_clipboard_only_works_for_gui_targets_too() {
+        let backend = DeterministicMatrixBackend::new()
+            .with_active_app(Some("Visual Studio Code"));
+        let mut engine = InsertionEngine::new(Box::new(backend));
+
+        let result = engine
+            .insert_text(InsertTextRequest {
+                text: "hello vs code".to_string(),
+                target_app: Some("Visual Studio Code".to_string()),
+                prefer_clipboard: false,
+                force_clipboard_only: true,
+            })
+            .expect("insertion should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.method, InsertionMethod::ClipboardOnly);
+    }
+
+    #[test]
+    fn force_clipboard_only_still_rejects_empty_text() {
+        let mut engine = InsertionEngine::new(Box::new(DeterministicMatrixBackend::new()));
+
+        let result = engine.insert_text(InsertTextRequest {
+            text: "   ".to_string(),
+            target_app: None,
+            prefer_clipboard: false,
+            force_clipboard_only: true,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn without_force_clipboard_only_gui_uses_direct_insertion() {
+        let backend = DeterministicMatrixBackend::new()
+            .with_active_app(Some("Google Chrome"));
+        let mut engine = InsertionEngine::new(Box::new(backend));
+
+        let result = engine
+            .insert_text(InsertTextRequest {
+                text: "hello chrome".to_string(),
+                target_app: Some("Google Chrome".to_string()),
+                prefer_clipboard: false,
+                force_clipboard_only: false,
+            })
+            .expect("insertion should succeed");
+
+        assert!(result.success);
+        assert_eq!(result.method, InsertionMethod::Direct);
     }
 }

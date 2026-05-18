@@ -144,6 +144,7 @@ pub struct VoiceWaveSettings {
     pub app_profile_overrides: AppProfileOverrides,
     pub code_mode: CodeModeSettings,
     pub pro_post_processing_enabled: bool,
+    pub prefer_clipboard_only_for_terminals: bool,
 }
 
 impl Default for VoiceWaveSettings {
@@ -165,6 +166,7 @@ impl Default for VoiceWaveSettings {
             app_profile_overrides: AppProfileOverrides::default(),
             code_mode: CodeModeSettings::default(),
             pro_post_processing_enabled: false,
+            prefer_clipboard_only_for_terminals: true,
         }
     }
 }
@@ -398,5 +400,40 @@ mod tests {
                 DomainPackId::Productivity
             ]
         );
+    }
+
+    #[test]
+    fn prefer_clipboard_only_for_terminals_defaults_to_true() {
+        let settings = VoiceWaveSettings::default();
+        assert!(settings.prefer_clipboard_only_for_terminals);
+    }
+
+    #[test]
+    fn prefer_clipboard_only_for_terminals_round_trips() {
+        let path = temp_settings_path();
+        let store = SettingsStore::from_path(path.clone());
+        let mut settings = VoiceWaveSettings::default();
+        settings.prefer_clipboard_only_for_terminals = false;
+        store.save(&settings).expect("save should succeed");
+
+        let loaded = store.load().expect("load should succeed");
+        assert!(!loaded.prefer_clipboard_only_for_terminals);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn backward_compat_missing_field_defaults_to_true() {
+        // Old settings JSON without preferClipboardOnlyForTerminals
+        // should deserialize with the default (true).
+        let path = temp_settings_path();
+        let store = SettingsStore::from_path(path.clone());
+        let raw = r#"{"activeModel":"fw-small.en"}"#;
+        std::fs::write(&path, raw).expect("write should succeed");
+
+        let loaded = store.load().expect("load should succeed");
+        assert!(loaded.prefer_clipboard_only_for_terminals);
+
+        let _ = std::fs::remove_file(path);
     }
 }
