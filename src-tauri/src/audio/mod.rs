@@ -73,6 +73,12 @@ pub struct CaptureOptions {
     pub silence_timeout: Duration,
     pub release_tail: Duration,
     pub preserve_full_capture: bool,
+    /// During the first `vad_warmup_duration` of capture, use this lower
+    /// threshold instead of `vad_config.threshold`. Prevents the system
+    /// from bailing out on quiet speakers before they've had a chance to
+    /// produce detectable audio. Set to None to disable warmup.
+    pub vad_warmup_threshold: Option<f32>,
+    pub vad_warmup_duration: Duration,
 }
 
 impl Default for CaptureOptions {
@@ -83,6 +89,8 @@ impl Default for CaptureOptions {
             silence_timeout: Duration::from_millis(750),
             release_tail: Duration::from_millis(0),
             preserve_full_capture: false,
+            vad_warmup_threshold: None,
+            vad_warmup_duration: Duration::from_millis(0),
         }
     }
 }
@@ -378,7 +386,11 @@ impl AudioCaptureService {
                         channels,
                         samples: raw_chunk,
                     });
-                    let chunk_is_voiced = rms(&normalized) >= options.vad_config.threshold;
+                    let effective_threshold = match options.vad_warmup_threshold {
+                        Some(warmup) if started.elapsed() < options.vad_warmup_duration => warmup,
+                        _ => options.vad_config.threshold,
+                    };
+                    let chunk_is_voiced = rms(&normalized) >= effective_threshold;
                     if stop_requested_at.is_some() && chunk_is_voiced {
                         post_release_last_voiced_at = Some(Instant::now());
                     }
@@ -388,7 +400,7 @@ impl AudioCaptureService {
 
                     while normalized_pending.len() >= FRAME_SIZE {
                         let frame: Vec<f32> = normalized_pending.drain(..FRAME_SIZE).collect();
-                        if rms(&frame) >= options.vad_config.threshold {
+                        if rms(&frame) >= effective_threshold {
                             last_voice_at = Some(Instant::now());
                             voiced_frame_count = voiced_frame_count.saturating_add(1);
                             if voiced_frame_count >= options.vad_config.min_speech_frames {
