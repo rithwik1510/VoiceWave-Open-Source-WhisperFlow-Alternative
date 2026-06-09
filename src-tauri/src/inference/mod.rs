@@ -173,6 +173,16 @@ pub fn decode_profile_for_mode(model_id: &str, decode_mode: DecodeMode) -> Model
             thread_cap: 12,
             no_context: false,
         },
+        "fw-large-v3-turbo" => ModelDecodeProfile {
+            partial_delay_ms: 90,
+            strategy: DecodeStrategy::BeamSearch {
+                beam_size: 3,
+                patience: -1.0,
+            },
+            no_speech_thold: 0.45,
+            thread_cap: 12,
+            no_context: false,
+        },
         "wcpp-small.en" => ModelDecodeProfile {
             partial_delay_ms: 70,
             strategy: DecodeStrategy::BeamSearch {
@@ -607,6 +617,11 @@ pub fn faster_whisper_runtime_model_id(model_id: &str) -> Option<&'static str> {
     match model_id {
         "fw-small.en" => Some("small.en"),
         "fw-large-v3" => Some("large-v3"),
+        // faster-whisper >= 1.1 resolves this alias to the CT2 conversion of
+        // OpenAI's pruned large-v3-turbo (near large-v3 accuracy, ~4x faster
+        // decode, ~1.6 GB). Decode latency measured on par with small.en on
+        // CUDA (301 ms vs 302 ms for 12 s of audio, beam 5).
+        "fw-large-v3-turbo" => Some("large-v3-turbo"),
         _ => None,
     }
 }
@@ -645,6 +660,17 @@ pub async fn prefetch_faster_whisper_model(
         runtime_cache_hit: prefetch.runtime_cache_hit,
         cache_hint_path: cache_hint.to_string_lossy().to_string(),
     })
+}
+
+/// Warm the GPU for an imminent decode (dictation just started). No-op if
+/// the GPU did real work in the last few seconds.
+pub async fn warmup_faster_whisper_model(model_id: &str) -> Result<(), InferenceError> {
+    let runtime_model =
+        faster_whisper_runtime_model_id(model_id).ok_or_else(|| InferenceError::DecodeFailed {
+            model_id: model_id.to_string(),
+            reason: "unsupported faster-whisper model id".to_string(),
+        })?;
+    faster_whisper::warmup_model(runtime_model).await
 }
 
 async fn transcribe_with_whisper(
@@ -983,12 +1009,18 @@ fn stronger_decode_mode(mode: DecodeMode) -> Option<DecodeMode> {
 }
 
 fn fast_first_enabled() -> bool {
+    // Opt-in only. Fast-first ran the primary decode at beam=1 greedy for every
+    // short utterance and relied on confidence heuristics to catch bad output,
+    // but greedy decodes are often confidently wrong (avg_logprob passes the
+    // acceptance gate with incorrect words), so most short dictations shipped
+    // the weak decode. Verified 2026-06-12: beam=1 vs beam=5 produce different
+    // transcripts on the same capture, and beam=5 costs ~0.3 s on GPU.
     std::env::var("VOICEWAVE_FW_FAST_FIRST_ENABLED")
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
-            !(normalized == "0" || normalized == "false" || normalized == "off")
+            normalized == "1" || normalized == "true" || normalized == "on"
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn should_use_fast_first_primary(decode_mode: DecodeMode, audio_duration_ms: u64) -> bool {
@@ -1995,9 +2027,12 @@ mod tests {
     }
 
     #[test]
-    fn fw_fast_first_applies_to_balanced_short_utterances() {
-        assert!(should_use_fast_first_primary(DecodeMode::Balanced, 2_200));
-        assert!(should_use_fast_first_primary(DecodeMode::Balanced, 3_200));
+    fn fw_fast_first_is_disabled_by_default() {
+        // Quality regression guard: the primary decode must never silently
+        // drop to beam=1 greedy unless the user opts in via
+        // VOICEWAVE_FW_FAST_FIRST_ENABLED.
+        assert!(!should_use_fast_first_primary(DecodeMode::Balanced, 2_200));
+        assert!(!should_use_fast_first_primary(DecodeMode::Balanced, 3_200));
         assert!(!should_use_fast_first_primary(DecodeMode::Balanced, 3_300));
     }
 

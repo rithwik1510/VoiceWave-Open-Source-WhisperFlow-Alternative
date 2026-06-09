@@ -11,10 +11,11 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
+    atomic::{AtomicBool, Ordering},
     mpsc::{self, RecvTimeoutError},
-    Mutex, OnceLock,
+    Mutex, MutexGuard, OnceLock, TryLockError,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "windows")]
@@ -96,6 +97,8 @@ struct WorkerResponse {
     #[serde(default)]
     runtime_cache_hit: bool,
     #[serde(default)]
+    warmup_ms: u64,
+    #[serde(default)]
     segment_count: u32,
     #[serde(default)]
     avg_log_prob: f32,
@@ -119,6 +122,23 @@ struct WorkerProcess {
 }
 
 static WORKER: OnceLock<Mutex<Option<WorkerProcess>>> = OnceLock::new();
+/// Serializes worker requests. Without this, a dictation arriving while the
+/// startup prefetch is still loading the model checks out an empty slot,
+/// spawns a SECOND worker, and pays the full model load itself (observed as
+/// 7-10 s first dictations) — plus two copies of the model on the GPU.
+static WORKER_REQUEST_GATE: Mutex<()> = Mutex::new(());
+/// At most one background worker reload at a time (see schedule_worker_reload).
+static WORKER_RELOAD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// How long a request waits for the gate before proceeding ungated. Covers a
+/// warm model load (~7 s) but not a first-time multi-minute model download —
+/// degrading to the old racing behavior beats hanging a dictation that long.
+const WORKER_GATE_MAX_WAIT: Duration = Duration::from_secs(15);
+/// Last time the worker GPU did real work (decode or warmup). Used to skip
+/// the start-of-dictation warmup when the GPU is already hot.
+static LAST_GPU_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
+/// GPUs drop clocks within seconds of going idle; past this window a
+/// dictation-start warmup is worth the ~100-300 ms of background GPU work.
+const GPU_WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(10);
 const FW_GPU_DISABLED_MARKER: &str = "fw-gpu-disabled.marker";
 const FW_WORKER_RESPONSE_TIMEOUT_MS_DEFAULT: u64 = 75_000;
 const FW_WORKER_RESPONSE_TIMEOUT_MS_MIN: u64 = 3_000;
@@ -137,15 +157,15 @@ pub async fn ensure_faster_whisper_ready() -> Result<(), InferenceError> {
         })?
 }
 
-pub async fn prefetch_model(model_id: &str) -> Result<FasterWhisperPrefetchOutput, InferenceError> {
+fn prefetch_request_for(model_id: &str) -> WorkerRequest {
     let backend_preference = worker_backend_preference_for_model(model_id);
     let compute_type = worker_compute_type_for_backend(&backend_preference);
-    let request = WorkerRequest {
+    WorkerRequest {
         id: next_request_id(),
         command: "prefetch".to_string(),
         model_id: model_id.to_string(),
-        compute_type: compute_type.clone(),
-        backend_preference: backend_preference.clone(),
+        compute_type,
+        backend_preference,
         allow_backend_fallback: true,
         audio_path: String::new(),
         audio_pcm16_b64: None,
@@ -161,13 +181,57 @@ pub async fn prefetch_model(model_id: &str) -> Result<FasterWhisperPrefetchOutpu
         no_speech_threshold: None,
         log_prob_threshold: None,
         compression_ratio_threshold: None,
-    };
+    }
+}
+
+fn note_gpu_activity() {
+    if let Ok(mut guard) = LAST_GPU_ACTIVITY.lock() {
+        *guard = Some(Instant::now());
+    }
+}
+
+fn gpu_recently_active() -> bool {
+    LAST_GPU_ACTIVITY
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .is_some_and(|at| at.elapsed() < GPU_WARMUP_IDLE_THRESHOLD)
+}
+
+/// Fire-and-forget GPU warmup for an imminent decode. Called when dictation
+/// STARTS so clock ramp + any cold kernels are paid while the user is still
+/// speaking, not added to the release-to-text latency. No-op when the GPU
+/// did real work recently.
+pub async fn warmup_model(model_id: &str) -> Result<(), InferenceError> {
+    if gpu_recently_active() {
+        return Ok(());
+    }
+    let mut request = prefetch_request_for(model_id);
+    request.command = "warmup".to_string();
+    let response = tokio::task::spawn_blocking(move || send_worker_request_blocking(request))
+        .await
+        .map_err(|err| {
+            InferenceError::RuntimeJoin(format!("faster-whisper warmup join failure: {err}"))
+        })??;
+    if response.ok {
+        note_gpu_activity();
+    }
+    Ok(())
+}
+
+pub async fn prefetch_model(model_id: &str) -> Result<FasterWhisperPrefetchOutput, InferenceError> {
+    let request = prefetch_request_for(model_id);
     let response = tokio::task::spawn_blocking(move || send_worker_request_blocking(request))
         .await
         .map_err(|err| {
             InferenceError::RuntimeJoin(format!("faster-whisper prefetch join failure: {err}"))
         })??;
 
+    if response.warmup_ms > 0 {
+        // Fresh load: the worker ran its kernel-compilation warmup decode,
+        // so the GPU is genuinely hot right now.
+        note_gpu_activity();
+    }
     Ok(FasterWhisperPrefetchOutput {
         model_init_ms: response.model_init_ms,
         runtime_cache_hit: response.runtime_cache_hit,
@@ -197,6 +261,7 @@ pub async fn transcribe_samples_with_overrides(
         return Err(InferenceError::Cancelled);
     }
     let response = result?;
+    note_gpu_activity();
     if should_manage_fw_gpu_disable_marker() {
         if response.backend_fallback
             && response.backend_requested.eq_ignore_ascii_case("cuda")
@@ -223,7 +288,14 @@ pub async fn transcribe_samples_with_overrides(
 }
 
 pub fn cache_hint_for_model(model_id: &str) -> PathBuf {
-    let repo = format!("models--Systran--faster-whisper-{model_id}");
+    // Must mirror faster_whisper.utils._MODELS: each runtime model id resolves
+    // to a specific HF repo, and not all of them are published by Systran.
+    // If this path doesn't match the real cache directory, install completion
+    // and download progress silently never resolve (SourceMissing).
+    let repo = match model_id {
+        "large-v3-turbo" => "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo".to_string(),
+        _ => format!("models--Systran--faster-whisper-{model_id}"),
+    };
     hf_home_dir().join("hub").join(repo)
 }
 
@@ -274,6 +346,70 @@ fn drain_buffered_stdout_lines<R: Read>(reader: &mut BufReader<R>) -> usize {
 }
 
 fn send_worker_request_blocking(request: WorkerRequest) -> Result<WorkerResponse, InferenceError> {
+    let _gate = acquire_request_gate(WORKER_GATE_MAX_WAIT);
+    let command = request.command.clone();
+    let model_id = request.model_id.clone();
+    let result = send_worker_request_inner(request);
+    // Every RuntimeJoin error path below leaves the worker dead (killed or
+    // already exited). Reload it in the background now so the user's NEXT
+    // dictation runs warm instead of paying the ~7 s model load inline.
+    // Prefetches are excluded: a failing reload must not reschedule itself.
+    if command != "prefetch" && matches!(&result, Err(InferenceError::RuntimeJoin(_))) {
+        schedule_worker_reload(model_id);
+    }
+    result
+}
+
+fn acquire_request_gate(max_wait: Duration) -> Option<MutexGuard<'static, ()>> {
+    let deadline = Instant::now() + max_wait;
+    loop {
+        match WORKER_REQUEST_GATE.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "voicewave: worker request gate busy for {} ms; proceeding ungated",
+                        max_wait.as_millis()
+                    );
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            // A poisoned gate only means a holder panicked; serialization is
+            // best-effort, so proceed ungated rather than failing the decode.
+            Err(TryLockError::Poisoned(_)) => return None,
+        }
+    }
+}
+
+fn schedule_worker_reload(model_id: String) {
+    if WORKER_RELOAD_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("voicewave-fw-reload".to_string())
+        .spawn(move || {
+            eprintln!("voicewave: worker died; reloading {model_id} in background");
+            match send_worker_request_blocking(prefetch_request_for(&model_id)) {
+                Ok(response) => eprintln!(
+                    "voicewave: background worker reload complete for {model_id} (model_init={} ms)",
+                    response.model_init_ms
+                ),
+                Err(err) => {
+                    eprintln!("voicewave: background worker reload failed for {model_id}: {err}")
+                }
+            }
+            WORKER_RELOAD_IN_FLIGHT.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        WORKER_RELOAD_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
+fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, InferenceError> {
     let mut worker = checkout_worker()?;
 
     // Before writing a new request, drain any stale response lines that a
@@ -1049,6 +1185,9 @@ fn decode_hyperparams_for(model_id: &str, decode_mode: DecodeMode) -> (u32, u32)
         ("large-v3", DecodeMode::Fast) => (1, 1),
         ("large-v3", DecodeMode::Balanced) => (5, 3),
         ("large-v3", DecodeMode::Quality) => (5, 3),
+        ("large-v3-turbo", DecodeMode::Fast) => (1, 1),
+        ("large-v3-turbo", DecodeMode::Balanced) => (5, 3),
+        ("large-v3-turbo", DecodeMode::Quality) => (5, 3),
         (_, DecodeMode::Fast) => (1, 1),
         (_, DecodeMode::Balanced) => (4, 3),
         (_, DecodeMode::Quality) => (5, 3),
@@ -1058,12 +1197,76 @@ fn decode_hyperparams_for(model_id: &str, decode_mode: DecodeMode) -> (u32, u32)
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_hyperparams_for, drain_buffered_stdout_lines, encode_pcm16_base64,
-        select_worker_backend_preference, thread_cap_for_cores, worker_request_for,
-        FasterWhisperRequestOverrides,
+        cache_hint_for_model, decode_hyperparams_for, drain_buffered_stdout_lines,
+        encode_pcm16_base64, prefetch_request_for, select_worker_backend_preference,
+        thread_cap_for_cores, worker_request_for, FasterWhisperRequestOverrides,
     };
     use crate::settings::DecodeMode;
     use std::io::{BufRead, BufReader, Cursor};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[test]
+    fn request_gate_waits_then_proceeds_ungated() {
+        // Use a local gate (not the global) so this test cannot interfere
+        // with other tests touching the real request path.
+        fn acquire(gate: &'static Mutex<()>, max_wait: Duration) -> bool {
+            let deadline = std::time::Instant::now() + max_wait;
+            loop {
+                match gate.try_lock() {
+                    Ok(_guard) => return true,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if std::time::Instant::now() >= deadline {
+                            return false;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => return false,
+                }
+            }
+        }
+        static GATE: Mutex<()> = Mutex::new(());
+
+        assert!(acquire(&GATE, Duration::from_millis(50)), "free gate must acquire");
+
+        let held = GATE.lock().expect("hold gate");
+        assert!(
+            !acquire(&GATE, Duration::from_millis(50)),
+            "held gate must time out and proceed ungated"
+        );
+        drop(held);
+        assert!(acquire(&GATE, Duration::from_millis(50)), "released gate must acquire");
+    }
+
+    #[test]
+    fn prefetch_request_is_a_prefetch_for_the_requested_model() {
+        let request = prefetch_request_for("large-v3-turbo");
+        assert_eq!(request.command, "prefetch");
+        assert_eq!(request.model_id, "large-v3-turbo");
+        assert!(request.audio_pcm16_b64.is_none());
+    }
+
+    #[test]
+    fn cache_hint_matches_real_hf_repo_per_model() {
+        // Install completion and download progress both watch this path. If it
+        // doesn't match the directory faster-whisper actually downloads into,
+        // installs hang forever on SourceMissing.
+        let small = cache_hint_for_model("small.en");
+        assert!(small
+            .to_string_lossy()
+            .ends_with("models--Systran--faster-whisper-small.en"));
+        let large = cache_hint_for_model("large-v3");
+        assert!(large
+            .to_string_lossy()
+            .ends_with("models--Systran--faster-whisper-large-v3"));
+        let turbo = cache_hint_for_model("large-v3-turbo");
+        assert!(
+            turbo
+                .to_string_lossy()
+                .ends_with("models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"),
+            "large-v3-turbo is published by mobiuslabsgmbh, not Systran; got {turbo:?}"
+        );
+    }
 
     #[test]
     fn drain_consumes_complete_lines_already_in_bufreader() {
