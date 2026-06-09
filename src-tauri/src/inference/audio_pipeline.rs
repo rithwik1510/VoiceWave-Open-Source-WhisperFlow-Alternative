@@ -487,9 +487,11 @@ fn percentile_abs(samples: &[f32], quantile: f32) -> f32 {
         return 0.0;
     }
     let mut values = samples.iter().map(|v| v.abs()).collect::<Vec<f32>>();
-    values.sort_by(|a, b| a.total_cmp(b));
     let idx = ((values.len() - 1) as f32 * quantile.clamp(0.0, 1.0)).round() as usize;
-    values[idx]
+    // Linear-time selection: same value a full sort would put at `idx`, but
+    // O(n) instead of O(n log n) — this runs on every dictation's full buffer.
+    let (_, value, _) = values.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+    *value
 }
 
 fn rms(samples: &[f32]) -> f32 {

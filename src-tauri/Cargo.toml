@@ -43,3 +43,16 @@ tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "
 [patch.crates-io]
 whisper-rs = { path = "../vendor/whisper-rs" }
 whisper-rs-sys = { path = "../vendor/whisper-rs-sys" }
+
+# `npm run tauri:dev` builds the dev profile, and that binary is what gets
+# daily-driven during development. At opt-level 0 the per-dictation audio DSP
+# (conditioning, resampling, VAD) runs 5-20x slower and shows up directly as
+# release-to-text latency (observed: ~350 ms conditioning on a 30 s dictation
+# that takes ~30 ms optimized). opt-level 1 recovers most of that while
+# keeping incremental compiles fast; dependencies get full optimization since
+# they rarely recompile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

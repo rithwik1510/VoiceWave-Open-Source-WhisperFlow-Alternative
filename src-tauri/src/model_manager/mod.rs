@@ -20,6 +20,9 @@ const BUILTIN_FW_SMALL_SIGNATURE: &str =
     "rMFWdTBjLS6Z57h0md+zUowiDQYeQTH/1YnCHgibS7mcF7fx0Yc28ZDsW6Wf0jXhXRerb42BbSqp1mhS9CVhDw==";
 const BUILTIN_FW_LARGE_SIGNATURE: &str =
     "6xvz9HoVFEx1c4FE0ZjSih+k/N4wdZqRXOYwLMbJT9tvG3MCa6+uzhh+PYGMkD2l4nHgY7rVuFHb66plGLWuCA==";
+// Generated via `generate_fw_turbo_catalog_signature` test (dev key = production key).
+const BUILTIN_FW_LARGE_TURBO_SIGNATURE: &str =
+    "IfGO/sqcNE4flIvVG/YcTlrx2DbUDntDGHUtG1dWTiiwEwqwZbYZO/pCwf0q8YZ0gMRmHYyQLddf3Es+Ux42DQ==";
 // Signatures generated via `generate_wcpp_catalog_signatures` test (dev key = production key).
 const BUILTIN_WCPP_SMALL_EN_SIGNATURE: &str =
     "nMS5BR7ZlqhL1N5Xdcz3VdKblmOywgJEH1BMFEnbvr25pMejZNPq08P5ljIJ3TdmIrz6oeucNc9To2KXaSNUCg==";
@@ -1323,6 +1326,9 @@ fn manifest_to_catalog_item(manifest: &SignedModelManifest) -> ModelCatalogItem 
     let display_name = match manifest.model_id.as_str() {
         "fw-small.en" => "faster-whisper small.en".to_string(),
         "fw-large-v3" => "faster-whisper large-v3".to_string(),
+        "fw-large-v3-turbo" => {
+            "faster-whisper large-v3-turbo (~1.6 GB, best accuracy on GPU)".to_string()
+        }
         "wcpp-small.en" => "small.en (whisper.cpp, ~466 MB)".to_string(),
         "wcpp-large-v3-turbo" => "large-v3-turbo (whisper.cpp, ~1.6 GB)".to_string(),
         _ => manifest.model_id.clone(),
@@ -1469,6 +1475,12 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
             3_094_000_000_u64,
             BUILTIN_FW_LARGE_SIGNATURE,
         ),
+        (
+            "fw-large-v3-turbo",
+            "large-v3-turbo",
+            1_620_000_000_u64,
+            BUILTIN_FW_LARGE_TURBO_SIGNATURE,
+        ),
     ];
 
     for (voicewave_id, runtime_id, size, signature) in faster_rows {
@@ -1599,6 +1611,43 @@ mod tests {
                 "generated signature for {model_id} should be valid"
             );
         }
+    }
+
+    // Run with `cargo test generate_fw_turbo_catalog_signature -- --nocapture` to
+    // get the hardcoded constant value for BUILTIN_FW_LARGE_TURBO_SIGNATURE.
+    #[test]
+    fn generate_fw_turbo_catalog_signature() {
+        let mut manifest = SignedModelManifest {
+            model_id: "fw-large-v3-turbo".to_string(),
+            version: FASTER_WHISPER_VERSION.to_string(),
+            format: FASTER_WHISPER_FORMAT.to_string(),
+            size: 1_620_000_000_u64,
+            sha256: format!("{:064x}", 1_620_000_000_u64),
+            license: "MIT (faster-whisper + model license)".to_string(),
+            download_url: "faster-whisper://large-v3-turbo".to_string(),
+            signature: String::new(),
+        };
+        manifest.signature = sign_manifest(&manifest);
+        println!("// fw-large-v3-turbo");
+        println!("const SIG: &str = \"{}\";", manifest.signature);
+        assert!(
+            validate_manifest_signature(&manifest).is_ok(),
+            "generated signature for fw-large-v3-turbo should be valid"
+        );
+    }
+
+    #[test]
+    fn fw_catalog_includes_large_v3_turbo_with_valid_signature() {
+        let catalog = build_whispercpp_catalog();
+        let manifest = catalog
+            .iter()
+            .find(|m| m.model_id == "fw-large-v3-turbo")
+            .expect("catalog should include fw-large-v3-turbo");
+        assert_eq!(manifest.download_url, "faster-whisper://large-v3-turbo");
+        assert!(
+            validate_manifest_signature(manifest).is_ok(),
+            "fw-large-v3-turbo manifest should have a valid signature"
+        );
     }
 
     #[test]

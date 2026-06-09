@@ -16,7 +16,7 @@ except Exception:  # noqa: BLE001
 
 
 MODEL_CACHE = {}
-ALLOWED_MODELS = {"small.en", "large-v3"}
+ALLOWED_MODELS = {"small.en", "large-v3", "large-v3-turbo"}
 GPU_CAPABILITY_CACHE = None
 CUDA_RUNTIME_LIBS_READY_CACHE = None
 CUDA_DLL_DIR_HANDLES = []
@@ -236,7 +236,7 @@ def transcribe(req: dict) -> dict:
         return {
             "id": request_id,
             "ok": False,
-            "error": f"Unsupported model ID: {model_id}. Allowed: small.en, large-v3",
+            "error": f"Unsupported model ID: {model_id}. Allowed: small.en, large-v3, large-v3-turbo",
         }
     if sample_rate_hz != 16_000:
         return {
@@ -378,6 +378,72 @@ def transcribe(req: dict) -> dict:
     }
 
 
+def kernel_warmup_decode(model) -> int:
+    """Tiny throwaway decode to force CUDA kernel compilation / clock ramp.
+
+    The first transcribe after a model load pays 1-2.5 s of one-time GPU
+    setup on top of the load itself (observed in production diagnostics).
+    Running a half-second silent decode right after load moves that cost
+    into the background prefetch instead of the user's first dictation.
+    Returns the warmup duration in ms; failures are swallowed (warmup is
+    opportunistic, never load-bearing).
+    """
+    started = time.perf_counter()
+    try:
+        audio = np.zeros(8_000, dtype=np.float32)  # 0.5 s of silence @16 kHz
+        segments, _info = model.transcribe(
+            audio,
+            beam_size=1,
+            best_of=1,
+            language="en",
+            vad_filter=False,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+            temperature=0.0,
+        )
+        list(segments)
+    except Exception:  # noqa: BLE001
+        pass
+    return int((time.perf_counter() - started) * 1000)
+
+
+def warmup(req: dict) -> dict:
+    """Warm the GPU for an imminent decode (called when dictation starts)."""
+    request_id = req.get("id")
+    model_id = req.get("modelId")
+    compute_type = req.get("computeType", "int8")
+    backend_preference = req.get("backendPreference", "auto")
+    if not model_id:
+        return {"id": request_id, "ok": False, "error": "Model ID is required."}
+    if model_id not in ALLOWED_MODELS:
+        return {
+            "id": request_id,
+            "ok": False,
+            "error": f"Unsupported model ID: {model_id}. Allowed: small.en, large-v3, large-v3-turbo",
+        }
+    backend_used = resolve_requested_backend(backend_preference)
+    compute_type_used = resolve_compute_type(backend_used, str(compute_type))
+    try:
+        model, runtime_cache_hit, model_init_ms = load_model(
+            model_id, backend_used, compute_type_used
+        )
+    except Exception as err:  # noqa: BLE001
+        return {
+            "id": request_id,
+            "ok": False,
+            "error": f"Warmup failed ({backend_used}/{compute_type_used}): {err}",
+        }
+    warmup_ms = kernel_warmup_decode(model)
+    return {
+        "id": request_id,
+        "ok": True,
+        "modelInitMs": model_init_ms,
+        "runtimeCacheHit": runtime_cache_hit,
+        "warmupMs": warmup_ms,
+        "backendUsed": backend_used,
+    }
+
+
 def prefetch(req: dict) -> dict:
     request_id = req.get("id")
     model_id = req.get("modelId")
@@ -390,7 +456,7 @@ def prefetch(req: dict) -> dict:
         return {
             "id": request_id,
             "ok": False,
-            "error": f"Unsupported model ID: {model_id}. Allowed: small.en, large-v3",
+            "error": f"Unsupported model ID: {model_id}. Allowed: small.en, large-v3, large-v3-turbo",
         }
     backend_requested = resolve_requested_backend(backend_preference)
     backend_used = backend_requested
@@ -399,8 +465,9 @@ def prefetch(req: dict) -> dict:
     compute_type_used = resolve_compute_type(backend_used, compute_type_requested)
     runtime_cache_hit = False
     model_init_ms = 0
+    warmup_ms = 0
     try:
-        _model, runtime_cache_hit, model_init_ms = load_model(
+        model, runtime_cache_hit, model_init_ms = load_model(
             model_id, backend_used, compute_type_used
         )
     except Exception as first_err:  # noqa: BLE001
@@ -414,7 +481,7 @@ def prefetch(req: dict) -> dict:
         backend_used = "cpu"
         compute_type_used = resolve_compute_type("cpu", compute_type_requested)
         try:
-            _fallback_model, fallback_cache_hit, fallback_model_init_ms = load_model(
+            model, fallback_cache_hit, fallback_model_init_ms = load_model(
                 model_id, backend_used, compute_type_used
             )
             model_init_ms += fallback_model_init_ms
@@ -428,10 +495,15 @@ def prefetch(req: dict) -> dict:
                     f"with fallback ({backend_used}/{compute_type_used}): {fallback_err}"
                 ),
             }
+    if not runtime_cache_hit:
+        # Fresh load: pay the one-time kernel compilation here, in the
+        # background, instead of on the user's first dictation.
+        warmup_ms = kernel_warmup_decode(model)
     return {
         "id": request_id,
         "ok": True,
         "modelInitMs": model_init_ms,
+        "warmupMs": warmup_ms,
         "runtimeCacheHit": runtime_cache_hit,
         "backendRequested": backend_requested,
         "backendUsed": backend_used,
@@ -455,6 +527,9 @@ def main() -> int:
                 return 0
             if command == "prefetch":
                 print(json.dumps(prefetch(req)), flush=True)
+                continue
+            if command == "warmup":
+                print(json.dumps(warmup(req)), flush=True)
                 continue
             if command != "transcribe":
                 print(

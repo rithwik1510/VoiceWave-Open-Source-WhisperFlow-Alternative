@@ -165,7 +165,7 @@ impl Default for VoiceWaveSettings {
             active_domain_packs: Vec::new(),
             app_profile_overrides: AppProfileOverrides::default(),
             code_mode: CodeModeSettings::default(),
-            pro_post_processing_enabled: false,
+            pro_post_processing_enabled: true,
             prefer_clipboard_only_for_terminals: true,
         }
     }
@@ -231,7 +231,10 @@ impl SettingsStore {
 
 fn normalize_active_model_id(active_model: &str) -> String {
     match active_model.trim() {
-        "fw-small.en" | "fw-large-v3" => active_model.trim().to_string(),
+        // Every installable catalog model must be listed here, otherwise the
+        // user's selection is silently reset to fw-small.en on settings load.
+        "fw-small.en" | "fw-large-v3" | "fw-large-v3-turbo" | "wcpp-small.en"
+        | "wcpp-large-v3-turbo" => active_model.trim().to_string(),
         "tiny.en" | "base.en" | "small.en" | "medium.en" => "fw-small.en".to_string(),
         _ => "fw-small.en".to_string(),
     }

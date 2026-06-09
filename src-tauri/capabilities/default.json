@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for VoiceWave Phase I runtime",
-  "windows": ["main"],
+  "windows": ["main", "voicewave-pill"],
   "permissions": ["core:default"]
 }
