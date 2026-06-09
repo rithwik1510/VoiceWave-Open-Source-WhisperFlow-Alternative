@@ -30,14 +30,21 @@ pub struct ProTranscriptOptions<'a> {
 }
 
 pub fn finalize_pro_transcript(input: &str, options: &ProTranscriptOptions<'_>) -> String {
-    let mut text = finalize_user_transcript(input);
-    if text.is_empty() {
-        return text;
+    // Cleanup must run before sentence finalization: pruning a leading "Um,"
+    // after capitalization would leave the sentence starting lowercase.
+    let mut cleaned = input.to_string();
+    if options.post_processing_enabled {
+        let pruned = collapse_repeated_tokens(&prune_fillers(&cleaned));
+        // If the utterance was nothing but fillers, keep it verbatim rather
+        // than erasing the user's dictation into an error.
+        if !pruned.trim().is_empty() {
+            cleaned = pruned;
+        }
     }
 
-    if options.post_processing_enabled {
-        text = prune_fillers(&text);
-        text = collapse_repeated_tokens(&text);
+    let mut text = finalize_user_transcript(&cleaned);
+    if text.is_empty() {
+        return text;
     }
 
     text = apply_domain_corrections(&text, options.domain_packs);
@@ -422,7 +429,9 @@ fn ensure_terminal_punctuation(input: &str) -> String {
 }
 
 fn prune_fillers(input: &str) -> String {
-    let fillers = ["uh", "um", "erm"];
+    // Hesitation sounds only — never drop discourse words like "like",
+    // "well", or "so", which are real words far more often than fillers.
+    let fillers = ["uh", "uhh", "um", "umm", "uhm", "erm", "er", "ahem", "mhm"];
     input
         .split('\n')
         .map(|line| {
@@ -443,21 +452,48 @@ fn prune_fillers(input: &str) -> String {
 fn collapse_repeated_tokens(input: &str) -> String {
     input
         .split('\n')
-        .map(|line| {
-            let mut output = Vec::<String>::new();
-            for token in line.split_whitespace() {
-                if output
-                    .last()
-                    .is_some_and(|last| last.eq_ignore_ascii_case(token))
-                {
-                    continue;
-                }
-                output.push(token.to_string());
-            }
-            output.join(" ")
-        })
+        .map(collapse_repeated_tokens_line)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn collapse_repeated_tokens_line(line: &str) -> String {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let mut output = Vec::<&str>::with_capacity(tokens.len());
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        // On a match we keep the LATER occurrence: the earlier one usually
+        // carries the stutter's pause punctuation ("i, i think" -> "i think").
+
+        // Restart bigram: "I think I think this works" -> "I think this works".
+        if output.len() >= 2 && idx + 1 < tokens.len() {
+            let prev_a = normalize_marker_token(output[output.len() - 2]);
+            let prev_b = normalize_marker_token(output[output.len() - 1]);
+            if !prev_a.is_empty()
+                && !prev_b.is_empty()
+                && prev_a == normalize_marker_token(tokens[idx])
+                && prev_b == normalize_marker_token(tokens[idx + 1])
+            {
+                output.truncate(output.len() - 2);
+                output.push(tokens[idx]);
+                output.push(tokens[idx + 1]);
+                idx += 2;
+                continue;
+            }
+        }
+        // Stutter: "the the" / "I, I" -> single token (punctuation-insensitive).
+        if let Some(last) = output.last_mut() {
+            let normalized = normalize_marker_token(last);
+            if !normalized.is_empty() && normalized == normalize_marker_token(tokens[idx]) {
+                *last = tokens[idx];
+                idx += 1;
+                continue;
+            }
+        }
+        output.push(tokens[idx]);
+        idx += 1;
+    }
+    output.join(" ")
 }
 
 fn apply_domain_corrections(input: &str, packs: &[DomainPackId]) -> String {
@@ -963,6 +999,56 @@ mod tests {
             finalize_user_transcript("one day two nights in paris"),
             "One day two nights in paris."
         );
+    }
+
+    fn cleanup(input: &str) -> String {
+        let code_mode = CodeModeSettings::default();
+        let behavior = AppProfileBehavior::default();
+        finalize_pro_transcript(
+            input,
+            &ProTranscriptOptions {
+                format_profile: FormatProfile::Default,
+                domain_packs: &[],
+                code_mode: &code_mode,
+                post_processing_enabled: true,
+                app_profile_behavior: &behavior,
+                custom_terms: &[],
+            },
+        )
+    }
+
+    #[test]
+    fn cleanup_prunes_leading_filler_and_recapitalizes() {
+        assert_eq!(cleanup("um, i think this works now"), "I think this works now.");
+    }
+
+    #[test]
+    fn cleanup_prunes_filler_variants_mid_sentence() {
+        assert_eq!(
+            cleanup("send the, umm, report by uhh friday"),
+            "Send the, report by friday."
+        );
+    }
+
+    #[test]
+    fn cleanup_collapses_stutters_ignoring_punctuation() {
+        assert_eq!(
+            cleanup("i, i think the the plan is good"),
+            "I think the plan is good."
+        );
+    }
+
+    #[test]
+    fn cleanup_collapses_restart_bigrams() {
+        assert_eq!(
+            cleanup("we should we should ship this today"),
+            "We should ship this today."
+        );
+    }
+
+    #[test]
+    fn cleanup_keeps_all_filler_utterance_verbatim() {
+        assert_eq!(cleanup("um"), "Um.");
     }
 
     #[test]
