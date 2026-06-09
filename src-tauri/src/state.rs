@@ -23,8 +23,8 @@ use crate::{
         cpu_runtime_pool_enabled, ensure_faster_whisper_ready, faster_whisper_cache_hint,
         faster_whisper_runtime_model_id, is_faster_whisper_model,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
-        prefetch_faster_whisper_model, prewarm_runtime, warmup_plan_for_model, InferenceError,
-        InferenceWorker, RuntimeDecodePolicy, WarmupPlan,
+        prefetch_faster_whisper_model, prewarm_runtime, warmup_faster_whisper_model,
+        warmup_plan_for_model, InferenceError, InferenceWorker, RuntimeDecodePolicy, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
@@ -785,6 +785,7 @@ pub fn release_watchdog_threshold_ms() -> u64 {
 fn effective_release_watchdog_threshold_ms(
     audio_quality: AudioQualityBand,
     captured_audio_ms: u64,
+    release_tail_ms: u64,
 ) -> u64 {
     let base_ms = std::env::var("VOICEWAVE_RELEASE_WATCHDOG_MS")
         .ok()
@@ -796,13 +797,20 @@ fn effective_release_watchdog_threshold_ms(
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(|value| value.clamp(160, base_ms))
         .unwrap_or(RELEASE_WATCHDOG_FAST_MS);
-    if audio_quality == AudioQualityBand::Good
+    let margin_ms = if audio_quality == AudioQualityBand::Good
         && captured_audio_ms >= RELEASE_WATCHDOG_FAST_MIN_AUDIO_MS
     {
         fast_ms
     } else {
         base_ms
-    }
+    };
+    // The release-to-transcribing interval deliberately includes the
+    // post-release capture tail (RELEASE_TAIL_MIN_WAIT_MS floor of 300 ms),
+    // so the watchdog threshold must sit on top of the configured tail.
+    // A flat threshold below the tail flags every single dictation as a
+    // watchdog recovery, making the health metric meaningless (observed:
+    // 200/200 utterances "recovered" in production diagnostics).
+    release_tail_ms.saturating_add(margin_ms)
 }
 
 pub fn release_watchdog_recovered(release_to_transcribing_ms: u64, threshold_ms: u64) -> bool {
@@ -1230,6 +1238,13 @@ impl VoiceWaveController {
             token
         };
 
+        // Instant audible feedback on the user's physical action: play the
+        // open cue the moment the press is accepted, before mic-stream setup
+        // adds 50-200 ms. (Fixture runs stay silent.)
+        if mode == DictationMode::Microphone {
+            crate::cue::play(crate::cue::CueSound::Open);
+        }
+
         let session_id = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
         {
             let mut active = self.active_session.lock().await;
@@ -1286,6 +1301,11 @@ impl VoiceWaveController {
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
         if let Some(token) = self.cancel_token.lock().await.clone() {
+            // Close cue on the physical cancel action (not the later state
+            // transition), and only when a session was actually running.
+            if !token.is_cancelled() {
+                crate::cue::play(crate::cue::CueSound::Close);
+            }
             token.cancel();
         }
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
@@ -1312,6 +1332,9 @@ impl VoiceWaveController {
                 "voicewave: stop_dictation requested (session={}, trigger={:?}, state={:?})",
                 session.session_id, session.trigger, session.state
             );
+            // Close cue on the physical release action — immediate feedback,
+            // independent of how long transcription takes afterwards.
+            crate::cue::play(crate::cue::CueSound::Close);
         } else {
             eprintln!("voicewave: stop_dictation requested with no active session");
         }
@@ -2648,7 +2671,18 @@ impl VoiceWaveController {
             && incremental_pre_release_decode_enabled()
             && !use_faster_whisper;
         let fw_ready_task = if mode == DictationMode::Microphone && use_faster_whisper {
-            Some(tokio::spawn(async { ensure_faster_whisper_ready().await }))
+            let warmup_model_id = settings.active_model.clone();
+            Some(tokio::spawn(async move {
+                let ready = ensure_faster_whisper_ready().await;
+                if ready.is_ok() {
+                    // GPU clock ramp + kernel warmup runs while the user is
+                    // still speaking, so the real decode at release starts on
+                    // a hot GPU instead of paying the idle penalty inline.
+                    // Skipped automatically when the GPU was active recently.
+                    let _ = warmup_faster_whisper_model(&warmup_model_id).await;
+                }
+                ready
+            }))
         } else {
             None
         };
@@ -2741,7 +2775,9 @@ impl VoiceWaveController {
                                     voiced: voiced_chunk,
                                 });
                             }
-                            if last_level_emit.elapsed() >= Duration::from_millis(70) {
+                            // 33 ms cadence (~30 fps) so the pill waveform tracks
+                            // syllable-level dynamics; 70 ms read as sluggish.
+                            if last_level_emit.elapsed() >= Duration::from_millis(33) {
                                 let mut peak = 0.0_f32;
                                 for sample in normalized_chunk {
                                     peak = peak.max(sample.abs());
@@ -2943,17 +2979,25 @@ impl VoiceWaveController {
                 decode_policy_reasons
                     .push(format!("fw-audio-floor:{}", decode_mode_key(decode_floor)));
             }
-            let short_utterance_fast_lane =
-                captured_audio_ms <= 3_200 && audio_quality.quality != AudioQualityBand::Poor;
-            if decode_floor == DecodeMode::Fast && effective_decode_mode == DecodeMode::Balanced {
-                // Fast-first for clean audio; inference layer will auto-retry with stronger mode
-                // when confidence is weak so quality is protected.
-                effective_decode_mode = DecodeMode::Fast;
-                decode_policy_reasons.push("fw-fast-lane:clean-audio-floor".to_string());
-            } else if short_utterance_fast_lane && effective_decode_mode == DecodeMode::Balanced {
-                // Short utterances benefit most from fast-first; retry safeguards still protect quality.
-                effective_decode_mode = DecodeMode::Fast;
-                decode_policy_reasons.push("fw-fast-lane:short-utterance".to_string());
+            // The fast lanes that previously downgraded Balanced -> Fast here
+            // (clean-audio floor and short-utterance) are removed: beam=1
+            // greedy output regularly passed the confidence retry gate while
+            // being wrong, so short dictations shipped degraded text. Beam=5
+            // is ~0.3 s on GPU and the latency policy still handles genuinely
+            // slow machines.
+        }
+        if mode == DictationMode::Microphone {
+            // The user's decode-mode setting is a floor for live dictation, so
+            // "balanced"/"quality" in settings can never be silently downgraded
+            // by the runtime policy. "fast" imposes no floor and lets the
+            // policy manage the speed/quality trade-off.
+            let pre_floor = effective_decode_mode;
+            effective_decode_mode = floor_decode_mode(effective_decode_mode, settings.decode_mode);
+            if effective_decode_mode != pre_floor {
+                decode_policy_reasons.push(format!(
+                    "settings-floor:{}",
+                    decode_mode_key(settings.decode_mode)
+                ));
             }
         }
         let decode_policy_reason = decode_policy_reasons.join("|");
@@ -3000,8 +3044,11 @@ impl VoiceWaveController {
             .session_release_elapsed_ms(session_id, transcribing_started)
             .await
             .unwrap_or(0);
-        let effective_release_watchdog_ms =
-            effective_release_watchdog_threshold_ms(audio_quality.quality, captured_audio_ms);
+        let effective_release_watchdog_ms = effective_release_watchdog_threshold_ms(
+            audio_quality.quality,
+            captured_audio_ms,
+            release_tail_ms,
+        );
         let watchdog_recovered =
             release_watchdog_recovered(release_to_transcribing_ms, effective_release_watchdog_ms);
         if watchdog_recovered {
@@ -3600,8 +3647,10 @@ impl VoiceWaveController {
         };
 
         let _ = previous_state;
-        // Close cue is played by the pill renderer when React commits the
-        // Idle transition, so sound and fade-out land on the same frame.
+        // Hotkey cues intentionally do NOT play here: state transitions lag
+        // the physical key action (mic-stream setup before Listening,
+        // decode+insert before Inserted). Cues fire at the dictation entry
+        // points instead — see start_dictation_with_trigger / stop_dictation.
         self.emit_state(app, state, message);
     }
 
@@ -3895,12 +3944,14 @@ fn percentile_index(len: usize, percentile: f32) -> usize {
 mod tests {
     use super::{
         asr_integrity_metrics, build_terminology_hint_from_texts, clamp_vad_threshold,
-        classify_insertion_target, decode_mode_key, derive_correction_candidates,
-        floor_decode_mode, insertion_method_key, is_likely_low_quality_input_name, now_utc_ms,
+        classify_insertion_target, decode_mode_key, decode_mode_rank, derive_correction_candidates,
+        effective_release_watchdog_threshold_ms, floor_decode_mode, insertion_method_key,
+        is_likely_low_quality_input_name, now_utc_ms, release_watchdog_recovered,
         push_release_allowed, push_to_talk_release_decision,
         should_reject_low_confidence_transcript_as_no_speech, DictationStartTrigger,
         PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD, RECOMMENDED_VAD_THRESHOLD,
     };
+    use crate::audio::AudioQualityBand;
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
@@ -4095,6 +4146,52 @@ mod tests {
             floor_decode_mode(DecodeMode::Quality, DecodeMode::Balanced),
             DecodeMode::Quality
         );
+    }
+
+    #[test]
+    fn release_watchdog_threshold_accounts_for_configured_release_tail() {
+        // Production regression (observed 2026-06-12): release_to_transcribing
+        // includes the deliberate post-release capture tail, so with a 350 ms
+        // tail every utterance measured ~360 ms and a flat 220-300 ms
+        // threshold flagged 200/200 dictations as watchdog recoveries.
+        let threshold = effective_release_watchdog_threshold_ms(
+            AudioQualityBand::Good,
+            12_000,
+            350,
+        );
+        assert!(
+            threshold > 350,
+            "threshold ({threshold}) must exceed the configured release tail"
+        );
+        // The typical healthy case must NOT count as a recovery...
+        assert!(!release_watchdog_recovered(363, threshold));
+        // ...while a genuine stall still must.
+        assert!(release_watchdog_recovered(
+            350 + 700,
+            threshold
+        ));
+    }
+
+    #[test]
+    fn user_decode_mode_setting_is_a_floor_for_live_dictation() {
+        // Regression guard for the transcription-quality fix (2026-06-12):
+        // the runtime policy and audio-quality floors may only raise the
+        // decode mode above the user's setting, never below it. Before this
+        // fix the mic path ignored settings.decode_mode entirely and fast
+        // lanes downgraded Balanced -> Fast (beam=1 greedy) for most short
+        // utterances.
+        let policy_choices = [DecodeMode::Fast, DecodeMode::Balanced, DecodeMode::Quality];
+        let user_choices = [DecodeMode::Fast, DecodeMode::Balanced, DecodeMode::Quality];
+        for policy in policy_choices {
+            for user in user_choices {
+                let effective = floor_decode_mode(policy, user);
+                assert!(
+                    decode_mode_rank(effective) >= decode_mode_rank(user),
+                    "policy {policy:?} + user {user:?} produced {effective:?}, \
+                     below the user's setting"
+                );
+            }
+        }
     }
 
     #[test]

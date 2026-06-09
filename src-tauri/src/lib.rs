@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod benchmark;
 pub mod billing;
+pub mod cue;
 pub mod diagnostics;
 pub mod dictionary;
 pub mod history;
@@ -51,7 +52,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
+    Listener, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
 
@@ -69,7 +70,9 @@ const PILL_WINDOW_REVIEW_WIDTH: f64 = 500.0;
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_REVIEW_HEIGHT: f64 = 160.0;
 #[cfg(feature = "desktop")]
-const PILL_WINDOW_COMPACT_BOTTOM_MARGIN: f64 = 14.0;
+// Zero bottom margin: the idle pill rests flush against the screen edge and
+// rises into view (CSS translateY) only while dictation is active.
+const PILL_WINDOW_COMPACT_BOTTOM_MARGIN: f64 = 0.0;
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_REVIEW_BOTTOM_MARGIN: f64 = 54.0;
 #[cfg(feature = "desktop")]
@@ -145,22 +148,37 @@ fn position_pill_window(
     height_logical: f64,
     bottom_margin_logical: f64,
 ) {
+    // Anchor the pill to the monitor the user is actually working on (cursor
+    // position), not the main window's monitor: the main window is usually
+    // minimized to tray, and on multi-monitor setups it can be parked on a
+    // different display than the one being dictated into — which made the
+    // pill appear "gone".
     let monitor = app
-        .get_webview_window("main")
-        .and_then(|main| main.current_monitor().ok().flatten())
+        .cursor_position()
+        .ok()
+        .and_then(|pos| app.monitor_from_point(pos.x, pos.y).ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|main| main.current_monitor().ok().flatten())
+        })
         .or_else(|| app.primary_monitor().ok().flatten());
 
     let Some(monitor) = monitor else {
         return;
     };
 
+    // work_area is in physical pixels; the pill dimensions are logical, so
+    // scale them before mixing the two or the pill drifts off-center (and
+    // sits too low) on scaled displays.
+    let scale = monitor.scale_factor();
     let work_area = monitor.work_area();
-    let width = width_logical.round() as i32;
-    let height = height_logical.round() as i32;
-    let margin = bottom_margin_logical.round() as i32;
+    let width = (width_logical * scale).round() as i32;
+    let height = (height_logical * scale).round() as i32;
+    let margin = (bottom_margin_logical * scale).round() as i32;
     let center_offset_x = ((work_area.size.width as i32 - width) / 2).max(0);
     let bottom_offset_y = (work_area.size.height as i32 - height - margin).max(0);
-    let x = work_area.position.x + center_offset_x + PILL_WINDOW_NUDGE_X;
+    let nudge_x = ((PILL_WINDOW_NUDGE_X as f64) * scale).round() as i32;
+    let x = work_area.position.x + center_offset_x + nudge_x;
     let y = work_area.position.y + bottom_offset_y;
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
@@ -1041,6 +1059,29 @@ pub fn run() {
                 .map_err(|err| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::other(err))
                 })?;
+            // Open the cue output stream now so the first hotkey press
+            // doesn't pay the audio-device-open latency.
+            cue::prewarm();
+            // Re-anchor the pill to the active monitor at the start of every
+            // dictation. The cursor can move between displays at any time, so
+            // a position chosen at app launch goes stale on multi-monitor
+            // setups.
+            {
+                let reposition_handle = app.handle().clone();
+                app.handle().listen("voicewave://state", move |event| {
+                    if event.payload().contains("\"listening\"") {
+                        if let Ok(pill) = ensure_pill_window(&reposition_handle) {
+                            position_pill_window(
+                                &reposition_handle,
+                                &pill,
+                                PILL_WINDOW_COMPACT_WIDTH,
+                                PILL_WINDOW_COMPACT_HEIGHT,
+                                PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
+                            );
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
