@@ -21,6 +21,15 @@ const STOP_SIGNAL_DEBOUNCE_MS: u64 = 160;
 // work with and the user sees the last 2-3 words clipped.
 const RELEASE_TAIL_MIN_WAIT_MS: u64 = 300;
 const RELEASE_TAIL_SILENCE_CONFIRM_MS: u64 = 60;
+// Fast tail exit for the common case: the user finished speaking, paused,
+// then released the hotkey. If the last voiced frame is at least
+// PRE_RELEASE_SILENCE_PAD_MS before release, the 300 ms soft-consonant pad
+// that RELEASE_TAIL_MIN_WAIT_MS exists to protect is already present inside
+// the captured audio, and waiting the full minimum is pure dead time. The
+// 350 ms requirement = the 300 ms trim pad plus margin for sub-threshold
+// sound that can trail past the last frame the RMS VAD counted as voiced.
+const PRE_RELEASE_SILENCE_PAD_MS: u64 = 350;
+const RELEASE_TAIL_FAST_EXIT_MS: u64 = 120;
 const VAD_PRE_ROLL_FRAMES: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -339,6 +348,7 @@ impl AudioCaptureService {
         let mut capture_accum = Vec::new();
         let mut last_voice_at: Option<Instant> = None;
         let mut stop_requested_at: Option<Instant> = None;
+        let mut released_after_silence = false;
         let mut post_release_last_voiced_at: Option<Instant> = None;
         let mut voiced_frame_count = 0usize;
         let mut speech_detected = false;
@@ -353,6 +363,9 @@ impl AudioCaptureService {
                     continue;
                 }
                 stop_requested_at = Some(Instant::now());
+                released_after_silence = last_voice_at.is_none_or(|at| {
+                    at.elapsed() >= Duration::from_millis(PRE_RELEASE_SILENCE_PAD_MS)
+                });
                 if options.release_tail.is_zero() {
                     break;
                 }
@@ -362,8 +375,17 @@ impl AudioCaptureService {
                 if elapsed >= options.release_tail {
                     break;
                 }
-                let min_wait_ms =
-                    RELEASE_TAIL_MIN_WAIT_MS.min(options.release_tail.as_millis() as u64);
+                // Fast path only while NOTHING voiced has arrived after the
+                // release; any post-release speech falls back to the full
+                // minimum wait so resumed words keep their tail pad.
+                let fast_exit_ok =
+                    released_after_silence && post_release_last_voiced_at.is_none();
+                let min_wait_ms = if fast_exit_ok {
+                    RELEASE_TAIL_FAST_EXIT_MS
+                } else {
+                    RELEASE_TAIL_MIN_WAIT_MS
+                }
+                .min(options.release_tail.as_millis() as u64);
                 let min_wait = Duration::from_millis(min_wait_ms);
                 if elapsed >= min_wait {
                     let recent_post_release_voice = post_release_last_voiced_at.is_some_and(|at| {
@@ -1387,6 +1409,112 @@ mod tests {
             "capture ended before explicit stop/max duration guard"
         );
         assert!(!segments.is_empty());
+    }
+
+    #[test]
+    fn release_tail_exits_fast_when_user_released_after_silence() {
+        let service = AudioCaptureService::default();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let options = CaptureOptions {
+            vad_config: VadConfig {
+                threshold: 0.01,
+                ..VadConfig::default()
+            },
+            max_capture_duration: Duration::from_millis(2_000),
+            silence_timeout: Duration::from_millis(1_500),
+            release_tail: Duration::from_millis(600),
+            preserve_full_capture: false,
+        };
+
+        // Speech at the very start, then silence; the user "releases" 520 ms
+        // in — i.e. well past PRE_RELEASE_SILENCE_PAD_MS after the last voice.
+        audio_tx
+            .send(vec![0.08_f32; FRAME_SIZE * 3])
+            .expect("test frame should be queued");
+
+        let started = Instant::now();
+        let stop_clock = started;
+        let segments = service
+            .collect_segments_from_stream(
+                service.target_sample_rate,
+                1,
+                audio_rx,
+                error_rx,
+                options,
+                || false,
+                move || stop_clock.elapsed() >= Duration::from_millis(520),
+                |_normalized_chunk, _voiced_chunk| {},
+            )
+            .expect("capture should complete");
+
+        let elapsed = started.elapsed();
+        assert!(!segments.is_empty());
+        assert!(
+            elapsed >= Duration::from_millis(600),
+            "fast exit may not fire before the minimum fast wait (got {elapsed:?})"
+        );
+        // Slow path would exit no earlier than 520 + 300 = 820 ms; the fast
+        // path exits around 520 + 120 = 640 ms.
+        assert!(
+            elapsed <= Duration::from_millis(780),
+            "released-after-silence capture should fast-exit the tail (got {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn release_tail_keeps_full_wait_when_voice_runs_into_release() {
+        let service = AudioCaptureService::default();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let options = CaptureOptions {
+            vad_config: VadConfig {
+                threshold: 0.01,
+                ..VadConfig::default()
+            },
+            max_capture_duration: Duration::from_millis(2_000),
+            silence_timeout: Duration::from_millis(1_500),
+            release_tail: Duration::from_millis(600),
+            preserve_full_capture: false,
+        };
+
+        // Voiced chunks keep arriving until ~480 ms; the stop lands at 520 ms,
+        // only ~40 ms after the last voice — soft endings may still be in
+        // flight, so the tail must keep its full minimum wait.
+        let feeder = std::thread::spawn(move || {
+            for _ in 0..12 {
+                if audio_tx.send(vec![0.08_f32; FRAME_SIZE]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            // Keep the channel open (silent) so capture ends via the tail
+            // logic rather than a sender disconnect.
+            std::thread::sleep(Duration::from_millis(700));
+        });
+
+        let started = Instant::now();
+        let stop_clock = started;
+        let segments = service
+            .collect_segments_from_stream(
+                service.target_sample_rate,
+                1,
+                audio_rx,
+                error_rx,
+                options,
+                || false,
+                move || stop_clock.elapsed() >= Duration::from_millis(520),
+                |_normalized_chunk, _voiced_chunk| {},
+            )
+            .expect("capture should complete");
+        feeder.join().expect("feeder thread should finish");
+
+        let elapsed = started.elapsed();
+        assert!(!segments.is_empty());
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "voice near release must keep the full tail minimum wait (got {elapsed:?})"
+        );
     }
 
     #[test]
