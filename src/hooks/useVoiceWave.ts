@@ -110,7 +110,13 @@ const DEFAULT_RELEASE_TAIL_MS = 350;
 const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
-const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3", "wcpp-small.en", "wcpp-large-v3-turbo"] as const;
+const SUPPORTED_MODEL_IDS = [
+  "fw-small.en",
+  "fw-large-v3",
+  "fw-large-v3-turbo",
+  "wcpp-small.en",
+  "wcpp-large-v3-turbo",
+] as const;
 const LEGACY_MODEL_IDS = ["tiny.en", "base.en", "small.en", "medium.en"] as const;
 
 function isSupportedModelId(modelId: string): boolean {

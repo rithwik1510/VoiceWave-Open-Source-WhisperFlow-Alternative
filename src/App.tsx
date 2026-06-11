@@ -265,7 +265,10 @@ function buildProToolsPreset(mode: ProToolsMode, settings: VoiceWaveSettings): P
             autoListFormatting: false
           }
         },
-        postProcessingEnabled: false
+        // Filler pruning / stutter collapse is desirable in every mode, not
+        // just the specialized presets — raw "um, I I think" output is the
+        // main thing that makes transcripts read worse than cloud apps.
+        postProcessingEnabled: true
       };
   }
 }
