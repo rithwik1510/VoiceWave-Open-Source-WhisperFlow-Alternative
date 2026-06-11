@@ -11,8 +11,6 @@ import {
   showMainWindow
 } from "../lib/tauri";
 import type { DictionaryQueueItem, VoiceWaveHudState } from "../types/voicewave";
-import pillOpenSoundUrl from "../assets/audio/cue_press.wav";
-import pillCloseSoundUrl from "../assets/audio/cue_release.wav";
 
 type VisualState = "idle" | "listening" | "transcribing" | "inserted" | "error";
 
@@ -29,59 +27,22 @@ export function FloatingPill() {
   const [reviewItem, setReviewItem] = useState<DictionaryQueueItem | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const previousRawStateRef = useRef<VoiceWaveHudState>("idle");
+  // Slowly-decaying running peak for auto-gain normalization of the waveform.
+  const levelPeakRef = useRef(0.08);
+  // Scrolling waveform: one slot per bar, newest sample enters on the right
+  // and travels left. Sampled on a fixed interval (not per-frame) so adjacent
+  // bars hold meaningfully different moments of speech.
+  const waveHistoryRef = useRef<number[]>(new Array(12).fill(0));
+  const lastWaveSampleTsRef = useRef(0);
   const reviewRequestRef = useRef(0);
   const reviewWindowStartRef = useRef(0);
   const reviewModeActive = Boolean(reviewItem);
   const visualState: VisualState = displayState;
 
-  const openAudioRef = useRef<HTMLAudioElement | null>(null);
-  const closeAudioRef = useRef<HTMLAudioElement | null>(null);
-  const soundPreviousStateRef = useRef<VoiceWaveHudState>("idle");
-
-  useEffect(() => {
-    const open = new Audio(pillOpenSoundUrl);
-    open.preload = "auto";
-    open.volume = 0.85;
-    const close = new Audio(pillCloseSoundUrl);
-    close.preload = "auto";
-    close.volume = 0.85;
-    openAudioRef.current = open;
-    closeAudioRef.current = close;
-    return () => {
-      openAudioRef.current = null;
-      closeAudioRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const previous = soundPreviousStateRef.current;
-    soundPreviousStateRef.current = rawState;
-
-    if (previous === rawState) {
-      return;
-    }
-
-    // Pill opening: Idle -> Listening. Fire on the same commit as the pill
-    // becomes visible so the sound and the visual onset line up.
-    if (previous === "idle" && rawState === "listening") {
-      const audio = openAudioRef.current;
-      if (audio) {
-        audio.currentTime = 0;
-        audio.play().catch(() => undefined);
-      }
-      return;
-    }
-
-    // Pill closing: any active state back to Idle. Fires on the render that
-    // drives the pill fade-out, not when the hotkey was released.
-    if (rawState === "idle" && previous !== "idle") {
-      const audio = closeAudioRef.current;
-      if (audio) {
-        audio.currentTime = 0;
-        audio.play().catch(() => undefined);
-      }
-    }
-  }, [rawState]);
+  // Hotkey cue sounds are played natively by the Rust core at the exact
+  // state transition (see src-tauri/src/cue.rs). Webview playback lived here
+  // before, but background windows get media-throttled and transition
+  // detection could miss fast presses — so the cue fired inconsistently.
 
   const resetReview = useCallback(() => {
     reviewRequestRef.current += 1;
@@ -123,12 +84,19 @@ export function FloatingPill() {
     let micUnlisten: (() => void) | null = null;
 
     void (async () => {
-      stateUnlisten = await listenVoicewaveState((payload) => {
-        setRawState(payload.state);
-      });
-      micUnlisten = await listenVoicewaveMicLevel((payload) => {
-        setMicLevel(clamp01(payload.level ?? 0));
-      });
+      try {
+        stateUnlisten = await listenVoicewaveState((payload) => {
+          setRawState(payload.state);
+        });
+        micUnlisten = await listenVoicewaveMicLevel((payload) => {
+          setMicLevel(clamp01(payload.level ?? 0));
+        });
+      } catch (err) {
+        // If event listening is denied (e.g. this window is missing from the
+        // Tauri capability config), the waveform receives no mic levels and
+        // renders flat. Fail loudly instead of silently degrading.
+        console.error("voicewave-pill: event listener registration failed", err);
+      }
     })();
 
     const snapshotTimer = window.setInterval(() => {
@@ -256,19 +224,33 @@ export function FloatingPill() {
       }
       lastFrame = ts;
 
+      // Auto-gain: normalize the raw mic peak against a slowly-decaying
+      // running maximum so loud syllables always reach the top of the range,
+      // then gamma-expand (>1) to ADD contrast — quiet hovers low, speech
+      // slams high. (sqrt compression made everything mid-height = flat.)
+      const raw = visualState === "listening" ? micLevel : 0;
+      levelPeakRef.current = Math.max(raw, levelPeakRef.current * 0.994, 0.05);
+      const shaped = Math.pow(clamp01(raw / levelPeakRef.current), 1.4);
       const target =
         visualState === "listening"
-          ? clamp01(0.24 + micLevel * 0.9)
+          ? shaped
           : visualState === "transcribing"
-            ? 0.18
-            : visualState === "inserted"
-              ? 0.22
-              : 0.03;
-      const lerp = visualState === "listening" ? 0.24 : 0.16;
-      current += (target - current) * lerp;
-      if (visualState === "idle") {
-        current *= 0.92;
+            ? 0.12
+            : 0.03;
+      // Peak-meter dynamics: instant attack, exponential release. Any lerp on
+      // the way up softens exactly the motion the user should see.
+      current = target > current ? target : current * 0.86;
+
+      // Feed the scrolling waveform at a fixed cadence (~50 ms per bar slot):
+      // a syllable spans 2-4 bars, so speech reads as bumps traveling across
+      // the pill instead of the whole row pumping in unison.
+      if (ts - lastWaveSampleTsRef.current >= 50) {
+        lastWaveSampleTsRef.current = ts;
+        const history = waveHistoryRef.current;
+        history.push(clamp01(current));
+        history.shift();
       }
+
       setSmoothedLevel(clamp01(current));
       setPhaseTime(ts * 0.0075);
     };
@@ -280,22 +262,21 @@ export function FloatingPill() {
   }, [micLevel, visualState]);
 
   const bars = useMemo(() => {
-    const count = 8;
-    return Array.from({ length: count }, (_, idx) => {
-      const wave =
-        0.32 +
-        0.74 *
-          Math.abs(
-            Math.sin(phaseTime + idx * 0.57) * Math.cos(phaseTime * 0.42 + idx * 0.18)
-          );
-      const floor = visualState === "idle" ? 0.1 : 0.2;
-      const level = clamp01(floor + smoothedLevel * wave);
+    const history = waveHistoryRef.current;
+    return history.map((value, idx) => {
+      // Light neighbor blending keeps the traveling profile organic instead
+      // of stair-stepped, without erasing per-bar differences.
+      const prev = history[idx - 1] ?? value;
+      const next = history[idx + 1] ?? value;
+      const blended = 0.25 * prev + 0.5 * value + 0.25 * next;
+      // Scale is capped at 1.0: a bar can fill its own height but never
+      // escape the pill capsule.
       return {
         id: idx,
-        scale: 0.2 + level * 1.2
+        scale: Math.min(1, 0.1 + blended * 0.92)
       };
     });
-  }, [phaseTime, smoothedLevel, visualState]);
+  }, [phaseTime, smoothedLevel]);
 
   return (
     <div className={`vw-pill-shell vw-pill-state-${visualState}${reviewModeActive ? " vw-pill-mode-review" : ""}`}>
