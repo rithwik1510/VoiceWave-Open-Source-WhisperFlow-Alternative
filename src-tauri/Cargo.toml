@@ -29,7 +29,7 @@ rand = "0.8.5"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.9"
-tauri = { version = "2.2.5", features = ["tray-icon"], optional = true }
+tauri = { version = "2.10", features = ["tray-icon"], optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 thiserror = "2.0.12"
