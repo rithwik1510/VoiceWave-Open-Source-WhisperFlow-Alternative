@@ -1676,6 +1676,9 @@ impl VoiceWaveController {
             silence_timeout: Duration::from_millis(silence_timeout_ms),
             release_tail: Duration::from_millis(0),
             preserve_full_capture: false,
+            // The audio-quality diagnostic doesn't use VAD warmup; inherit the
+            // disabled defaults so this stays in sync with CaptureOptions fields.
+            ..CaptureOptions::default()
         };
 
         let captured = tokio::task::spawn_blocking(move || {
@@ -2756,10 +2759,13 @@ impl VoiceWaveController {
                 let app_for_capture = app.clone();
                 let mut last_level_emit = Instant::now();
                 let (ready_tx, ready_rx) = oneshot::channel::<()>();
+                // Clone for the capture closure so the original `input_device`
+                // remains available for the no-speech error label further down.
+                let input_device_for_capture = input_device.clone();
                 let captured_task = tokio::task::spawn_blocking(move || {
                     let mut ready_tx = Some(ready_tx);
                     audio.capture_segments_from_microphone_with_signals_and_observer(
-                        input_device.as_deref(),
+                        input_device_for_capture.as_deref(),
                         capture_options,
                         || cancel_for_capture.is_cancelled(),
                         || stop_for_capture.load(Ordering::Relaxed),
