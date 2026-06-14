@@ -14,24 +14,37 @@ function Resolve-ExistingPath([string[]]$candidates) {
 }
 
 function Resolve-MingwRuntimeDirectory {
-  $pathEntries = @()
-  if (-not [string]::IsNullOrWhiteSpace($env:PATH)) {
-    $pathEntries += ($env:PATH -split ";")
+  $candidates = @()
+
+  # Explicit override (CI sets this to the MinGW that actually compiled the
+  # C++ in this build) takes priority.
+  if (-not [string]::IsNullOrWhiteSpace($env:VOICEWAVE_MINGW_BIN)) {
+    $candidates += $env:VOICEWAVE_MINGW_BIN
   }
 
-  $knownCandidates = @(
+  if (-not [string]::IsNullOrWhiteSpace($env:PATH)) {
+    $candidates += ($env:PATH -split ";")
+  }
+
+  $candidates += @(
     (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"),
     "C:\msys64\mingw64\bin",
     "C:\mingw64\bin"
   )
 
-  $candidates = @()
-  $candidates += $pathEntries
-  $candidates += $knownCandidates
-
-  $resolved = Resolve-ExistingPath $candidates
-  if ($resolved) {
-    return $resolved
+  # Return the first directory that actually CONTAINS the runtime DLL. The old
+  # logic returned the first existing directory on PATH — which, once NSIS and
+  # the VS cmake dir are prepended, is not the MinGW dir. That made the DLL copy
+  # fall through to the stale committed src-tauri/windows/libstdc++-6.dll, which
+  # is too old for the std::codecvt symbols whisper.cpp needs ("Entry Point Not
+  # Found" at app launch).
+  foreach ($dir in $candidates) {
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+      continue
+    }
+    if (Test-Path (Join-Path $dir "libstdc++-6.dll")) {
+      return (Resolve-Path $dir).Path
+    }
   }
 
   return $null

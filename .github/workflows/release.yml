@@ -85,6 +85,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --bundles nsis
 
+      - name: Verify bundled C++ runtime
+        shell: pwsh
+        run: |
+          $dll = "src-tauri/windows/libstdc++-6.dll"
+          if (-not (Test-Path $dll)) { throw "Bundled libstdc++-6.dll missing at $dll" }
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
+          if ($text -notmatch "do_unshiftERiPcS2") {
+            throw "Bundled libstdc++-6.dll lacks modern std::codecvt symbols — a stale/wrong MinGW runtime was bundled. The app would fail at launch with 'Entry Point Not Found'."
+          }
+          Write-Host "Bundled libstdc++-6.dll OK (has modern std::codecvt symbols)."
+
       - name: Locate installer + signature
         id: artifact
         shell: pwsh
