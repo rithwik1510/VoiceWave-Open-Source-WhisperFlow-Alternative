@@ -1,8 +1,10 @@
-name: Publish to winget
+name: Publish to winget (manual retry)
 
+# Automatic winget submission now runs as the `publish-winget` job inside
+# release.yml, sequenced AFTER the CI build uploads the installer asset (so it
+# never races an empty release). This workflow is kept for manual re-submission
+# of an existing release — e.g. if the winget PR needs to be regenerated.
 on:
-  release:
-    types: [released]
   workflow_dispatch:
     inputs:
       version:
@@ -21,4 +23,4 @@ jobs:
           installers-regex: 'VoiceWave\.Local\.Core_.*_x64-setup\.exe$'
           version: ${{ inputs.version || github.event.release.tag_name }}
           release-tag: ${{ inputs.version || github.event.release.tag_name }}
-          token: ${{ secrets.WINGET_TOKEN }}
+          token: ${{ secrets.WINGET }}

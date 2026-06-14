@@ -24,9 +24,21 @@
       "csp": "default-src 'self' tauri: asset: data: blob:; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com http://127.0.0.1:7699 ws://127.0.0.1:5173; media-src 'self' blob:;"
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBNzEzRTgyNTg4RjQxNkEKUldScVFZOVlnajV4Mm9TTUJGbm9uN1R2cjFoMWFXUzhrbjVTdW1kcHhLSEdmS2Ewd1huMElYdlAK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "windows/WebView2Loader.dll": "WebView2Loader.dll",
       "windows/libstdc++-6.dll": "libstdc++-6.dll",

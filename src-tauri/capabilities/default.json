@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default capability for VoiceWave Phase I runtime",
   "windows": ["main", "voicewave-pill"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:default"
+  ]
 }

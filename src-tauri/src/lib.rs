@@ -1019,6 +1019,12 @@ async fn add_dictionary_term(
 #[cfg(feature = "desktop")]
 pub fn run() {
     tauri::Builder::default()
+        // Auto-update: checks the GitHub `latest.json` endpoint configured in
+        // tauri.conf.json, verifies the artifact signature against `pubkey`,
+        // and (driven from the frontend) downloads + installs the new NSIS
+        // setup. `process` provides the relaunch after a successful install.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let controller = Arc::new(
                 VoiceWaveController::new()

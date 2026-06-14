@@ -23,13 +23,31 @@ function Ensure-GnuRustToolchain {
 }
 
 function Add-MingwToPathIfAvailable {
-  $winlibsMingw = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
-  if (Test-Path $winlibsMingw) {
-    $env:PATH = "$winlibsMingw;$env:PATH"
+  # Explicit override — used by CI, where mingw is installed to a path that is
+  # not the local winget package location.
+  if (-not [string]::IsNullOrWhiteSpace($env:VOICEWAVE_MINGW_BIN) -and (Test-Path $env:VOICEWAVE_MINGW_BIN)) {
+    $env:PATH = "$($env:VOICEWAVE_MINGW_BIN);$env:PATH"
     return
   }
 
-  throw "MinGW toolchain not found at expected WinLibs path. Install BrechtSanders.WinLibs.POSIX.UCRT via winget."
+  # Already resolvable on PATH (e.g. a setup-mingw action already prepended it).
+  if (Get-Command "gcc.exe" -ErrorAction SilentlyContinue) {
+    return
+  }
+
+  $candidatePaths = @(
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"),
+    "C:\msys64\mingw64\bin",
+    "C:\mingw64\bin"
+  )
+  foreach ($candidate in $candidatePaths) {
+    if (Test-Path $candidate) {
+      $env:PATH = "$candidate;$env:PATH"
+      return
+    }
+  }
+
+  throw "MinGW toolchain not found. Set VOICEWAVE_MINGW_BIN, put gcc.exe on PATH, or install BrechtSanders.WinLibs.POSIX.UCRT via winget."
 }
 
 function Prepend-PathEntryIfExists([string]$pathEntry) {
@@ -175,7 +193,28 @@ function Resolve-WhisperFeatureArgs {
   return @("--features", "whisper-cuda")
 }
 
+function Set-UpdaterSigningEnv([string]$repoRoot) {
+  # CI (or the caller) can provide the key directly; never override that.
+  if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+    return
+  }
+
+  $keyPath = Join-Path $repoRoot "src-tauri\.tauri\voicewave-updater.key"
+  if (-not (Test-Path $keyPath)) {
+    Write-Warning "Updater signing key not found at $keyPath. The build will still succeed but will NOT emit signed updater artifacts (.sig). Set TAURI_SIGNING_PRIVATE_KEY or restore the key to enable auto-update signing."
+    return
+  }
+
+  $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw)
+  if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+    # Local dev key was generated without a password (--ci). Production builds
+    # should set both env vars from a secret store instead.
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+  }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+Set-UpdaterSigningEnv $repoRoot
 Ensure-GnuRustToolchain
 Add-MingwToPathIfAvailable
 Add-VsCmakeToPath

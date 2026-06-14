@@ -1,0 +1,129 @@
+name: Release (build, sign, publish auto-update)
+
+# Triggered when you publish a (non-prerelease) GitHub Release. The job builds
+# the signed NSIS installer, generates the tauri-updater `latest.json`, attaches
+# both to that release, then submits the winget update. Existing installs poll
+# `releases/latest/download/latest.json` and offer the one-click update.
+#
+# Required repo secrets:
+#   TAURI_SIGNING_PRIVATE_KEY           contents of src-tauri/.tauri/voicewave-updater.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the key password ("" if generated with --ci)
+#   WINGET_TOKEN                         classic PAT with public_repo (for winget-pkgs PR)
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build, e.g. v0.4.0"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+      VIBE_SAFE_TARGET_DIR: C:\vw-target
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout at release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $version = "$env:TAG" -replace '^v', ''
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $version from tag $env:TAG"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust (GNU toolchain)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install MinGW toolchain (gcc, make, ninja)
+        shell: pwsh
+        run: |
+          # windows-latest ships MSYS2 at C:\msys64. Install the GNU toolchain
+          # into the known C:\msys64\mingw64 prefix so VOICEWAVE_MINGW_BIN below
+          # points at a deterministic path containing gcc + the runtime DLLs.
+          & C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed `
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-ninja
+          if ($LASTEXITCODE -ne 0) { throw "pacman toolchain install failed" }
+          if (-not (Test-Path "C:\msys64\mingw64\bin\gcc.exe")) { throw "gcc not found after install" }
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Install npm dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build signed installer + updater artifacts
+        shell: pwsh
+        env:
+          # The wrapper prepends this dir to PATH so the bundle step finds the
+          # MinGW runtime DLLs (libstdc++, libgcc, libwinpthread) reliably.
+          VOICEWAVE_MINGW_BIN: C:\msys64\mingw64\bin
+          # bindgen (whisper-rs-sys) needs libclang; LLVM is preinstalled on the runner.
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --bundles nsis
+
+      - name: Locate installer + signature
+        id: artifact
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "$env:VIBE_SAFE_TARGET_DIR" -Recurse -Filter "*_x64-setup.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "No *_x64-setup.exe found under $env:VIBE_SAFE_TARGET_DIR" }
+          $sig = "$($exe.FullName).sig"
+          if (-not (Test-Path $sig)) { throw "Signature not found: $sig. Was TAURI_SIGNING_PRIVATE_KEY set?" }
+          $version = "${{ steps.ver.outputs.version }}"
+          if ($exe.Name -notmatch [regex]::Escape($version)) {
+            throw "Installer '$($exe.Name)' does not match tag version '$version'. Bump version in tauri.conf.json / Cargo.toml / package.json to match the tag."
+          }
+          "exe=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Installer: $($exe.FullName)"
+
+      - name: Generate latest.json
+        shell: pwsh
+        run: |
+          $notes = gh release view "$env:TAG" --json body -q .body
+          if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "VoiceWave ${{ steps.ver.outputs.version }}" }
+          ./scripts/release/generate-latest-json.ps1 `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -InstallerPath "${{ steps.artifact.outputs.exe }}" `
+            -Notes "$notes"
+
+      - name: Attach installer + latest.json to the release
+        shell: pwsh
+        run: gh release upload "$env:TAG" "${{ steps.artifact.outputs.exe }}" "latest.json" --clobber
+
+  publish-winget:
+    needs: build-release
+    runs-on: windows-latest
+    steps:
+      - name: Submit manifest to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: VoiceWave.LocalCore
+          installers-regex: 'VoiceWave\.Local\.Core_.*_x64-setup\.exe$'
+          version: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          release-tag: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          token: ${{ secrets.WINGET }}
