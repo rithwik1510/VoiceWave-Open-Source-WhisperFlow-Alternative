@@ -13,7 +13,9 @@ src-tauri/coverage/
 
 # Tauri / Rust
 src-tauri/target/
-src-tauri/Cargo.lock
+# Cargo.lock is intentionally committed: this is a binary/app, so we want
+# reproducible CI builds (a fresh resolve once pulled a broken transitive
+# brotli-decompressor and failed the release build).
 
 # Tauri updater signing keys — NEVER commit the private key.
 # Only the .pub half is safe; it already lives in tauri.conf.json as `pubkey`.
