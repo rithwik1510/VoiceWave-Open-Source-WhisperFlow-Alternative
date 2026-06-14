@@ -43,9 +43,10 @@ npx @tauri-apps/cli signer generate -w src-tauri/.tauri/voicewave-updater.key
 > - The committed `pubkey` is safe to share. The private key is **not**.
 > - Whoever holds the private key can sign updates that auto-install on every
 >   user. Treat it like a release-signing secret.
-> - The initial key was generated **without a password** for convenience. Before
->   the first public auto-update release, regenerate it **with** a password and
->   store both halves in a secret manager.
+> - The signing key is password-protected. The private key and its password are
+>   stored only as GitHub Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`,
+>   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) and in the local gitignored
+>   `src-tauri/.tauri/` folder — back both up somewhere safe.
 > - **If the private key is lost, auto-update breaks permanently** (you can no
 >   longer sign updates the installed base will accept). Back it up.
 

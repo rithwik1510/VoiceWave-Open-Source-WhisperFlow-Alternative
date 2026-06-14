@@ -29,7 +29,7 @@
       "endpoints": [
         "https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBNzEzRTgyNTg4RjQxNkEKUldScVFZOVlnajV4Mm9TTUJGbm9uN1R2cjFoMWFXUzhrbjVTdW1kcHhLSEdmS2Ewd1huMElYdlAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFDMDdGQ0ZEOTdGNUQ2NjcKUldSbjF2V1gvZndISE9HTWNQaU5SbjVGUk01QkJlbzVFaWlRWU1PbzFiWm5MS0kwdWhoV0RqSEkK",
       "windows": {
         "installMode": "passive"
       }

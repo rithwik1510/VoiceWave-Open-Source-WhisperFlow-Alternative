@@ -98,8 +98,19 @@ jobs:
           if ($exe.Name -notmatch [regex]::Escape($version)) {
             throw "Installer '$($exe.Name)' does not match tag version '$version'. Bump version in tauri.conf.json / Cargo.toml / package.json to match the tag."
           }
-          "exe=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Installer: $($exe.FullName)"
+          # Tauri names the NSIS output from the product name, which contains
+          # spaces ("VoiceWave Local Core_..."). Normalize spaces -> dots so the
+          # published asset matches the winget installers-regex and the website
+          # download URL, and avoids %20 in the link. Renaming does not affect
+          # the signature (it is over the file bytes, which are unchanged).
+          $cleanName = ($exe.Name -replace ' ', '.')
+          $cleanExe = Join-Path $exe.DirectoryName $cleanName
+          if ($cleanExe -ne $exe.FullName) {
+            Move-Item -Force -LiteralPath $exe.FullName -Destination $cleanExe
+            Move-Item -Force -LiteralPath $sig -Destination "$cleanExe.sig"
+          }
+          "exe=$cleanExe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Installer (normalized): $cleanExe"
 
       - name: Generate latest.json
         shell: pwsh
