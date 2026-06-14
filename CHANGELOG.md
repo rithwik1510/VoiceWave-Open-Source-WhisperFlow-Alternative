@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.4.0] – 2026-06-14
+
+### Added
+- **In-app auto-update.** VoiceWave now checks GitHub on launch and offers a one-click "Install & Restart" when a newer signed release is available — no more manual re-download. Updates are cryptographically signed and verified before install.
+
+---
+
 ## [0.3.1] – 2026-04-25
 
 ### Added
