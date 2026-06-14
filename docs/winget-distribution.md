@@ -59,25 +59,29 @@ Microsoft reviews new packages more carefully than version bumps, so the first P
 
 ## Automated releases (after first submission is accepted)
 
-Subsequent version bumps are handled by `.github/workflows/winget-release.yml`. When a new GitHub release is published, the workflow:
+Subsequent version bumps are handled by `.github/workflows/release.yml`. When a new GitHub release is published, that workflow first builds and signs the installer + uploads `latest.json` (for the in-app auto-updater), then its `publish-winget` job — sequenced **after** the installer asset exists — submits the winget update via `winget-releaser`, which:
 
 1. Downloads the release installer asset
 2. Computes SHA256
-3. Uses `wingetcreate` to generate updated manifests
+3. Generates updated manifests
 4. Opens a PR against `microsoft/winget-pkgs`
+
+> The standalone `.github/workflows/winget-release.yml` is now **manual-only** (`workflow_dispatch`), kept for re-submitting an existing release. It no longer auto-runs on release, to avoid racing the CI build for the installer asset.
 
 ### Required repo secret
 
-The workflow needs a GitHub PAT stored as `WINGET_TOKEN`. The default `GITHUB_TOKEN` cannot fork external repos.
+The workflow needs a GitHub PAT stored as `WINGET`. The default `GITHUB_TOKEN` cannot fork external repos.
 
 1. Create a classic PAT at https://github.com/settings/tokens with scope: `public_repo`.
-2. Add it to the repo at Settings -> Secrets and variables -> Actions -> New repository secret, named `WINGET_TOKEN`.
+2. Add it to the repo at Settings -> Secrets and variables -> Actions -> New repository secret, named `WINGET`.
+
+(See `docs/auto-update.md` for the `TAURI_SIGNING_PRIVATE_KEY` secrets the build step needs.)
 
 ### Triggering manually
 
 If you need to resubmit a version (or retry after a failed auto-run):
 
-1. Go to Actions -> "Publish to winget" -> Run workflow
+1. Go to Actions -> "Publish to winget (manual retry)" -> Run workflow
 2. Enter the release tag (e.g. `v0.2.0`)
 
 ## Caveats

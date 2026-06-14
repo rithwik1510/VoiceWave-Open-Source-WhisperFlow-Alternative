@@ -24,6 +24,7 @@ import {
   subscribeCloudAuth
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
+import { UpdatePrompt } from "./components/UpdatePrompt";
 import { useVoiceWave } from "./hooks/useVoiceWave";
 import { THEMES } from "./prototype/constants";
 import { Dashboard } from "./prototype/components/Dashboard";
@@ -897,6 +898,7 @@ function App() {
 
   return (
     <>
+      <UpdatePrompt />
       <Layout
         theme={theme}
         activeNav={activeNav}

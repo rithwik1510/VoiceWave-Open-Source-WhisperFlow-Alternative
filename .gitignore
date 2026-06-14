@@ -15,6 +15,10 @@ src-tauri/coverage/
 src-tauri/target/
 src-tauri/Cargo.lock
 
+# Tauri updater signing keys — NEVER commit the private key.
+# Only the .pub half is safe; it already lives in tauri.conf.json as `pubkey`.
+src-tauri/.tauri/
+
 # Alternate Rust build targets (phase 3 staging, etc.)
 .phase3-target/
 .phase3-target-*/
