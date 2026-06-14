@@ -15,5 +15,25 @@ src-tauri/coverage/
 src-tauri/target/
 src-tauri/Cargo.lock
 
+# Alternate Rust build targets (phase 3 staging, etc.)
+.phase3-target/
+.phase3-target-*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
+
+# IDE / editor
+.vscode/
+
+# Agent / AI tooling (local scratch)
+.claude/
+.superpowers/
+
+# Local temp / diagnostic scratch files
+tmp-*
+
 # Local app data
 .voicewave/
