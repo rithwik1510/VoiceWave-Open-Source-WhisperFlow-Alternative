@@ -146,6 +146,8 @@ describe("tauri bridge", () => {
     await tauri.getDictionaryTerms("voice");
     await tauri.removeDictionaryTerm("dt-1");
     await tauri.addDictionaryTerm("VoiceWave");
+    await tauri.exportDictionary();
+    await tauri.importDictionary("{\"version\":1}");
 
     expect(coreMocks.invoke).toHaveBeenCalledWith("get_voicewave_snapshot", undefined);
     expect(coreMocks.invoke).toHaveBeenCalledWith("set_owner_device_override", {
@@ -164,6 +166,10 @@ describe("tauri bridge", () => {
       normalizedText: "VoiceWave"
     });
     expect(coreMocks.invoke).toHaveBeenCalledWith("add_dictionary_term", { term: "VoiceWave" });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("export_dictionary", undefined);
+    expect(coreMocks.invoke).toHaveBeenCalledWith("import_dictionary", {
+      payload: "{\"version\":1}"
+    });
     expect(coreMocks.invoke.mock.calls.length).toBeGreaterThanOrEqual(55);
   });
 });

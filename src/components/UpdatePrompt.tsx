@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, X } from "lucide-react";
 
 import {
@@ -7,8 +7,32 @@ import {
   checkForUpdate,
   installPendingUpdate
 } from "../lib/updater";
+import type { PillNoticePayload } from "../types/voicewave";
 
 type Phase = "idle" | "available" | "installing" | "error";
+
+/**
+ * Announce a ready-to-install update on the floating pill (a separate
+ * always-on-top window) so it surfaces Dynamic-Island style. Best-effort: a
+ * failed broadcast must never interrupt the in-app update dialog.
+ */
+async function announceUpdateOnPill(version: string): Promise<void> {
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    const notice: PillNoticePayload = {
+      id: Date.now(),
+      severity: "info",
+      title: "Update ready",
+      detail: `VoiceWave ${version} — restart to install it.`,
+      durationMs: 6000,
+      transcript: null,
+      action: null
+    };
+    await emit("voicewave://pill-notice", notice);
+  } catch (err) {
+    console.warn("VoiceWave pill update notice failed:", err);
+  }
+}
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) {
@@ -32,6 +56,9 @@ export function UpdatePrompt() {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  // Remembers the version we've already announced on the pill so a re-render or
+  // repeated check never fires a duplicate Dynamic-Island notice.
+  const announcedVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -41,6 +68,12 @@ export function UpdatePrompt() {
         if (active && found) {
           setUpdate(found);
           setPhase("available");
+          // `found` is only truthy inside the Tauri runtime (checkForUpdate
+          // returns null in the browser/tests), so the pill window exists here.
+          if (announcedVersionRef.current !== found.version) {
+            announcedVersionRef.current = found.version;
+            void announceUpdateOnPill(found.version);
+          }
         }
       } catch (err) {
         // A failed check (offline, rate-limited, etc.) should never interrupt

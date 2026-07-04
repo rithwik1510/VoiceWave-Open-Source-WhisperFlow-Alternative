@@ -101,6 +101,11 @@ pub struct LatencyMetricRecord {
     #[serde(default)]
     pub insertion_target_class: Option<String>,
     pub success: bool,
+    /// OS input volume of the default capture endpoint at dictation start
+    /// (0-100). Ground truth for "quality suddenly dropped" triage: external
+    /// apps lower this without user action.
+    #[serde(default)]
+    pub mic_input_volume_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -628,6 +633,7 @@ mod tests {
                 insertion_method: Some("direct".to_string()),
                 insertion_target_class: Some("editor".to_string()),
                 success: true,
+                mic_input_volume_percent: None,
             },
             LatencyMetricRecord {
                 session_id: 2,
@@ -686,6 +692,7 @@ mod tests {
                 insertion_method: Some("clipboardPaste".to_string()),
                 insertion_target_class: Some("browser".to_string()),
                 success: true,
+                mic_input_volume_percent: None,
             },
         ];
 
@@ -768,6 +775,7 @@ mod tests {
                 insertion_method: Some("historyFallback".to_string()),
                 insertion_target_class: Some("unknown".to_string()),
                 success: false,
+                mic_input_volume_percent: None,
             },
             LatencyMetricRecord {
                 session_id: 2,
@@ -826,6 +834,7 @@ mod tests {
                 insertion_method: Some("direct".to_string()),
                 insertion_target_class: Some("editor".to_string()),
                 success: true,
+                mic_input_volume_percent: None,
             },
         ];
 
@@ -898,6 +907,7 @@ mod tests {
                 insertion_method: Some("direct".to_string()),
                 insertion_target_class: Some("editor".to_string()),
                 success: true,
+                mic_input_volume_percent: None,
             })
             .expect("persist encrypted diagnostics");
 

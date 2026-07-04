@@ -2,6 +2,7 @@ mod audio_pipeline;
 mod backend;
 mod executor;
 mod faster_whisper;
+pub mod llm_polish;
 mod policy;
 
 pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};

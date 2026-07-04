@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VoiceWave Local Core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.voicewave.localcore",
   "build": {
     "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
@@ -45,7 +45,8 @@
       "windows/libgcc_s_seh-1.dll": "libgcc_s_seh-1.dll",
       "windows/libwinpthread-1.dll": "libwinpthread-1.dll",
       "windows/faster-whisper/worker.py": "faster-whisper/worker.py",
-      "windows/faster-whisper/python": "faster-whisper/python"
+      "windows/faster-whisper/python": "faster-whisper/python",
+      "windows/llm-polish/polish_worker.py": "llm-polish/polish_worker.py"
     },
     "windows": {
       "nsis": {

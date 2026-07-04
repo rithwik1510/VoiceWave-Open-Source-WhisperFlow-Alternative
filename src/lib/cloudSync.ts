@@ -1,30 +1,31 @@
-import type { User } from "firebase/auth";
-import {
-  createUserWithEmailAndPassword,
-  getRedirectResult,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  signInWithRedirect,
-  signOut,
-  updateProfile
-} from "firebase/auth";
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  orderBy,
-  query,
-  setDoc,
-  where
-} from "firebase/firestore";
-import { firebaseAuth, firebaseDb, firebaseEnabled } from "./firebase";
+import type { Auth, User } from "firebase/auth";
+import type { Firestore } from "firebase/firestore";
+import { firebaseEnabled, getFirebase } from "./firebase";
 import type { DictionaryTerm } from "../types/voicewave";
+
+// The Firebase SDK is loaded lazily so it stays out of the main bundle. These
+// thin loaders wrap the dynamic imports; `vi.mock` intercepts them in tests.
+function loadAuthSdk() {
+  return import("firebase/auth");
+}
+
+function loadFirestoreSdk() {
+  return import("firebase/firestore");
+}
+
+/**
+ * Resolves the initialized Firebase handles, throwing the same "not configured"
+ * error the previous synchronous `requireCloud` guard produced.
+ */
+async function getCloud(): Promise<{ auth: Auth; db: Firestore }> {
+  const handles = firebaseEnabled ? await getFirebase() : null;
+  if (!handles) {
+    throw new Error(
+      "Firebase is not configured. Set VITE_FIREBASE_* variables to enable cloud auth and sync."
+    );
+  }
+  return handles;
+}
 
 const MAX_RECENT_SENTENCES = 5;
 const MAX_NAME_LENGTH = 80;
@@ -258,14 +259,6 @@ async function withCloudRetry<T>(
   );
 }
 
-function requireCloud(): void {
-  if (!firebaseEnabled || !firebaseAuth || !firebaseDb) {
-    throw new Error(
-      "Firebase is not configured. Set VITE_FIREBASE_* variables to enable cloud auth and sync."
-    );
-  }
-}
-
 function readFirebaseMessage(error: unknown): string {
   if (!error || typeof error !== "object") {
     return "Cloud request failed.";
@@ -325,8 +318,28 @@ export function getCloudErrorMessage(error: unknown): string {
 }
 
 export function subscribeCloudAuth(listener: (user: User | null) => void): () => void {
-  requireCloud();
-  return onAuthStateChanged(firebaseAuth!, listener);
+  if (!firebaseEnabled) {
+    throw new Error(
+      "Firebase is not configured. Set VITE_FIREBASE_* variables to enable cloud auth and sync."
+    );
+  }
+  let unsubscribe: (() => void) | null = null;
+  let cancelled = false;
+  void (async () => {
+    const { auth } = await getCloud();
+    const { onAuthStateChanged } = await loadAuthSdk();
+    if (cancelled) {
+      return;
+    }
+    unsubscribe = onAuthStateChanged(auth, listener);
+  })();
+  return () => {
+    cancelled = true;
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+  };
 }
 
 export async function signUpCloud(input: {
@@ -335,13 +348,15 @@ export async function signUpCloud(input: {
   name: string;
   workspaceRole: string;
 }): Promise<CloudProfile> {
-  requireCloud();
+  const { auth, db } = await getCloud();
+  const { createUserWithEmailAndPassword, updateProfile } = await loadAuthSdk();
+  const { doc, setDoc } = await loadFirestoreSdk();
   try {
     const email = clampTrimmed(input.email, MAX_EMAIL_LENGTH);
     const nameInput = clampTrimmed(input.name, MAX_NAME_LENGTH);
     const workspaceRole = clampTrimmed(input.workspaceRole, MAX_WORKSPACE_ROLE_LENGTH);
     const credential = await createUserWithEmailAndPassword(
-      firebaseAuth!,
+      auth,
       email,
       input.password
     );
@@ -350,7 +365,7 @@ export async function signUpCloud(input: {
 
     const profile = toProfile(credential.user, workspaceRole || "Personal Workspace");
     await setDoc(
-      doc(firebaseDb!, "users", credential.user.uid),
+      doc(db, "users", credential.user.uid),
       {
         name: profile.name,
         email: profile.email,
@@ -367,10 +382,11 @@ export async function signUpCloud(input: {
 }
 
 export async function signInCloud(email: string, password: string): Promise<CloudProfile> {
-  requireCloud();
+  const { auth } = await getCloud();
+  const { signInWithEmailAndPassword } = await loadAuthSdk();
   try {
     const credential = await signInWithEmailAndPassword(
-      firebaseAuth!,
+      auth,
       clampTrimmed(email, MAX_EMAIL_LENGTH),
       password
     );
@@ -381,12 +397,13 @@ export async function signInCloud(email: string, password: string): Promise<Clou
 }
 
 export async function signInWithGoogleCloud(): Promise<CloudProfile> {
-  requireCloud();
+  const { auth } = await getCloud();
+  const { GoogleAuthProvider, signInWithPopup, signInWithRedirect } = await loadAuthSdk();
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
 
   try {
-    const credential = await signInWithPopup(firebaseAuth!, provider);
+    const credential = await signInWithPopup(auth, provider);
     return ensureCloudProfile(credential.user, "Personal Workspace");
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error
@@ -394,7 +411,7 @@ export async function signInWithGoogleCloud(): Promise<CloudProfile> {
       : "";
 
     if (code === "auth/popup-blocked") {
-      await signInWithRedirect(firebaseAuth!, provider);
+      await signInWithRedirect(auth, provider);
       throw new Error("GOOGLE_REDIRECT_STARTED");
     }
 
@@ -403,9 +420,10 @@ export async function signInWithGoogleCloud(): Promise<CloudProfile> {
 }
 
 export async function completeGoogleRedirectSignIn(): Promise<CloudProfile | null> {
-  requireCloud();
+  const { auth } = await getCloud();
+  const { getRedirectResult } = await loadAuthSdk();
   try {
-    const credential = await getRedirectResult(firebaseAuth!);
+    const credential = await getRedirectResult(auth);
     if (!credential?.user) {
       return null;
     }
@@ -416,27 +434,30 @@ export async function completeGoogleRedirectSignIn(): Promise<CloudProfile | nul
 }
 
 export async function signOutCloud(): Promise<void> {
-  requireCloud();
+  const { auth } = await getCloud();
+  const { signOut } = await loadAuthSdk();
   try {
-    await signOut(firebaseAuth!);
+    await signOut(auth);
   } catch (error) {
     throw normalizeCloudError(error, "signout");
   }
 }
 
 export async function requestPasswordResetCloud(email: string): Promise<void> {
-  requireCloud();
+  const { auth } = await getCloud();
+  const { sendPasswordResetEmail } = await loadAuthSdk();
   try {
-    await sendPasswordResetEmail(firebaseAuth!, clampTrimmed(email, MAX_EMAIL_LENGTH));
+    await sendPasswordResetEmail(auth, clampTrimmed(email, MAX_EMAIL_LENGTH));
   } catch (error) {
     throw normalizeCloudError(error, "password-reset");
   }
 }
 
 export async function ensureCloudProfile(user: User, fallbackWorkspaceRole: string): Promise<CloudProfile> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { doc, getDoc, setDoc } = await loadFirestoreSdk();
   try {
-    const userRef = doc(firebaseDb!, "users", user.uid);
+    const userRef = doc(db, "users", user.uid);
     const existing = await getDoc(userRef);
     const baseProfile = toProfile(user, clampTrimmed(fallbackWorkspaceRole, MAX_WORKSPACE_ROLE_LENGTH));
 
@@ -473,10 +494,11 @@ export async function ensureCloudProfile(user: User, fallbackWorkspaceRole: stri
 }
 
 export async function listRecentCloudSentences(uid: string): Promise<CloudSentence[]> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { collection, getDocs, limit, orderBy, query } = await loadFirestoreSdk();
   const rows = await getDocs(
     query(
-      collection(firebaseDb!, "users", uid, "recentSentences"),
+      collection(db, "users", uid, "recentSentences"),
       orderBy("createdAtUtcMs", "desc"),
       limit(MAX_RECENT_SENTENCES)
     )
@@ -493,7 +515,9 @@ export async function listRecentCloudSentences(uid: string): Promise<CloudSenten
 }
 
 export async function saveCloudSentence(uid: string, text: string): Promise<CloudSentence[]> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { collection, deleteDoc, doc, getDocs, orderBy, query, setDoc } =
+    await loadFirestoreSdk();
   const normalized = clampTrimmed(text, MAX_SENTENCE_LENGTH);
   if (!normalized) {
     return listRecentCloudSentences(uid);
@@ -513,14 +537,14 @@ export async function saveCloudSentence(uid: string, text: string): Promise<Clou
 
   const context = "save-sentence";
   return withCloudRetry(async () => {
-    const rowRef = doc(collection(firebaseDb!, "users", uid, "recentSentences"));
+    const rowRef = doc(collection(db, "users", uid, "recentSentences"));
     await setDoc(rowRef, {
       text: normalized,
       createdAtUtcMs: Date.now()
     });
 
     const recentRows = await getDocs(
-      query(collection(firebaseDb!, "users", uid, "recentSentences"), orderBy("createdAtUtcMs", "desc"))
+      query(collection(db, "users", uid, "recentSentences"), orderBy("createdAtUtcMs", "desc"))
     );
     const stale = recentRows.docs.slice(MAX_RECENT_SENTENCES);
     await Promise.all(stale.map((entry) => deleteDoc(entry.ref)));
@@ -537,9 +561,10 @@ export async function saveCloudSentence(uid: string, text: string): Promise<Clou
 }
 
 export async function listCloudDictionaryTerms(uid: string): Promise<DictionaryTerm[]> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { collection, getDocs, orderBy, query } = await loadFirestoreSdk();
   const rows = await getDocs(
-    query(collection(firebaseDb!, "users", uid, "dictionaryTerms"), orderBy("createdAtUtcMs", "desc"))
+    query(collection(db, "users", uid, "dictionaryTerms"), orderBy("createdAtUtcMs", "desc"))
   );
   return rows.docs.map((row) => mapDictionaryTermRow({ id: row.id, data: () => row.data() }));
 }
@@ -549,7 +574,8 @@ export async function addCloudDictionaryTerm(
   term: string,
   source = "manual-add"
 ): Promise<DictionaryTerm[]> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { collection, doc, getDocs, limit, query, setDoc, where } = await loadFirestoreSdk();
   const normalized = clampTrimmed(term, MAX_TERM_LENGTH);
   if (!normalized) {
     return listCloudDictionaryTerms(uid);
@@ -579,7 +605,7 @@ export async function addCloudDictionaryTerm(
   return withCloudRetry(async () => {
     const existing = await getDocs(
       query(
-        collection(firebaseDb!, "users", uid, "dictionaryTerms"),
+        collection(db, "users", uid, "dictionaryTerms"),
         where("termNormalized", "==", normalizedKey),
         limit(1)
       )
@@ -588,7 +614,7 @@ export async function addCloudDictionaryTerm(
       return listCloudDictionaryTerms(uid);
     }
 
-    const termRef = doc(collection(firebaseDb!, "users", uid, "dictionaryTerms"));
+    const termRef = doc(collection(db, "users", uid, "dictionaryTerms"));
     await setDoc(termRef, {
       term: normalized,
       source: normalizedSource,
@@ -601,7 +627,8 @@ export async function addCloudDictionaryTerm(
 }
 
 export async function deleteCloudDictionaryTerm(uid: string, termId: string): Promise<DictionaryTerm[]> {
-  requireCloud();
+  const { db } = await getCloud();
+  const { deleteDoc, doc } = await loadFirestoreSdk();
   const normalizedTermId = clampTrimmed(termId, 80);
   const state = getWriteState(dictionaryWriteState, uid);
   const contentHash = hashPayload(`delete:${normalizedTermId}`);
@@ -623,7 +650,7 @@ export async function deleteCloudDictionaryTerm(uid: string, termId: string): Pr
 
   const context = "delete-dictionary-term";
   return withCloudRetry(async () => {
-    await deleteDoc(doc(firebaseDb!, "users", uid, "dictionaryTerms", normalizedTermId));
+    await deleteDoc(doc(db, "users", uid, "dictionaryTerms", normalizedTermId));
     return listCloudDictionaryTerms(uid);
   }, context, state, contentHash);
 }

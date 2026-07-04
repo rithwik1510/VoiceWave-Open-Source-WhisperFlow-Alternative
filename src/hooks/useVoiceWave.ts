@@ -7,7 +7,9 @@ import {
   clearHistory,
   downloadModel,
   exportDiagnosticsBundle as exportDiagnosticsBundleCommand,
+  exportDictionary as exportDictionaryCommand,
   exportSessionHistoryPreset,
+  importDictionary as importDictionaryCommand,
   getBenchmarkResults,
   getDiagnosticsStatus,
   getDictionaryQueue,
@@ -21,7 +23,6 @@ import {
   listenVoicewaveHotkey,
   listenVoicewaveInsertion,
   listenVoicewaveLatency,
-  listenVoicewaveMicLevel,
   listenVoicewaveModel,
   listenVoicewavePermission,
   listenVoicewaveState,
@@ -64,7 +65,11 @@ import {
   triggerHotkeyAction,
   undoLastInsertion,
   updateHotkeyConfig,
-  updateSettings
+  updateSettings,
+  downloadPolishModel,
+  getPolishModelStatus,
+  listenVoicewavePolishModelProgress,
+  type PolishModelProgress
 } from "../lib/tauri";
 import type {
   AppProfileOverrides,
@@ -77,6 +82,8 @@ import type {
   DiagnosticsExportResult,
   DiagnosticsStatus,
   DictationMode,
+  DictionaryExport,
+  DictionaryImportSummary,
   DictionaryQueueItem,
   DictionaryTerm,
   HotkeyConfig,
@@ -88,7 +95,7 @@ import type {
   ModelRecommendation,
   ModelEvent,
   ModelStatus,
-  MicLevelEvent,
+  MicVolumeGuardMode,
   PermissionSnapshot,
   ProFeatureId,
   RecentInsertion,
@@ -110,14 +117,11 @@ const DEFAULT_RELEASE_TAIL_MS = 350;
 const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
-const SUPPORTED_MODEL_IDS = [
-  "fw-small.en",
-  "fw-large-v3",
-  "fw-large-v3-turbo",
-  "wcpp-small.en",
-  "wcpp-large-v3-turbo",
-] as const;
-const LEGACY_MODEL_IDS = ["tiny.en", "base.en", "small.en", "medium.en"] as const;
+const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo"] as const;
+// Retired catalog models migrate to the closest surviving option (mirrors
+// normalize_active_model_id in src-tauri/src/settings/mod.rs).
+const RETIRED_LARGE_MODEL_IDS = ["fw-large-v3", "wcpp-large-v3-turbo"] as const;
+const LEGACY_MODEL_IDS = ["tiny.en", "base.en", "small.en", "medium.en", "wcpp-small.en"] as const;
 
 function isSupportedModelId(modelId: string): boolean {
   return SUPPORTED_MODEL_IDS.includes(modelId as (typeof SUPPORTED_MODEL_IDS)[number]);
@@ -150,7 +154,8 @@ const fallbackSettings: VoiceWaveSettings = {
     preferredCasing: "preserve",
     wrapInFencedBlock: false
   },
-  proPostProcessingEnabled: false
+  proPostProcessingEnabled: false,
+  micVolumeGuard: "warn"
 };
 
 const fallbackSnapshot: VoiceWaveSnapshot = {
@@ -216,14 +221,14 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
     signature: "local"
   },
   {
-    modelId: "fw-large-v3",
-    displayName: "faster-whisper large-v3",
+    modelId: "fw-large-v3-turbo",
+    displayName: "faster-whisper large-v3-turbo (~1.6 GB, best accuracy on GPU)",
     version: "faster-whisper-v1",
     format: "faster-whisper",
-    sizeBytes: 3_094_000_000,
-    sha256: "00000000000000000000000000000000000000000000000000000000b8684430",
+    sizeBytes: 1_620_000_000,
+    sha256: "0000000000000000000000000000000000000000000000000000000060907f00",
     license: "MIT (faster-whisper + model license)",
-    downloadUrl: "faster-whisper://large-v3",
+    downloadUrl: "faster-whisper://large-v3-turbo",
     signature: "local"
   }
 ];
@@ -245,17 +250,6 @@ const MODIFIER_TOKENS = [
   "WIN",
   "WINDOWS"
 ];
-const AGENT_DEBUG_INGEST_URL = (
-  import.meta.env.VITE_AGENT_DEBUG_INGEST_URL as string | undefined
-)?.trim() ?? "";
-const AGENT_DEBUG_SESSION_ID =
-  (import.meta.env.VITE_AGENT_DEBUG_SESSION_ID as string | undefined)?.trim() || "local-debug";
-const AGENT_DEBUG_RUN_ID =
-  (import.meta.env.VITE_AGENT_DEBUG_RUN_ID as string | undefined)?.trim() || "default";
-const AGENT_DEBUG_ENABLED =
-  import.meta.env.VITE_ENABLE_AGENT_DEBUG_LOGS === "true" &&
-  AGENT_DEBUG_INGEST_URL.length > 0;
-
 export interface MicQualityWarning {
   currentDevice: string;
   message: string;
@@ -346,20 +340,6 @@ function comboMatchesKeyboardEvent(event: KeyboardEvent, combo: string): boolean
   return event.key.toUpperCase() === main;
 }
 
-function sendAgentDebugLog(payload: Record<string, unknown>): void {
-  if (!AGENT_DEBUG_ENABLED) {
-    return;
-  }
-  fetch(AGENT_DEBUG_INGEST_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": AGENT_DEBUG_SESSION_ID
-    },
-    body: JSON.stringify(payload)
-  }).catch(() => {});
-}
-
 function clampVadThreshold(value: number): number {
   if (!Number.isFinite(value)) {
     return RECOMMENDED_VAD_THRESHOLD;
@@ -385,6 +365,9 @@ function normalizeActiveModel(activeModel: string): string {
   if (SUPPORTED_MODEL_IDS.includes(activeModel as (typeof SUPPORTED_MODEL_IDS)[number])) {
     return activeModel;
   }
+  if (RETIRED_LARGE_MODEL_IDS.includes(activeModel as (typeof RETIRED_LARGE_MODEL_IDS)[number])) {
+    return "fw-large-v3-turbo";
+  }
   if (LEGACY_MODEL_IDS.includes(activeModel as (typeof LEGACY_MODEL_IDS)[number])) {
     return "fw-small.en";
   }
@@ -405,6 +388,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     appProfileOverrides: settings.appProfileOverrides ?? fallbackSettings.appProfileOverrides,
     codeMode: settings.codeMode ?? fallbackSettings.codeMode,
     proPostProcessingEnabled: settings.proPostProcessingEnabled ?? false,
+    micVolumeGuard: settings.micVolumeGuard ?? "warn",
     toggleHotkey: LOCKED_TOGGLE_HOTKEY,
     pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
   };
@@ -493,8 +477,6 @@ export function useVoiceWave() {
   const [hotkeys, setHotkeys] = useState<HotkeySnapshot>(fallbackHotkeys);
   const [permissions, setPermissions] = useState<PermissionSnapshot>(fallbackPermissions);
   const [inputDevices, setInputDevices] = useState<string[]>([]);
-  const [micLevel, setMicLevel] = useState(0);
-  const [micLevelError, setMicLevelError] = useState<string | null>(null);
   const [audioQualityReport, setAudioQualityReport] = useState<AudioQualityReport | null>(null);
   const [lastLatency, setLastLatency] = useState<LatencyBreakdownEvent | null>(null);
   const [diagnosticsStatus, setDiagnosticsStatus] =
@@ -533,32 +515,6 @@ export function useVoiceWave() {
   const timeoutHandles = useRef<number[]>([]);
   const pushToTalkLatchedRef = useRef(false);
   const autoModelSelectionTriggeredRef = useRef(false);
-  const micLevelEventRef = useRef<{ lastAt: number; lastLevel: number; lastError: string | null }>({
-    lastAt: 0,
-    lastLevel: 0,
-    lastError: null
-  });
-
-  useEffect(() => {
-    // #region agent log
-    sendAgentDebugLog({
-      sessionId: AGENT_DEBUG_SESSION_ID,
-      runId: AGENT_DEBUG_RUN_ID,
-      hypothesisId: "INIT",
-      location: "src/hooks/useVoiceWave.ts:512",
-      message: "useVoiceWave init",
-      data: {
-        tauriAvailable,
-        activeModel: settings.activeModel,
-        decodeMode: settings.decodeMode,
-        vadThreshold: settings.vadThreshold,
-        maxUtteranceMs: settings.maxUtteranceMs,
-        releaseTailMs: settings.releaseTailMs
-      },
-      timestamp: Date.now()
-    });
-    // #endregion agent log
-  }, []);
 
   const clearWebTimers = useCallback(() => {
     timeoutHandles.current.forEach((timeoutId) => {
@@ -763,7 +719,7 @@ export function useVoiceWave() {
       }
     }
 
-    const preferredInstalledOrder = ["fw-small.en", "fw-large-v3"];
+    const preferredInstalledOrder = ["fw-small.en", "fw-large-v3-turbo"];
     const installedSet = new Set(installedModels.map((row) => row.modelId));
     const fallbackInstalled =
       preferredInstalledOrder.find((modelId) => installedSet.has(modelId)) ??
@@ -780,7 +736,7 @@ export function useVoiceWave() {
 
     const bootstrapModelId =
       modelCatalog.find((row) => row.modelId === "fw-small.en")?.modelId ??
-      modelCatalog.find((row) => row.modelId === "fw-large-v3")?.modelId ??
+      modelCatalog.find((row) => row.modelId === "fw-large-v3-turbo")?.modelId ??
       modelCatalog[0]?.modelId ??
       null;
     if (!bootstrapModelId) {
@@ -820,26 +776,6 @@ export function useVoiceWave() {
             return;
           }
         }
-
-        // #region agent log
-        sendAgentDebugLog({
-          sessionId: AGENT_DEBUG_SESSION_ID,
-          runId: AGENT_DEBUG_RUN_ID,
-          hypothesisId: "A",
-          location: "src/hooks/useVoiceWave.ts:773",
-          message: "runDictation start",
-          data: {
-            mode,
-            activeModel: settings.activeModel,
-            decodeMode: settings.decodeMode,
-            vadThreshold: settings.vadThreshold,
-            maxUtteranceMs: settings.maxUtteranceMs,
-            releaseTailMs: settings.releaseTailMs,
-            tauriAvailable
-          },
-          timestamp: Date.now()
-        });
-        // #endregion agent log
 
         await ensureDictationModelReady();
         setError(null);
@@ -975,6 +911,22 @@ export function useVoiceWave() {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
       } catch (persistErr) {
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save decode mode");
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  const setMicVolumeGuard = useCallback(
+    async (mode: MicVolumeGuardMode) => {
+      const nextSettings = normalizeSettings({ ...settings, micVolumeGuard: mode });
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save mic volume guard");
       }
     },
     [settings, tauriAvailable]
@@ -1122,6 +1074,60 @@ export function useVoiceWave() {
     },
     [settings, tauriAvailable]
   );
+
+  const [polishModelProgress, setPolishModelProgress] = useState<PolishModelProgress | null>(null);
+
+  const setLlmPolishEnabled = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = { ...settings, llmPolishEnabled: enabled };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save AI polish preference");
+        return;
+      }
+      // Enabling AI polish needs the ~1 GB model. Kick off the (idempotent,
+      // single-flighted) download; progress arrives via the listener below and
+      // renders in the settings panel. A fast no-op when it is already present.
+      if (enabled) {
+        try {
+          const status = await getPolishModelStatus();
+          if (!status.present && !status.downloading) {
+            setPolishModelProgress({ downloaded: 0, total: 0, done: false, error: null });
+            void downloadPolishModel().catch(() => undefined);
+          }
+        } catch {
+          // Status check is best-effort; the worker also degrades gracefully.
+        }
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  useEffect(() => {
+    if (!tauriAvailable) {
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listenVoicewavePolishModelProgress((payload) => {
+      setPolishModelProgress(payload);
+    }).then((fn) => {
+      if (active) {
+        unlisten = fn;
+      } else {
+        fn();
+      }
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [tauriAvailable]);
 
   const setDiagnosticsOptIn = useCallback(
     async (enabled: boolean) => {
@@ -1401,7 +1407,7 @@ export function useVoiceWave() {
         completedAtUtcMs: Date.now(),
         rows: [
           { modelId: "fw-small.en", runs: 3, p50LatencyMs: 260, p95LatencyMs: 420, averageRtf: 0.41 },
-          { modelId: "fw-large-v3", runs: 3, p50LatencyMs: 510, p95LatencyMs: 830, averageRtf: 0.79 }
+          { modelId: "fw-large-v3-turbo", runs: 3, p50LatencyMs: 510, p95LatencyMs: 830, averageRtf: 0.79 }
         ]
       };
       setBenchmarkResults(run);
@@ -1672,6 +1678,19 @@ export function useVoiceWave() {
     [refreshPhase3Data, tauriAvailable]
   );
 
+  const exportDictionary = useCallback(async (): Promise<DictionaryExport> => {
+    return exportDictionaryCommand();
+  }, []);
+
+  const importDictionary = useCallback(
+    async (payload: string): Promise<DictionaryImportSummary> => {
+      const summary = await importDictionaryCommand(payload);
+      await refreshPhase3Data();
+      return summary;
+    },
+    [refreshPhase3Data]
+  );
+
   useEffect(() => {
     if (!tauriAvailable) {
       setSessionHistory([
@@ -1699,7 +1718,6 @@ export function useVoiceWave() {
     let permissionUnlisten: (() => void) | null = null;
     let hotkeyUnlisten: (() => void) | null = null;
     let modelUnlisten: (() => void) | null = null;
-    let micLevelUnlisten: (() => void) | null = null;
     let audioQualityUnlisten: (() => void) | null = null;
     let latencyUnlisten: (() => void) | null = null;
 
@@ -1808,54 +1826,12 @@ export function useVoiceWave() {
         }));
       });
 
-      micLevelUnlisten = await listenVoicewaveMicLevel((payload: MicLevelEvent) => {
-        const level = Math.max(0, Math.min(payload.level ?? 0, 1));
-        const error = payload.error ?? null;
-        const now = performance.now();
-        const prev = micLevelEventRef.current;
-        const shouldUpdateLevel =
-          Math.abs(level - prev.lastLevel) >= 0.03 || now - prev.lastAt >= 70;
-        const shouldUpdateError = error !== prev.lastError;
-        if (shouldUpdateLevel) {
-          setMicLevel(level);
-        }
-        if (shouldUpdateError) {
-          setMicLevelError(error);
-        }
-        if (shouldUpdateLevel || shouldUpdateError) {
-          micLevelEventRef.current = {
-            lastAt: now,
-            lastLevel: level,
-            lastError: error
-          };
-        }
-      });
-
       audioQualityUnlisten = await listenVoicewaveAudioQuality((payload: AudioQualityReport) => {
         setAudioQualityReport(payload);
       });
 
       latencyUnlisten = await listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
-
-        // #region agent log
-        sendAgentDebugLog({
-          sessionId: AGENT_DEBUG_SESSION_ID,
-          runId: AGENT_DEBUG_RUN_ID,
-          hypothesisId: "B",
-          location: "src/hooks/useVoiceWave.ts:1767",
-          message: "latency breakdown",
-          data: {
-            latency: payload,
-            activeModel: settings.activeModel,
-            decodeMode: settings.decodeMode,
-            vadThreshold: settings.vadThreshold,
-            maxUtteranceMs: settings.maxUtteranceMs,
-            releaseTailMs: settings.releaseTailMs
-          },
-          timestamp: Date.now()
-        });
-        // #endregion agent log
       });
     })();
 
@@ -1877,9 +1853,6 @@ export function useVoiceWave() {
       }
       if (modelUnlisten) {
         modelUnlisten();
-      }
-      if (micLevelUnlisten) {
-        micLevelUnlisten();
       }
       if (audioQualityUnlisten) {
         audioQualityUnlisten();
@@ -2100,8 +2073,6 @@ export function useVoiceWave() {
     hotkeys,
     permissions,
     inputDevices,
-    micLevel,
-    micLevelError,
     audioQualityReport,
     lastLatency,
     diagnosticsStatus,
@@ -2138,6 +2109,7 @@ export function useVoiceWave() {
     setMaxUtteranceMs,
     setReleaseTailMs,
     setDecodeMode,
+    setMicVolumeGuard,
     setFormatProfile,
     setDomainPacks,
     setAppProfiles,
@@ -2147,6 +2119,8 @@ export function useVoiceWave() {
     exportDiagnosticsBundle,
     recommendedVadThreshold: RECOMMENDED_VAD_THRESHOLD,
     setPreferClipboardFallback,
+    setLlmPolishEnabled,
+    polishModelProgress,
     updateHotkeys,
     requestMicAccess,
     runAudioQualityDiagnostic,
@@ -2169,6 +2143,8 @@ export function useVoiceWave() {
     rejectDictionaryQueueEntry,
     deleteDictionaryTerm,
     addDictionaryTerm,
+    exportDictionary,
+    importDictionary,
     canUseFeature,
     startProCheckout: startProCheckoutAction,
     refreshEntitlement,

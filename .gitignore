@@ -53,3 +53,16 @@ timeline-demo.mp4
 # runtime) would otherwise fail with "resource path doesn't exist".
 src-tauri/windows/faster-whisper/python/*
 !src-tauri/windows/faster-whisper/python/.gitkeep
+
+# LLM polish (on-device AI polish) artifacts.
+# The GGUF models are ~1-2 GB each and are downloaded on demand to the app data
+# dir, never committed. Spike outputs and byte-caches are dead weight.
+scripts/llm-polish/models/
+scripts/llm-polish/results/
+scripts/llm-polish/**/__pycache__/
+src-tauri/windows/llm-polish/__pycache__/
+# In wheelhouse, commit ONLY the prebuilt AVX2 llama-cpp-python wheel (needed by
+# the runtime build so a fresh install can run AI polish on any AVX2 CPU); the
+# small pure-Python deps come from PyPI at build time.
+scripts/llm-polish/wheelhouse/*
+!scripts/llm-polish/wheelhouse/llama_cpp_python-*-win_amd64.whl

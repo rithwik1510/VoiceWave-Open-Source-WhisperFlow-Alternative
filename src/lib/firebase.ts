@@ -1,6 +1,5 @@
-import { getApp, getApps, initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import type { Auth } from "firebase/auth";
+import type { Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string | undefined,
@@ -38,12 +37,37 @@ if (hasAnyFirebaseConfig && !hasFirebaseConfig) {
 
 const shouldBootFirebase = cloudSyncRuntimeEnabled && hasFirebaseConfig;
 
-const firebaseApp = shouldBootFirebase
-  ? getApps().length > 0
-    ? getApp()
-    : initializeApp(firebaseConfig)
-  : null;
+/**
+ * Synchronous predicate computed purely from env/config. Callers (e.g. App.tsx)
+ * can read this without pulling the Firebase SDK into the main bundle, because
+ * the SDK is only ever loaded lazily via {@link getFirebase}.
+ */
+export const firebaseEnabled = shouldBootFirebase;
 
-export const firebaseEnabled = Boolean(firebaseApp);
-export const firebaseAuth = firebaseApp ? getAuth(firebaseApp) : null;
-export const firebaseDb = firebaseApp ? getFirestore(firebaseApp) : null;
+export interface FirebaseHandles {
+  auth: Auth;
+  db: Firestore;
+}
+
+let firebasePromise: Promise<FirebaseHandles | null> | null = null;
+
+/**
+ * Lazily loads the Firebase SDK (via dynamic import) and initializes the app
+ * exactly once. Returns the auth/firestore handles, or `null` when cloud sync
+ * is disabled. The dynamic imports keep `firebase/*` out of the main JS chunk.
+ */
+export function getFirebase(): Promise<FirebaseHandles | null> {
+  if (!firebaseEnabled) {
+    return Promise.resolve(null);
+  }
+  if (!firebasePromise) {
+    firebasePromise = (async () => {
+      const { getApp, getApps, initializeApp } = await import("firebase/app");
+      const { getAuth } = await import("firebase/auth");
+      const { getFirestore } = await import("firebase/firestore");
+      const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+      return { auth: getAuth(app), db: getFirestore(app) };
+    })();
+  }
+  return firebasePromise;
+}

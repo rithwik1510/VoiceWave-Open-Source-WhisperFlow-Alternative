@@ -8,6 +8,8 @@ import type {
   DomainPackId,
   DiagnosticsExportResult,
   DiagnosticsStatus,
+  DictionaryExport,
+  DictionaryImportSummary,
   DictionaryQueueItem,
   DictionaryTerm,
   DictationMode,
@@ -29,6 +31,7 @@ import type {
   ModelRecommendation,
   ModelStatus,
   MicLevelEvent,
+  PillNoticePayload,
   PermissionSnapshot,
   RecentInsertion,
   RecommendationConstraints,
@@ -65,6 +68,40 @@ export async function invokeVoicewave<T>(command: string, args?: Record<string, 
 
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, args);
+}
+
+export interface PolishModelStatus {
+  present: boolean;
+  downloading: boolean;
+}
+
+export interface PolishModelProgress {
+  downloaded: number;
+  total: number;
+  done: boolean;
+  error: string | null;
+}
+
+/** Whether the on-device AI-polish model is downloaded and/or downloading. */
+export async function getPolishModelStatus(): Promise<PolishModelStatus> {
+  return invokeVoicewave<PolishModelStatus>("polish_model_status");
+}
+
+/** Kick off the (idempotent, single-flighted) ~1 GB polish-model download. */
+export async function downloadPolishModel(): Promise<void> {
+  await invokeVoicewave<void>("download_polish_model");
+}
+
+export async function listenVoicewavePolishModelProgress(
+  callback: (payload: PolishModelProgress) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://polish-model-progress", (event: Event<PolishModelProgress>) =>
+    callback(event.payload)
+  );
 }
 
 export async function listenVoicewaveState(
@@ -135,6 +172,18 @@ export async function listenVoicewaveMicLevel(
   }
   const { listen } = await import("@tauri-apps/api/event");
   return listen("voicewave://mic-level", (event: Event<MicLevelEvent>) => callback(event.payload));
+}
+
+export async function listenVoicewavePillNotice(
+  callback: (payload: PillNoticePayload) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://pill-notice", (event: Event<PillNoticePayload>) =>
+    callback(event.payload)
+  );
 }
 
 export async function listenVoicewaveAudioQuality(
@@ -307,6 +356,14 @@ export async function setPillReviewMode(reviewMode: boolean): Promise<void> {
   await invokeVoicewave<void>("set_pill_review_mode", { reviewMode });
 }
 
+export async function setPillNoticeMode(noticeMode: boolean, interactive = false): Promise<void> {
+  await invokeVoicewave<void>("set_pill_notice_mode", { noticeMode, interactive });
+}
+
+export async function copyTextToClipboard(text: string): Promise<void> {
+  await invokeVoicewave<void>("copy_text_to_clipboard", { text });
+}
+
 export async function triggerHotkeyAction(action: HotkeyAction, phase: HotkeyPhase): Promise<void> {
   await invokeVoicewave<void>("trigger_hotkey_action", { action, phase });
 }
@@ -430,4 +487,12 @@ export async function removeDictionaryTerm(termId: string): Promise<void> {
 
 export async function addDictionaryTerm(term: string): Promise<DictionaryTerm> {
   return invokeVoicewave<DictionaryTerm>("add_dictionary_term", { term });
+}
+
+export async function exportDictionary(): Promise<DictionaryExport> {
+  return invokeVoicewave<DictionaryExport>("export_dictionary");
+}
+
+export async function importDictionary(payload: string): Promise<DictionaryImportSummary> {
+  return invokeVoicewave<DictionaryImportSummary>("import_dictionary", { payload });
 }

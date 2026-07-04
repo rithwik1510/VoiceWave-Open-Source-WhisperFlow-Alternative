@@ -122,6 +122,23 @@ Write-Host "Installing faster-whisper runtime (CPU)..."
 & $py -m pip install --no-warn-script-location -r $RequirementsFile
 if ($LASTEXITCODE -ne 0) { throw "pip install of runtime requirements failed" }
 
+# llama-cpp-python powers the on-device AI-polish worker (polish_worker.py).
+# We install our OWN prebuilt CPU wheel, NOT the stock PyPI one: the official
+# wheel is compiled with AVX-512 and crashes with 0xC000001D (illegal
+# instruction) on CPUs that lack it. Our wheel (scripts/llm-polish/wheelhouse)
+# targets AVX2/FMA/F16C only — broad compatibility across shipped machines.
+# --find-links resolves llama-cpp-python from that local wheel; its small pure
+# deps (diskcache, jinja2) come from PyPI.
+Write-Host "Installing on-device AI-polish runtime (llama-cpp-python, AVX2 CPU wheel)..."
+$llamaWheelhouse = Join-Path $repoRoot "scripts\llm-polish\wheelhouse"
+$llamaWheel = Get-ChildItem (Join-Path $llamaWheelhouse "llama_cpp_python-*-win_amd64.whl") -ErrorAction SilentlyContinue |
+  Select-Object -First 1
+if (-not $llamaWheel) {
+  throw "AVX2 llama-cpp-python wheel not found in $llamaWheelhouse. It must be committed (or built via scripts/llm-polish/build_llama.bat) so the AI-polish runtime can ship."
+}
+& $py -m pip install --no-warn-script-location --find-links $llamaWheelhouse $llamaWheel.Name
+if ($LASTEXITCODE -ne 0) { throw "pip install of llama-cpp-python failed" }
+
 Write-Host "Trimming runtime to reduce installer size..."
 # Byte-caches and the stdlib test suite are dead weight in a shipped runtime.
 Get-ChildItem -Path $pythonDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
@@ -130,7 +147,7 @@ $stdlibTest = Join-Path $pythonDir "Lib\test"
 if (Test-Path $stdlibTest) { Remove-Item -Recurse -Force $stdlibTest -ErrorAction SilentlyContinue }
 
 Write-Host "Verifying runtime imports..."
-$check = 'import faster_whisper, ctranslate2, numpy, av, onnxruntime, tokenizers, huggingface_hub; from faster_whisper import WhisperModel; print("embedded runtime OK:", faster_whisper.__version__, ctranslate2.__version__)'
+$check = 'import faster_whisper, ctranslate2, numpy, av, onnxruntime, tokenizers, huggingface_hub, llama_cpp; from faster_whisper import WhisperModel; from llama_cpp import Llama; print("embedded runtime OK:", faster_whisper.__version__, ctranslate2.__version__, "llama_cpp", llama_cpp.__version__)'
 & $py -c $check
 if ($LASTEXITCODE -ne 0) { throw "Runtime import self-check failed" }
 

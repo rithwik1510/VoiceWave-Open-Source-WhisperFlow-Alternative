@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  addDictionaryTerm,
   approveDictionaryEntry,
   canUseTauri,
+  copyTextToClipboard,
   getDictionaryQueue,
   loadSnapshot,
   rejectDictionaryEntry,
   listenVoicewaveMicLevel,
+  listenVoicewavePillNotice,
   listenVoicewaveState,
+  setPillNoticeMode,
   setPillReviewMode,
   showMainWindow
 } from "../lib/tauri";
-import type { DictionaryQueueItem, VoiceWaveHudState } from "../types/voicewave";
+import type {
+  DictionaryQueueItem,
+  PillNoticePayload,
+  VoiceWaveHudState
+} from "../types/voicewave";
 
 type VisualState = "idle" | "listening" | "transcribing" | "inserted" | "error";
 
@@ -26,6 +34,14 @@ export function FloatingPill() {
   const [phaseTime, setPhaseTime] = useState(0);
   const [reviewItem, setReviewItem] = useState<DictionaryQueueItem | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  // Dynamic Island notice: any runtime condition the core wants the user to
+  // see (mic guard warnings, failures) expands the pill for a few seconds.
+  const [notice, setNotice] = useState<PillNoticePayload | null>(null);
+  // Actionable notices carry a one-tap button; this tracks its local
+  // post-action confirmation state ("Copied ✓" / "Added ✓") shared across
+  // action kinds.
+  const [actionDone, setActionDone] = useState(false);
+  const noticeTimerRef = useRef<number | null>(null);
   const previousRawStateRef = useRef<VoiceWaveHudState>("idle");
   // Slowly-decaying running peak for auto-gain normalization of the waveform.
   const levelPeakRef = useRef(0.08);
@@ -49,6 +65,27 @@ export function FloatingPill() {
     setReviewItem(null);
     setReviewBusy(false);
   }, []);
+
+  // Notice auto-dismiss is a single-shot timer we can re-arm. Rescue notices
+  // pause it on hover (clear) and resume a short grace on leave (re-schedule),
+  // so the user has time to read/copy before the capsule collapses.
+  const clearNoticeDismiss = useCallback(() => {
+    if (noticeTimerRef.current !== null) {
+      window.clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleNoticeDismiss = useCallback(
+    (holdMs: number) => {
+      clearNoticeDismiss();
+      noticeTimerRef.current = window.setTimeout(() => {
+        noticeTimerRef.current = null;
+        setNotice(null);
+      }, holdMs);
+    },
+    [clearNoticeDismiss]
+  );
 
   const loadReviewQueue = useCallback(async () => {
     if (!canUseTauri()) {
@@ -82,6 +119,7 @@ export function FloatingPill() {
 
     let stateUnlisten: (() => void) | null = null;
     let micUnlisten: (() => void) | null = null;
+    let noticeUnlisten: (() => void) | null = null;
 
     void (async () => {
       try {
@@ -91,6 +129,14 @@ export function FloatingPill() {
         micUnlisten = await listenVoicewaveMicLevel((payload) => {
           setMicLevel(clamp01(payload.level ?? 0));
         });
+        noticeUnlisten = await listenVoicewavePillNotice((payload) => {
+          setNotice(payload);
+          // Rescue notices (transcript present) may hold their full duration up
+          // to 10s so the user can read/copy; plain notices keep the 2.5-12s
+          // clamp. Both share the same upper bound here.
+          const holdMs = Math.min(Math.max(payload.durationMs || 5000, 2500), 12000);
+          scheduleNoticeDismiss(holdMs);
+        });
       } catch (err) {
         // If event listening is denied (e.g. this window is missing from the
         // Tauri capability config), the waveform receives no mic levels and
@@ -99,6 +145,11 @@ export function FloatingPill() {
       }
     })();
 
+    // Slow reconciliation safety net, NOT the primary state source: the
+    // voicewave://state event above drives updates. This low-frequency poll
+    // only exists so a dropped event can't strand the pill in a stale state.
+    // Kept deliberately coarse (2s) to avoid contending for the controller's
+    // snapshot lock that the dictation path holds.
     const snapshotTimer = window.setInterval(() => {
       void (async () => {
         try {
@@ -108,14 +159,18 @@ export function FloatingPill() {
           // Ignore transient snapshot poll failures in pill overlay.
         }
       })();
-    }, 180);
+    }, 2000);
 
     return () => {
       window.clearInterval(snapshotTimer);
       stateUnlisten?.();
       micUnlisten?.();
+      noticeUnlisten?.();
+      if (noticeTimerRef.current !== null) {
+        window.clearTimeout(noticeTimerRef.current);
+      }
     };
-  }, []);
+  }, [scheduleNoticeDismiss]);
 
   useEffect(() => {
     if (rawState === "inserted" || rawState === "error") {
@@ -162,6 +217,68 @@ export function FloatingPill() {
     }
     void setPillReviewMode(reviewModeActive);
   }, [reviewModeActive]);
+
+  // Review mode owns the pill window when both want it: it is interactive
+  // and larger. The notice re-expands (or collapses) once review ends.
+  const noticeActive = Boolean(notice) && !reviewModeActive;
+  // Only actionable notices (Copy button) make the OS window clickable; plain
+  // and transcript-preview-only notices stay click-through.
+  const noticeInteractive = noticeActive && notice?.action != null;
+
+  useEffect(() => {
+    if (!canUseTauri() || reviewModeActive) {
+      return;
+    }
+    void setPillNoticeMode(noticeActive, noticeInteractive);
+  }, [noticeActive, noticeInteractive, reviewModeActive]);
+
+  // A fresh notice id means a new message — clear any stale confirmation state.
+  useEffect(() => {
+    setActionDone(false);
+  }, [notice?.id]);
+
+  const handleCopyTranscript = useCallback(async () => {
+    const transcript = notice?.transcript;
+    if (!transcript) {
+      return;
+    }
+    try {
+      await copyTextToClipboard(transcript);
+      setActionDone(true);
+      // Keep the rescue capsule up a beat so the confirmation registers, then
+      // collapse it.
+      scheduleNoticeDismiss(1200);
+    } catch {
+      // Copy failed (clipboard denied): leave the button as "Copy" and keep the
+      // notice open so the user can retry. Never crash the overlay.
+    }
+  }, [notice, scheduleNoticeDismiss]);
+
+  const handleAddDictionaryTerm = useCallback(async () => {
+    const term = notice?.action?.value;
+    if (!term) {
+      return;
+    }
+    try {
+      await addDictionaryTerm(term);
+      setActionDone(true);
+      // Keep the capsule up a beat so "Added ✓" registers, then collapse.
+      scheduleNoticeDismiss(1200);
+    } catch {
+      // Add failed: leave the button so the user can retry. Never crash the overlay.
+    }
+  }, [notice, scheduleNoticeDismiss]);
+
+  // Hover pause is only wired for interactive rescue notices: holding the
+  // pointer over the capsule clears the dismiss timer; leaving re-arms a short
+  // 2s grace.
+  const handleNoticeMouseEnter = useCallback(() => {
+    clearNoticeDismiss();
+  }, [clearNoticeDismiss]);
+
+  const handleNoticeMouseLeave = useCallback(() => {
+    scheduleNoticeDismiss(2000);
+  }, [scheduleNoticeDismiss]);
 
   useEffect(
     () => () => {
@@ -279,7 +396,9 @@ export function FloatingPill() {
   }, [phaseTime, smoothedLevel]);
 
   return (
-    <div className={`vw-pill-shell vw-pill-state-${visualState}${reviewModeActive ? " vw-pill-mode-review" : ""}`}>
+    <div
+      className={`vw-pill-shell vw-pill-state-${visualState}${reviewModeActive ? " vw-pill-mode-review" : ""}${noticeActive ? ` vw-pill-mode-notice vw-pill-notice-${notice?.severity ?? "info"}${notice?.transcript ? " vw-pill-mode-rescue" : ""}` : ""}`}
+    >
       <div
         className={`vw-pill-surface${reviewModeActive ? " vw-pill-surface-review" : ""}`}
         onDoubleClick={() => {
@@ -300,6 +419,43 @@ export function FloatingPill() {
             ))}
           </div>
           <div className="vw-pill-spinner" />
+        </div>
+
+        <div
+          className="vw-pill-notice-panel"
+          aria-hidden={!noticeActive}
+          role="status"
+          {...(noticeInteractive
+            ? { onMouseEnter: handleNoticeMouseEnter, onMouseLeave: handleNoticeMouseLeave }
+            : {})}
+        >
+          <div className="vw-pill-notice-top">
+            <span className="vw-pill-notice-dot" />
+            <div className="vw-pill-notice-text">
+              <p className="vw-pill-notice-title">{notice?.title ?? ""}</p>
+              {notice?.detail ? <p className="vw-pill-notice-detail">{notice.detail}</p> : null}
+            </div>
+            {notice?.action?.kind === "copyTranscript" ? (
+              <button
+                type="button"
+                className={`vw-pill-action vw-pill-action-copy${actionDone ? " is-copied" : ""}`}
+                onClick={() => void handleCopyTranscript()}
+              >
+                {actionDone ? "Copied ✓" : "Copy"}
+              </button>
+            ) : notice?.action?.kind === "addDictionaryTerm" ? (
+              <button
+                type="button"
+                className={`vw-pill-action vw-pill-action-add${actionDone ? " is-done" : ""}`}
+                onClick={() => void handleAddDictionaryTerm()}
+              >
+                {actionDone ? "Added ✓" : notice.action.label}
+              </button>
+            ) : null}
+          </div>
+          {notice?.transcript ? (
+            <p className="vw-pill-notice-transcript">{notice.transcript}</p>
+          ) : null}
         </div>
 
         <div className="vw-pill-review-panel" aria-hidden={!reviewModeActive}>

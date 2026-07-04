@@ -26,7 +26,7 @@ use billing::{CheckoutLaunchResult, EntitlementSnapshot, PortalLaunchResult};
 #[cfg(feature = "desktop")]
 use diagnostics::{DiagnosticsExportResult, DiagnosticsStatus};
 #[cfg(feature = "desktop")]
-use dictionary::{DictionaryQueueItem, DictionaryTerm};
+use dictionary::{DictionaryExport, DictionaryImportSummary, DictionaryQueueItem, DictionaryTerm};
 #[cfg(feature = "desktop")]
 use history::{
     HistoryExportPreset, HistoryExportResult, RetentionPolicy, SessionHistoryQuery,
@@ -52,7 +52,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Listener, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
+    Emitter, Listener, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
 
@@ -75,6 +75,15 @@ const PILL_WINDOW_REVIEW_HEIGHT: f64 = 160.0;
 const PILL_WINDOW_COMPACT_BOTTOM_MARGIN: f64 = 0.0;
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_REVIEW_BOTTOM_MARGIN: f64 = 54.0;
+#[cfg(feature = "desktop")]
+// Notice mode (Dynamic Island expansion): wide enough for a one-line message
+// plus detail, anchored to the same bottom edge as the compact pill so the
+// capsule visibly grows upward instead of jumping to a new position.
+const PILL_WINDOW_NOTICE_WIDTH: f64 = 560.0;
+#[cfg(feature = "desktop")]
+const PILL_WINDOW_NOTICE_HEIGHT: f64 = 180.0;
+#[cfg(feature = "desktop")]
+const PILL_WINDOW_NOTICE_BOTTOM_MARGIN: f64 = 0.0;
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_NUDGE_X: i32 = -22;
 #[cfg(feature = "desktop")]
@@ -499,6 +508,54 @@ async fn set_pill_review_mode(app: tauri::AppHandle, review_mode: bool) -> Resul
         );
     }
     Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_pill_notice_mode(
+    app: tauri::AppHandle,
+    notice_mode: bool,
+    interactive: Option<bool>,
+) -> Result<(), String> {
+    let pill = ensure_pill_window(&app)?;
+    // Plain notices are read-only and stay click-through; rescue notices with
+    // an action button need pointer input while expanded (like review mode).
+    let interactive = notice_mode && interactive.unwrap_or(false);
+    let _ = pill.set_ignore_cursor_events(!interactive);
+    let (width, height, margin) = if notice_mode {
+        (
+            PILL_WINDOW_NOTICE_WIDTH,
+            PILL_WINDOW_NOTICE_HEIGHT,
+            PILL_WINDOW_NOTICE_BOTTOM_MARGIN,
+        )
+    } else {
+        (
+            PILL_WINDOW_COMPACT_WIDTH,
+            PILL_WINDOW_COMPACT_HEIGHT,
+            PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
+        )
+    };
+    pill.set_size(Size::Logical(LogicalSize::new(width, height)))
+        .map_err(|err| format!("failed to resize floating pill for notice: {err}"))?;
+    position_pill_window(&app, &pill, width, height, margin);
+    // A notice must be visible even when the pill was hidden (e.g. idle with
+    // HUD hidden between dictations).
+    if notice_mode {
+        let _ = pill.show();
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(text))
+            .map_err(|err| format!("clipboard copy failed: {err}"))
+    })
+    .await
+    .map_err(|err| format!("clipboard task failed: {err}"))?
 }
 
 #[cfg(feature = "desktop")]
@@ -1017,6 +1074,107 @@ async fn add_dictionary_term(
 }
 
 #[cfg(feature = "desktop")]
+#[tauri::command]
+async fn export_dictionary(
+    runtime: State<'_, RuntimeContext>,
+) -> Result<DictionaryExport, String> {
+    Ok(runtime.controller.export_dictionary().await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn import_dictionary(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+    payload: String,
+) -> Result<DictionaryImportSummary, String> {
+    runtime
+        .controller
+        .import_dictionary(app, payload)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolishModelStatus {
+    present: bool,
+    downloading: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolishModelProgress {
+    downloaded: u64,
+    total: u64,
+    done: bool,
+    error: Option<String>,
+}
+
+/// Whether the on-device AI-polish model is downloaded and/or downloading.
+/// The settings UI polls this to decide whether enabling the toggle should
+/// kick off a download.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn polish_model_status() -> Result<PolishModelStatus, String> {
+    Ok(PolishModelStatus {
+        present: crate::inference::llm_polish::is_polish_model_present(),
+        downloading: crate::inference::llm_polish::is_polish_model_downloading(),
+    })
+}
+
+/// Download the ~1 GB AI-polish model to the app data dir, emitting
+/// `voicewave://polish-model-progress` events so the settings UI can show a
+/// progress bar. Idempotent and single-flighted; safe to call on every enable.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn download_polish_model(app: tauri::AppHandle) -> Result<(), String> {
+    let progress_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::inference::llm_polish::download_polish_model(|downloaded, total| {
+            let _ = progress_app.emit(
+                "voicewave://polish-model-progress",
+                PolishModelProgress {
+                    downloaded,
+                    total,
+                    done: false,
+                    error: None,
+                },
+            );
+        })
+    })
+    .await
+    .map_err(|err| format!("polish model download task failed: {err}"))?;
+
+    match result {
+        Ok(_) => {
+            let _ = app.emit(
+                "voicewave://polish-model-progress",
+                PolishModelProgress {
+                    downloaded: 0,
+                    total: 0,
+                    done: true,
+                    error: None,
+                },
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let _ = app.emit(
+                "voicewave://polish-model-progress",
+                PolishModelProgress {
+                    downloaded: 0,
+                    total: 0,
+                    done: false,
+                    error: Some(err.clone()),
+                },
+            );
+            Err(err)
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
 pub fn run() {
     tauri::Builder::default()
         // Auto-update: checks the GitHub `latest.json` endpoint configured in
@@ -1107,6 +1265,8 @@ pub fn run() {
             set_pro_post_processing_enabled,
             show_main_window,
             set_pill_review_mode,
+            set_pill_notice_mode,
+            copy_text_to_clipboard,
             get_diagnostics_status,
             set_diagnostics_opt_in,
             export_diagnostics_bundle,
@@ -1149,7 +1309,11 @@ pub fn run() {
             reject_dictionary_entry,
             get_dictionary_terms,
             remove_dictionary_term,
-            add_dictionary_term
+            add_dictionary_term,
+            export_dictionary,
+            import_dictionary,
+            polish_model_status,
+            download_polish_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running voicewave tauri app");

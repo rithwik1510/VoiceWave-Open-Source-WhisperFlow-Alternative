@@ -36,6 +36,7 @@ import type {
   DomainPackId,
   DictionaryTerm,
   FormatProfile,
+  MicVolumeGuardMode,
   RetentionPolicy,
   VoiceWaveSettings
 } from "./types/voicewave";
@@ -43,7 +44,7 @@ import type {
 type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
-type SetupModelChoice = "fw-small.en" | "fw-large-v3";
+type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
 
 interface DemoProfile {
   name: string;
@@ -316,6 +317,8 @@ function App() {
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyTag, setHistoryTag] = useState("");
   const [dictionaryDraftTerm, setDictionaryDraftTerm] = useState("");
+  const [dictionaryPortNotice, setDictionaryPortNotice] = useState<string | null>(null);
+  const dictionaryImportInputRef = useRef<HTMLInputElement | null>(null);
   const [dictionaryPendingOpen, setDictionaryPendingOpen] = useState(false);
   const [ownerTapCount, setOwnerTapCount] = useState(0);
   const [ownerPassphrase, setOwnerPassphrase] = useState("");
@@ -395,11 +398,16 @@ function App() {
     setOwnerOverride,
     setReleaseTailMs,
     setPreferClipboardFallback,
+    setLlmPolishEnabled,
+    polishModelProgress,
+    setMicVolumeGuard,
     setProPostProcessingEnabled,
     setSessionStarred,
     setVadThreshold,
     addSessionTag,
     addDictionaryTerm,
+    exportDictionary,
+    importDictionary,
     resetVadThreshold,
     settings,
     switchToRecommendedInput,
@@ -463,7 +471,7 @@ function App() {
   const activeDictionaryTerms = cloudUserId ? cloudDictionaryTerms : dictionaryTerms;
   const hasInstalledModel = installedModels.length > 0;
   const setupCatalog = useMemo(
-    () => modelCatalog.filter((row) => row.modelId === "fw-small.en" || row.modelId === "fw-large-v3"),
+    () => modelCatalog.filter((row) => row.modelId === "fw-small.en" || row.modelId === "fw-large-v3-turbo"),
     [modelCatalog]
   );
   const showModelSetupGate = tauriAvailable && !hasInstalledModel && setupCatalog.length > 0;
@@ -869,6 +877,52 @@ function App() {
         setCloudSyncError(null);
       } catch (cloudErr) {
         setCloudSyncError(getCloudErrorMessage(cloudErr));
+      }
+    })();
+  };
+
+  const handleExportDictionary = () => {
+    void (async () => {
+      try {
+        const payload = await exportDictionary();
+        const json = JSON.stringify(payload, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "voicewave-dictionary.json";
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        setDictionaryPortNotice(`Exported ${payload.terms.length} terms.`);
+      } catch (exportErr) {
+        setDictionaryPortNotice(
+          exportErr instanceof Error ? exportErr.message : "Failed to export dictionary"
+        );
+      }
+    })();
+  };
+
+  const handleImportDictionaryFile = (event: FormEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+    void (async () => {
+      try {
+        const text = await file.text();
+        const summary = await importDictionary(text);
+        const skippedNote = summary.skipped > 0 ? ` (${summary.skipped} skipped)` : "";
+        setDictionaryPortNotice(`Imported ${summary.added} terms${skippedNote}.`);
+      } catch (importErr) {
+        setDictionaryPortNotice(
+          importErr instanceof Error ? importErr.message : "Failed to import dictionary"
+        );
+      } finally {
+        // Reset so re-selecting the same file fires the change event again.
+        input.value = "";
       }
     })();
   };
@@ -1511,6 +1565,39 @@ function App() {
 
               <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-[#09090B]">Backup &amp; Restore</p>
+                  <span className="vw-chip">Local</span>
+                </div>
+                <p className="mt-1 text-xs text-[#71717A]">
+                  Export your approved terms to a JSON file, or import a file to restore them on a
+                  new install. Duplicates are skipped.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" className="vw-btn-secondary" onClick={handleExportDictionary}>
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    className="vw-btn-secondary"
+                    onClick={() => dictionaryImportInputRef.current?.click()}
+                  >
+                    Import
+                  </button>
+                  <input
+                    ref={dictionaryImportInputRef}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={handleImportDictionaryFile}
+                  />
+                </div>
+                {dictionaryPortNotice && (
+                  <p className="mt-2 text-xs text-[#71717A]">{dictionaryPortNotice}</p>
+                )}
+              </div>
+
+              <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-semibold text-[#09090B]">Domain Dictionaries (Pro)</p>
                   <span className={`vw-chip ${isPro ? "vw-chip-accent" : ""}`}>
                     {isPro ? "Unlocked" : "Pro"}
@@ -1757,6 +1844,34 @@ function App() {
               </div>
             </section>
 
+            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+              <p className="text-sm font-semibold text-[#09090B]">Microphone volume guard</p>
+              <p className="text-xs text-[#71717A]">
+                Call apps and browser tabs can silently lower your Windows mic input volume, which
+                hurts accuracy.
+              </p>
+              <div className="mt-3 flex flex-col gap-2">
+                <select
+                  className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                  value={settings.micVolumeGuard}
+                  onChange={(event) =>
+                    void setMicVolumeGuard(event.target.value as MicVolumeGuardMode)
+                  }
+                >
+                  <option value="off">Off</option>
+                  <option value="warn">Warn me</option>
+                  <option value="autoRestore">Auto-restore</option>
+                </select>
+                <p className="text-xs text-[#71717A]">
+                  {settings.micVolumeGuard === "off"
+                    ? "Never check the Windows mic volume."
+                    : settings.micVolumeGuard === "autoRestore"
+                    ? "Restore mic volume to 100% automatically and tell you it happened."
+                    : "Show a pill notice when another app has lowered your mic volume."}
+                </p>
+              </div>
+            </section>
+
             {micQualityWarning && (
               <section className="vw-surface-elevated rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-4">
                 <p className="text-sm font-semibold text-[#09090B]">Microphone Quality Warning</p>
@@ -1798,6 +1913,58 @@ function App() {
                 <button type="button" className="vw-btn-secondary" onClick={() => void requestMicAccess()}>
                   Check Microphone Permission
                 </button>
+              </div>
+            </section>
+
+            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+              <p className="text-sm font-semibold text-[#09090B]">On-device AI polish (experimental)</p>
+              <p className="text-xs text-[#71717A]">
+                After dictation, a local model offers a cleaned-up version in the pill. Off by
+                default; nothing is sent to the cloud.
+              </p>
+              <div className="mt-3">
+                <label className="flex items-center gap-2 text-sm text-[#09090B]">
+                  <input
+                    type="checkbox"
+                    checked={settings.llmPolishEnabled ?? false}
+                    onChange={(event) => void setLlmPolishEnabled(event.target.checked)}
+                  />
+                  Enable on-device AI polish
+                </label>
+                {polishModelProgress && !polishModelProgress.done && !polishModelProgress.error && (
+                  <div className="mt-3">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E4E4E7]">
+                      <div
+                        className="h-full rounded-full bg-[#09090B] transition-all"
+                        style={{
+                          width: `${
+                            polishModelProgress.total > 0
+                              ? Math.min(
+                                  100,
+                                  Math.round((polishModelProgress.downloaded / polishModelProgress.total) * 100)
+                                )
+                              : 3
+                          }%`
+                        }}
+                      />
+                    </div>
+                    <p className="mt-1.5 text-xs text-[#71717A]">
+                      {polishModelProgress.total > 0
+                        ? `Downloading AI polish model… ${Math.round(
+                            (polishModelProgress.downloaded / polishModelProgress.total) * 100
+                          )}% (one-time, ~1 GB)`
+                        : "Preparing AI polish model download… (one-time, ~1 GB)"}
+                    </p>
+                  </div>
+                )}
+                {polishModelProgress?.done && (
+                  <p className="mt-2 text-xs text-[#16803C]">AI polish model ready.</p>
+                )}
+                {polishModelProgress?.error && (
+                  <p className="mt-2 text-xs text-[#a94444]">
+                    Model download failed: {polishModelProgress.error}
+                  </p>
+                )}
               </div>
             </section>
 
@@ -2320,12 +2487,12 @@ function App() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={setupModelChoice === "fw-large-v3"}
-                className={`vw-model-gate-tab ${setupModelChoice === "fw-large-v3" ? "vw-model-gate-tab-active" : ""}`}
-                onClick={() => setSetupModelChoice("fw-large-v3")}
+                aria-selected={setupModelChoice === "fw-large-v3-turbo"}
+                className={`vw-model-gate-tab ${setupModelChoice === "fw-large-v3-turbo" ? "vw-model-gate-tab-active" : ""}`}
+                onClick={() => setSetupModelChoice("fw-large-v3-turbo")}
                 disabled={setupModelPending}
               >
-                <span className="vw-model-gate-tab-title">Large</span>
+                <span className="vw-model-gate-tab-title">Large Turbo</span>
                 <span className="vw-model-gate-tab-copy">
                   Higher quality. Use only on high-power devices with strong GPU.
                 </span>

@@ -1,3 +1,4 @@
+use crate::audio::input_volume::MicVolumeGuardMode;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -145,6 +146,23 @@ pub struct VoiceWaveSettings {
     pub code_mode: CodeModeSettings,
     pub pro_post_processing_enabled: bool,
     pub prefer_clipboard_only_for_terminals: bool,
+    /// OS input-volume guard behavior at dictation start. Defaults to Warn:
+    /// external apps (browser AGC, call apps) silently lower the system mic
+    /// volume and tank transcription quality for every model at once.
+    #[serde(default)]
+    pub mic_volume_guard: MicVolumeGuardMode,
+    /// Opt-in one-tap "Add to dictionary?" suggestion in the pill after a
+    /// dictation with a single high-confidence correction candidate. Off by
+    /// default so the calm default UX never regresses; the dictionary review
+    /// popup already ingests these candidates independently.
+    #[serde(default)]
+    pub pill_action_suggestions: bool,
+    /// Experimental off-by-default on-device LLM "polish" (plan 005). When on,
+    /// a local model offers a cleaned-up version of a dictation in the pill
+    /// AFTER insertion (never overwriting the deterministic text). Off by
+    /// default so the shipping behavior is byte-identical unless opted in.
+    #[serde(default)]
+    pub llm_polish_enabled: bool,
 }
 
 impl Default for VoiceWaveSettings {
@@ -167,6 +185,9 @@ impl Default for VoiceWaveSettings {
             code_mode: CodeModeSettings::default(),
             pro_post_processing_enabled: true,
             prefer_clipboard_only_for_terminals: true,
+            mic_volume_guard: MicVolumeGuardMode::default(),
+            pill_action_suggestions: false,
+            llm_polish_enabled: false,
         }
     }
 }
@@ -233,9 +254,12 @@ fn normalize_active_model_id(active_model: &str) -> String {
     match active_model.trim() {
         // Every installable catalog model must be listed here, otherwise the
         // user's selection is silently reset to fw-small.en on settings load.
-        "fw-small.en" | "fw-large-v3" | "fw-large-v3-turbo" | "wcpp-small.en"
-        | "wcpp-large-v3-turbo" => active_model.trim().to_string(),
-        "tiny.en" | "base.en" | "small.en" | "medium.en" => "fw-small.en".to_string(),
+        "fw-small.en" | "fw-large-v3-turbo" => active_model.trim().to_string(),
+        // Retired catalog entries migrate to the closest surviving model.
+        "fw-large-v3" | "wcpp-large-v3-turbo" => "fw-large-v3-turbo".to_string(),
+        "tiny.en" | "base.en" | "small.en" | "medium.en" | "wcpp-small.en" => {
+            "fw-small.en".to_string()
+        }
         _ => "fw-small.en".to_string(),
     }
 }
@@ -291,7 +315,7 @@ mod tests {
         let path = temp_settings_path();
         let store = SettingsStore::from_path(path.clone());
         let settings = VoiceWaveSettings {
-            active_model: "fw-large-v3".to_string(),
+            active_model: "fw-large-v3-turbo".to_string(),
             vad_threshold: 0.025,
             max_utterance_ms: 22_000,
             release_tail_ms: 300,
@@ -315,7 +339,7 @@ mod tests {
         store.save(&settings).expect("save should succeed");
         let loaded = store.load().expect("load should succeed");
 
-        assert_eq!(loaded.active_model, "fw-large-v3");
+        assert_eq!(loaded.active_model, "fw-large-v3-turbo");
         assert!((loaded.vad_threshold - 0.025).abs() < 1e-6);
         assert_eq!(loaded.max_utterance_ms, 22_000);
         assert_eq!(loaded.release_tail_ms, 300);
@@ -352,6 +376,25 @@ mod tests {
         assert_eq!(loaded.active_model, "fw-small.en");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_migrates_retired_models_to_surviving_catalog() {
+        for (raw_model, expected) in [
+            ("fw-large-v3", "fw-large-v3-turbo"),
+            ("wcpp-large-v3-turbo", "fw-large-v3-turbo"),
+            ("wcpp-small.en", "fw-small.en"),
+        ] {
+            let path = temp_settings_path();
+            let store = SettingsStore::from_path(path.clone());
+            let raw = format!(r#"{{"activeModel":"{raw_model}"}}"#);
+            std::fs::write(&path, raw).expect("write should succeed");
+
+            let loaded = store.load().expect("load should succeed");
+            assert_eq!(loaded.active_model, expected, "migration for {raw_model}");
+
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

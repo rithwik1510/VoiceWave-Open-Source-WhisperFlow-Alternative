@@ -292,15 +292,15 @@ body,
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
-.vw-pill-state-idle:not(.vw-pill-mode-review) .vw-pill-surface:hover,
-.vw-pill-state-idle:not(.vw-pill-mode-review) .vw-pill-surface:focus-visible {
+.vw-pill-state-idle:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface:hover,
+.vw-pill-state-idle:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface:focus-visible {
   width: 72px;
   height: 18px;
   border-radius: 999px;
   transform: translateY(-4px);
 }
 
-.vw-pill-state-listening:not(.vw-pill-mode-review) .vw-pill-surface {
+.vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface {
   width: 76px;
   height: 26px;
   transform: translateY(-12px);
@@ -310,13 +310,13 @@ body,
     inset 0 -9px 18px rgba(9, 9, 11, 0.3);
 }
 
-.vw-pill-state-listening:not(.vw-pill-mode-review) .vw-pill-wave {
+.vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-wave {
   opacity: 1;
   width: 48px;
   transform: scale(1);
 }
 
-.vw-pill-state-transcribing:not(.vw-pill-mode-review) .vw-pill-surface {
+.vw-pill-state-transcribing:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface {
   width: 64px;
   height: 22px;
   transform: translateY(-12px);
@@ -326,29 +326,231 @@ body,
     inset 0 -8px 16px rgba(9, 9, 11, 0.28);
 }
 
-.vw-pill-state-transcribing:not(.vw-pill-mode-review) .vw-pill-wave {
+.vw-pill-state-transcribing:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-wave {
   opacity: 0;
   width: 0;
 }
 
-.vw-pill-state-transcribing:not(.vw-pill-mode-review) .vw-pill-spinner {
+.vw-pill-state-transcribing:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-spinner {
   opacity: 1;
   width: 12px;
   height: 12px;
   animation: vw-pill-spin 0.8s linear infinite;
 }
 
-.vw-pill-state-inserted:not(.vw-pill-mode-review) .vw-pill-surface,
-.vw-pill-state-error:not(.vw-pill-mode-review) .vw-pill-surface {
+.vw-pill-state-inserted:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface,
+.vw-pill-state-error:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface {
   width: 54px;
   height: 18px;
   transform: translateY(-8px);
 }
 
-.vw-pill-state-inserted:not(.vw-pill-mode-review) .vw-pill-wave,
-.vw-pill-state-error:not(.vw-pill-mode-review) .vw-pill-wave {
+.vw-pill-state-inserted:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-wave,
+.vw-pill-state-error:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-wave {
   width: 22px;
   opacity: 0.45;
+}
+
+/* Notice mode (Dynamic Island): the capsule elongates upward while KEEPING
+   its 999px pill shape to surface a short runtime notice, then collapses.
+   Geometry lives here at higher specificity than the per-state rules, which
+   are guarded with :not(.vw-pill-mode-notice) so they cannot fight it. */
+.vw-pill-shell.vw-pill-mode-notice .vw-pill-surface {
+  width: 420px;
+  height: 64px;
+  border-radius: 999px;
+  /* Lift clear of the screen edge so the capsule reads as floating; the base
+     surface transition supplies the spring (transform 0.34,1.45,0.64,1) and
+     the capsule ease (width/height/radius 0.22,1,0.36,1). */
+  transform: translateY(-10px);
+  background: linear-gradient(135deg, rgba(24, 24, 27, 0.94), rgba(39, 39, 42, 0.96));
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.46),
+    inset 0 0 0 1px rgba(228, 228, 231, 0.22),
+    inset 0 -10px 20px rgba(9, 9, 11, 0.3);
+  cursor: default;
+}
+
+/* Faint severity tint on the inset ring — kept low-alpha so the dark zinc
+   capsule stays dominant. */
+.vw-pill-shell.vw-pill-mode-notice.vw-pill-notice-warning .vw-pill-surface {
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.46),
+    inset 0 0 0 1px rgba(251, 191, 36, 0.26),
+    inset 0 -10px 20px rgba(9, 9, 11, 0.3);
+}
+
+.vw-pill-shell.vw-pill-mode-notice.vw-pill-notice-error .vw-pill-surface {
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.46),
+    inset 0 0 0 1px rgba(248, 113, 113, 0.26),
+    inset 0 -10px 20px rgba(9, 9, 11, 0.3);
+}
+
+/* Hide the waveform/spinner core, mirroring review mode. */
+.vw-pill-shell.vw-pill-mode-notice .vw-pill-core {
+  opacity: 0;
+  transform: scale(0.88);
+  pointer-events: none;
+}
+
+/* Rescue mode: a failed/copied insertion that preserves the dictated text.
+   The capsule elongates upward to fit two rows (headline + transcript preview)
+   while KEEPING the 999px stadium shape — the product's design law is
+   "elongate upward, keep the shape". Co-occurs with notice mode, so it inherits
+   the notice surface/severity/shadow rules and only overrides geometry. */
+.vw-pill-shell.vw-pill-mode-notice.vw-pill-mode-rescue .vw-pill-surface {
+  width: 460px;
+  height: 96px;
+  border-radius: 999px;
+  transform: translateY(-14px);
+}
+
+.vw-pill-notice-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 23px;
+  opacity: 0;
+  transform: translateY(8px);
+  /* Plain/preview notices leave the window click-through, so the panel never
+     receives input. Interactive rescue notices re-enable it below. */
+  pointer-events: none;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+}
+
+/* Top row of a notice: severity dot + title/detail + optional Copy button.
+   For plain notices this is the panel's only row, centered vertically. */
+.vw-pill-notice-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.vw-pill-shell.vw-pill-mode-notice .vw-pill-notice-panel {
+  opacity: 1;
+  transform: translateY(0);
+  /* Let the capsule begin growing before the copy fades in. */
+  transition-delay: 120ms;
+}
+
+.vw-pill-notice-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  /* Info is the default severity. */
+  background: var(--vw-brand-cyan);
+  box-shadow: 0 0 10px 1px rgba(126, 216, 255, 0.7);
+}
+
+.vw-pill-shell.vw-pill-notice-warning .vw-pill-notice-dot {
+  background: #fbbf24;
+  box-shadow: 0 0 10px 1px rgba(251, 191, 36, 0.65);
+}
+
+.vw-pill-shell.vw-pill-notice-error .vw-pill-notice-dot {
+  background: #f87171;
+  box-shadow: 0 0 10px 1px rgba(248, 113, 113, 0.65);
+}
+
+.vw-pill-notice-text {
+  flex: 1;
+  /* Required for the ellipsis children to shrink inside the flex row. */
+  min-width: 0;
+}
+
+.vw-pill-notice-title {
+  margin: 0;
+  color: #fafafa;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vw-pill-notice-detail {
+  margin: 0;
+  color: #a1a1aa;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Rescue layout: generous horizontal padding to honour the stadium shape, and
+   pointer events so the Copy button and hover-to-pause work when interactive. */
+.vw-pill-shell.vw-pill-mode-rescue .vw-pill-notice-panel {
+  padding: 0 28px;
+  gap: 7px;
+  pointer-events: auto;
+}
+
+/* Dictated text preview: quieter, inset under the title column (dot 10px + gap
+   12px = 22px), max two lines with ellipsis and word-breaking so long text
+   never overflows the capsule. */
+.vw-pill-notice-transcript {
+  margin: 0;
+  padding-left: 22px;
+  color: #d4d4d8;
+  font-size: 12px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Copy button: mirrors the review-mode action buttons; "copied" adopts the
+   lime CTA tint used by the Approve button. */
+.vw-pill-action-copy {
+  flex: none;
+}
+
+.vw-pill-action-copy:hover:not(:disabled) {
+  border-color: rgba(228, 228, 231, 0.32);
+  background: rgba(63, 63, 70, 0.78);
+}
+
+.vw-pill-action-copy.is-copied {
+  border-color: rgba(190, 242, 100, 0.82);
+  background: linear-gradient(180deg, var(--vw-cta-lime-top) 0%, var(--vw-cta-lime-bottom) 100%);
+  color: #112012;
+  box-shadow:
+    0 10px 22px -14px rgba(190, 242, 100, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.56);
+}
+
+/* Add-to-dictionary action: mirrors the copy button; "done" adopts the same
+   lime CTA confirmation tint. */
+.vw-pill-action-add {
+  flex: none;
+}
+
+.vw-pill-action-add:hover:not(:disabled) {
+  border-color: rgba(228, 228, 231, 0.32);
+  background: rgba(63, 63, 70, 0.78);
+}
+
+.vw-pill-action-add.is-done {
+  border-color: rgba(190, 242, 100, 0.82);
+  background: linear-gradient(180deg, var(--vw-cta-lime-top) 0%, var(--vw-cta-lime-bottom) 100%);
+  color: #112012;
+  box-shadow:
+    0 10px 22px -14px rgba(190, 242, 100, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.56);
 }
 
 @keyframes vw-pill-spin {
@@ -361,6 +563,7 @@ body,
   .vw-pill-surface,
   .vw-pill-core,
   .vw-pill-review-panel,
+  .vw-pill-notice-panel,
   .vw-pill-action {
     transition: none;
   }

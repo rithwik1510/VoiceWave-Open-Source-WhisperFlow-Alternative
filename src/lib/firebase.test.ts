@@ -90,6 +90,9 @@ describe("firebase boot gating", () => {
 
     const blockedInTests = await importFirebaseModule();
     expect(blockedInTests.firebaseEnabled).toBe(false);
+    // getFirebase() is a no-op when cloud sync is disabled: returns null and
+    // never touches the SDK.
+    await expect(blockedInTests.getFirebase()).resolves.toBeNull();
     expect(firebaseAppMocks.initializeApp).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
@@ -97,9 +100,18 @@ describe("firebase boot gating", () => {
 
     const enabledInTests = await importFirebaseModule();
     expect(enabledInTests.firebaseEnabled).toBe(true);
+    // The SDK is loaded lazily, so importing the module alone must not boot it.
+    expect(firebaseAppMocks.initializeApp).not.toHaveBeenCalled();
+
+    const handles = await enabledInTests.getFirebase();
+    expect(handles).not.toBeNull();
     expect(firebaseAppMocks.initializeApp).toHaveBeenCalledTimes(1);
     expect(firebaseAuthMocks.getAuth).toHaveBeenCalledTimes(1);
     expect(firestoreMocks.getFirestore).toHaveBeenCalledTimes(1);
+
+    // Subsequent calls reuse the memoized app rather than re-initializing.
+    await enabledInTests.getFirebase();
+    expect(firebaseAppMocks.initializeApp).toHaveBeenCalledTimes(1);
   });
 
   it("throws when firebase configuration is partial", async () => {

@@ -56,8 +56,7 @@ vi.mock("firebase/firestore", () => ({
 
 vi.mock("./firebase", () => ({
   firebaseEnabled: true,
-  firebaseAuth: {},
-  firebaseDb: {}
+  getFirebase: vi.fn(async () => ({ auth: {}, db: {} }))
 }));
 
 import { saveCloudSentence, signInCloud } from "./cloudSync";

@@ -519,7 +519,7 @@ fn apply_domain_corrections(input: &str, packs: &[DomainPackId]) -> String {
     text
 }
 
-fn stabilize_custom_terms(input: &str, custom_terms: &[String]) -> String {
+pub(crate) fn stabilize_custom_terms(input: &str, custom_terms: &[String]) -> String {
     let mut text = input.to_string();
     for term in custom_terms {
         let normalized = term.trim();

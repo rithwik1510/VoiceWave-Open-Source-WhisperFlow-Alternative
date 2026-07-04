@@ -14,20 +14,13 @@ use std::{
 const FASTER_WHISPER_FORMAT: &str = "faster-whisper";
 const FASTER_WHISPER_VERSION: &str = "faster-whisper-v1";
 const WCPP_FORMAT: &str = "ggml";
-const WCPP_VERSION: &str = "wcpp-v1";
 const MANIFEST_VERIFY_KEY_B64: &str = "BFHdCqQYd/56J4tm8cYMUnhrfHOR6YyJqiwXPgO+5gU=";
+// Generated via `generate_fw_small_catalog_signature` test (dev key = production key).
 const BUILTIN_FW_SMALL_SIGNATURE: &str =
-    "rMFWdTBjLS6Z57h0md+zUowiDQYeQTH/1YnCHgibS7mcF7fx0Yc28ZDsW6Wf0jXhXRerb42BbSqp1mhS9CVhDw==";
-const BUILTIN_FW_LARGE_SIGNATURE: &str =
-    "6xvz9HoVFEx1c4FE0ZjSih+k/N4wdZqRXOYwLMbJT9tvG3MCa6+uzhh+PYGMkD2l4nHgY7rVuFHb66plGLWuCA==";
+    "6pLuyp8Z495RkvKNs9MSnDu8DvG6i+kd8YHtWfQReMKNAB8DVrN6fa9I695K7R+XvxnumprISe1cOQS089cKAA==";
 // Generated via `generate_fw_turbo_catalog_signature` test (dev key = production key).
 const BUILTIN_FW_LARGE_TURBO_SIGNATURE: &str =
     "IfGO/sqcNE4flIvVG/YcTlrx2DbUDntDGHUtG1dWTiiwEwqwZbYZO/pCwf0q8YZ0gMRmHYyQLddf3Es+Ux42DQ==";
-// Signatures generated via `generate_wcpp_catalog_signatures` test (dev key = production key).
-const BUILTIN_WCPP_SMALL_EN_SIGNATURE: &str =
-    "nMS5BR7ZlqhL1N5Xdcz3VdKblmOywgJEH1BMFEnbvr25pMejZNPq08P5ljIJ3TdmIrz6oeucNc9To2KXaSNUCg==";
-const BUILTIN_WCPP_LARGE_TURBO_SIGNATURE: &str =
-    "aI7H+887k1XcMJQpEYSRO2GsVh7X5D+BTeZHcaOAeZuIHVaLPrzQoDSSiRuAeeq+Ctea0g4rXLkBJ+LpN2CTBg==";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1325,12 +1318,9 @@ fn default_model_format() -> String {
 fn manifest_to_catalog_item(manifest: &SignedModelManifest) -> ModelCatalogItem {
     let display_name = match manifest.model_id.as_str() {
         "fw-small.en" => "faster-whisper small.en".to_string(),
-        "fw-large-v3" => "faster-whisper large-v3".to_string(),
         "fw-large-v3-turbo" => {
             "faster-whisper large-v3-turbo (~1.6 GB, best accuracy on GPU)".to_string()
         }
-        "wcpp-small.en" => "small.en (whisper.cpp, ~466 MB)".to_string(),
-        "wcpp-large-v3-turbo" => "large-v3-turbo (whisper.cpp, ~1.6 GB)".to_string(),
         _ => manifest.model_id.clone(),
     };
     ModelCatalogItem {
@@ -1421,7 +1411,7 @@ fn build_catalog() -> Vec<SignedModelManifest> {
 
 fn build_synthetic_catalog() -> Vec<SignedModelManifest> {
     let version = "phase3-local-synthetic-1";
-    ["fw-small.en", "fw-large-v3"]
+    ["fw-small.en", "fw-large-v3-turbo"]
         .iter()
         .map(|model_id| {
             let is_fw = model_id.starts_with("fw-");
@@ -1449,7 +1439,7 @@ fn build_synthetic_catalog() -> Vec<SignedModelManifest> {
                 download_url: if *model_id == "fw-small.en" {
                     "faster-whisper://small.en".to_string()
                 } else {
-                    "faster-whisper://large-v3".to_string()
+                    "faster-whisper://large-v3-turbo".to_string()
                 },
                 signature: String::new(),
             };
@@ -1462,18 +1452,15 @@ fn build_synthetic_catalog() -> Vec<SignedModelManifest> {
 fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
     let mut manifests = Vec::new();
 
+    // Catalog intentionally holds exactly two options: the fast default and the
+    // best-accuracy GPU model. fw-large-v3 and the wcpp-* GGML entries were
+    // retired 2026-07; settings normalization migrates users off them.
     let faster_rows = [
         (
             "fw-small.en",
             "small.en",
             487_614_201_u64,
             BUILTIN_FW_SMALL_SIGNATURE,
-        ),
-        (
-            "fw-large-v3",
-            "large-v3",
-            3_094_000_000_u64,
-            BUILTIN_FW_LARGE_SIGNATURE,
         ),
         (
             "fw-large-v3-turbo",
@@ -1497,48 +1484,13 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
         manifests.push(manifest);
     }
 
-    // whisper.cpp (GGML) opt-in models. SHA256 is omitted for GGML format — the
-    // download code skips checksum verification for ggml and trusts HTTPS integrity.
-    let wcpp_rows = [
-        (
-            "wcpp-small.en",
-            "ggml-small.en.bin",
-            487_614_201_u64,
-            "small.en (whisper.cpp, ~466 MB)",
-            BUILTIN_WCPP_SMALL_EN_SIGNATURE,
-        ),
-        (
-            "wcpp-large-v3-turbo",
-            "ggml-large-v3-turbo.bin",
-            1_624_555_275_u64,
-            "large-v3-turbo (whisper.cpp, ~1.6 GB)",
-            BUILTIN_WCPP_LARGE_TURBO_SIGNATURE,
-        ),
-    ];
-
-    for (model_id, filename, size, _label, signature) in wcpp_rows {
-        let manifest = SignedModelManifest {
-            model_id: model_id.to_string(),
-            version: WCPP_VERSION.to_string(),
-            format: WCPP_FORMAT.to_string(),
-            size,
-            sha256: format!("{:064x}", size),
-            license: "MIT (whisper.cpp + Whisper model license)".to_string(),
-            download_url: format!(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{filename}"
-            ),
-            signature: signature.to_string(),
-        };
-        manifests.push(manifest);
-    }
-
     manifests
 }
 
 fn model_artifact_size_for(model_id: &str) -> u64 {
     match model_id {
         "fw-small.en" => 1024 * 1024,
-        "fw-large-v3" => 2 * 1024 * 1024,
+        "fw-large-v3-turbo" => 2 * 1024 * 1024,
         _ => 384 * 1024,
     }
 }
@@ -1574,43 +1526,27 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    // Run with `cargo test generate_wcpp_catalog_signatures -- --nocapture` to get
-    // the hardcoded constant values for BUILTIN_WCPP_* in model_manager/mod.rs.
+    // Run with `cargo test generate_fw_small_catalog_signature -- --nocapture` to
+    // get the hardcoded constant value for BUILTIN_FW_SMALL_SIGNATURE.
     #[test]
-    fn generate_wcpp_catalog_signatures() {
-        let wcpp_rows = [
-            (
-                "wcpp-small.en",
-                "ggml-small.en.bin",
-                487_614_201_u64,
-            ),
-            (
-                "wcpp-large-v3-turbo",
-                "ggml-large-v3-turbo.bin",
-                1_624_555_275_u64,
-            ),
-        ];
-        for (model_id, filename, size) in wcpp_rows {
-            let mut manifest = SignedModelManifest {
-                model_id: model_id.to_string(),
-                version: WCPP_VERSION.to_string(),
-                format: WCPP_FORMAT.to_string(),
-                size,
-                sha256: format!("{:064x}", size),
-                license: "MIT (whisper.cpp + Whisper model license)".to_string(),
-                download_url: format!(
-                    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{filename}"
-                ),
-                signature: String::new(),
-            };
-            manifest.signature = sign_manifest(&manifest);
-            println!("// {model_id}");
-            println!("const SIG: &str = \"{}\";", manifest.signature);
-            assert!(
-                validate_manifest_signature(&manifest).is_ok(),
-                "generated signature for {model_id} should be valid"
-            );
-        }
+    fn generate_fw_small_catalog_signature() {
+        let mut manifest = SignedModelManifest {
+            model_id: "fw-small.en".to_string(),
+            version: FASTER_WHISPER_VERSION.to_string(),
+            format: FASTER_WHISPER_FORMAT.to_string(),
+            size: 487_614_201_u64,
+            sha256: format!("{:064x}", 487_614_201_u64),
+            license: "MIT (faster-whisper + model license)".to_string(),
+            download_url: "faster-whisper://small.en".to_string(),
+            signature: String::new(),
+        };
+        manifest.signature = sign_manifest(&manifest);
+        println!("// fw-small.en");
+        println!("const SIG: &str = \"{}\";", manifest.signature);
+        assert!(
+            validate_manifest_signature(&manifest).is_ok(),
+            "generated signature for fw-small.en should be valid"
+        );
     }
 
     // Run with `cargo test generate_fw_turbo_catalog_signature -- --nocapture` to
@@ -1651,26 +1587,18 @@ mod tests {
     }
 
     #[test]
-    fn wcpp_catalog_includes_both_model_entries() {
+    fn catalog_holds_exactly_the_two_supported_models() {
         let catalog = build_whispercpp_catalog();
         let ids: Vec<&str> = catalog.iter().map(|m| m.model_id.as_str()).collect();
-        assert!(
-            ids.contains(&"wcpp-small.en"),
-            "catalog should include wcpp-small.en; got: {ids:?}"
+        assert_eq!(
+            ids,
+            vec!["fw-small.en", "fw-large-v3-turbo"],
+            "retired models (fw-large-v3, wcpp-*) must not reappear in the catalog"
         );
-        assert!(
-            ids.contains(&"wcpp-large-v3-turbo"),
-            "catalog should include wcpp-large-v3-turbo; got: {ids:?}"
-        );
-    }
-
-    #[test]
-    fn wcpp_catalog_entries_have_valid_signatures() {
-        let catalog = build_whispercpp_catalog();
-        for manifest in catalog.iter().filter(|m| m.model_id.starts_with("wcpp-")) {
+        for manifest in &catalog {
             assert!(
                 validate_manifest_signature(manifest).is_ok(),
-                "wcpp manifest '{}' should have a valid signature",
+                "manifest '{}' should have a valid signature",
                 manifest.model_id
             );
         }
@@ -1809,13 +1737,13 @@ mod tests {
     fn cancel_then_retry_completes_install() {
         let root = test_root("cancel-retry");
         let mut manager = ModelManager::with_test_paths(&root).expect("manager");
-        configure_manifest_for_file_download(&mut manager, "fw-large-v3");
+        configure_manifest_for_file_download(&mut manager, "fw-large-v3-turbo");
         manager.set_test_chunk_size(2048);
 
         let mut checks = 0_u32;
         let cancelled = manager
             .install_model_resumable(
-                "fw-large-v3",
+                "fw-large-v3-turbo",
                 || {
                     checks += 1;
                     checks > 4
@@ -1829,7 +1757,7 @@ mod tests {
         assert!(cancelled.resumable);
 
         let installed = manager
-            .install_model_resumable("fw-large-v3", || false, || false, |_| {})
+            .install_model_resumable("fw-large-v3-turbo", || false, || false, |_| {})
             .expect("retry after cancel should install");
         assert_eq!(installed.state, ModelStatusState::Installed);
     }

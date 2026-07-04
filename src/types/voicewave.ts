@@ -33,6 +33,8 @@ export interface CodeModeSettings {
   wrapInFencedBlock: boolean;
 }
 
+export type MicVolumeGuardMode = "off" | "warn" | "autoRestore";
+
 export interface VoiceWaveSettings {
   inputDevice: string | null;
   activeModel: string;
@@ -50,6 +52,13 @@ export interface VoiceWaveSettings {
   appProfileOverrides: AppProfileOverrides;
   codeMode: CodeModeSettings;
   proPostProcessingEnabled: boolean;
+  micVolumeGuard: MicVolumeGuardMode;
+  /** Opt-in one-tap "Add to dictionary?" pill suggestion. Off by default;
+   * optional here since the backend supplies a default when absent. */
+  pillActionSuggestions?: boolean;
+  /** Experimental on-device AI polish (plan 005). Off by default; optional
+   * here since the backend supplies a `false` default when absent. */
+  llmPolishEnabled?: boolean;
 }
 
 export interface VoiceWaveSnapshot {
@@ -57,6 +66,30 @@ export interface VoiceWaveSnapshot {
   lastPartial: string | null;
   lastFinal: string | null;
   activeModel: string;
+}
+
+/** A typed one-tap action carried by a pill notice. The frontend switches on
+ * `kind` to render the button and dispatch the handler. */
+export interface PillAction {
+  kind: "copyTranscript" | "addDictionaryTerm";
+  /** Button label, e.g. "Copy" or 'Add "foo"'. */
+  label: string;
+  /** Action data (e.g. the term to add). `copyTranscript` reads the rescue
+   * transcript from `transcript`, so its `value` is null. */
+  value: string | null;
+}
+
+/** Payload for `voicewave://pill-notice` — the pill's Dynamic Island surface. */
+export interface PillNoticePayload {
+  id: number;
+  severity: "info" | "warning" | "error";
+  title: string;
+  detail: string | null;
+  durationMs: number;
+  /** Rescue notices carry the dictated text so failed insertions never lose words. */
+  transcript: string | null;
+  /** A typed action makes the pill interactive and renders a button. */
+  action: PillAction | null;
 }
 
 export interface TranscriptEvent {
@@ -361,6 +394,18 @@ export interface DictionaryTerm {
   term: string;
   source: string;
   createdAtUtcMs: number;
+}
+
+export interface DictionaryExport {
+  version: number;
+  exportedAtUtcMs: number;
+  terms: DictionaryTerm[];
+}
+
+export interface DictionaryImportSummary {
+  added: number;
+  skipped: number;
+  totalInFile: number;
 }
 
 export type EntitlementTier = "free" | "pro";

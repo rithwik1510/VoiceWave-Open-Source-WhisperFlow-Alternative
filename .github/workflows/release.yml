@@ -95,8 +95,13 @@ jobs:
           # a fresh install cannot transcribe the default fw-small.en model.
           $py = "src-tauri/windows/faster-whisper/python/python.exe"
           if (-not (Test-Path $py)) { throw "Embedded faster-whisper runtime missing at $py" }
-          & $py -c "from faster_whisper import WhisperModel; import ctranslate2; print('embedded runtime OK')"
+          # Both ASR (faster-whisper) and AI polish (llama_cpp) run on this one
+          # bundled runtime, so verify both import before we build the installer.
+          & $py -c "from faster_whisper import WhisperModel; import ctranslate2; from llama_cpp import Llama; print('embedded runtime OK (faster-whisper + llama_cpp)')"
           if ($LASTEXITCODE -ne 0) { throw "Embedded runtime import check failed" }
+          if (-not (Test-Path "src-tauri/windows/llm-polish/polish_worker.py")) {
+            throw "AI-polish worker script missing at src-tauri/windows/llm-polish/polish_worker.py"
+          }
 
       - name: Build signed installer + updater artifacts
         shell: pwsh
@@ -138,6 +143,15 @@ jobs:
             throw "Embedded python runtime was NOT packaged into the build output. Checked: $($roots -join '; '). The bundle.resources map for 'windows/faster-whisper/python' did not resolve."
           }
           Write-Host "Embedded runtime packaged at: $found"
+          # The AI-polish worker rides next to the runtime; confirm it packaged too.
+          $workerRoots = @(
+            "$env:VIBE_SAFE_TARGET_DIR\x86_64-pc-windows-gnu\release\llm-polish\polish_worker.py",
+            "$env:VIBE_SAFE_TARGET_DIR\release\llm-polish\polish_worker.py"
+          )
+          if (-not ($workerRoots | Where-Object { Test-Path $_ })) {
+            throw "AI-polish worker was NOT packaged into the build output. Checked: $($workerRoots -join '; ')."
+          }
+          Write-Host "AI-polish worker packaged OK."
 
       - name: Locate installer + signature
         id: artifact

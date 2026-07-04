@@ -1,7 +1,9 @@
 use crate::{
     audio::{
-        analyze_captured_segments, AudioCaptureService, AudioError, AudioQualityBand,
-        AudioQualityReport, CaptureOptions, VadConfig,
+        analyze_captured_segments,
+        input_volume::{self, MicGuardPlan},
+        AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureOptions,
+        VadConfig,
     },
     benchmark::{
         self, BenchmarkRequest, BenchmarkRun, ModelRecommendation, RecommendationConstraints,
@@ -13,7 +15,10 @@ use crate::{
         DiagnosticsError, DiagnosticsExportResult, DiagnosticsManager, DiagnosticsStatus,
         LatencyMetricRecord,
     },
-    dictionary::{DictionaryError, DictionaryManager, DictionaryQueueItem, DictionaryTerm},
+    dictionary::{
+        DictionaryError, DictionaryExport, DictionaryImportSummary, DictionaryManager,
+        DictionaryQueueItem, DictionaryTerm,
+    },
     history::{
         HistoryError, HistoryExportPreset, HistoryExportResult, HistoryManager, RetentionPolicy,
         SessionHistoryQuery, SessionHistoryRecord,
@@ -43,7 +48,7 @@ use crate::{
     },
     transcript::{
         finalize_pro_transcript, merge_incremental_transcript, sanitize_user_transcript,
-        ProTranscriptOptions,
+        stabilize_custom_terms, ProTranscriptOptions,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -96,6 +101,150 @@ struct TranscriptEvent {
     text: String,
     is_final: bool,
     elapsed_ms: u64,
+}
+
+/// Generic payload for the pill's Dynamic Island notice surface
+/// (`voicewave://pill-notice`). Any runtime condition worth the user's
+/// attention — mic guard warnings, insertion failures, model problems —
+/// should ride this channel instead of inventing a new UI affordance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PillNoticePayload {
+    pub id: u64,
+    /// "info" | "warning" | "error" — drives the pill accent color.
+    pub severity: String,
+    pub title: String,
+    pub detail: Option<String>,
+    /// How long the pill should stay expanded before auto-collapsing.
+    pub duration_ms: u64,
+    /// Rescue payload: the dictated text, shown as a preview in the expanded
+    /// pill so a failed insertion never loses the user's words (Wispr Flow
+    /// fallback pattern).
+    pub transcript: Option<String>,
+    /// A typed one-tap action. When present the pill window becomes interactive
+    /// for the notice's lifetime and renders a button; the frontend switches on
+    /// `kind` to pick the handler.
+    pub action: Option<PillAction>,
+}
+
+/// A single interactive affordance carried by a pill notice. Generalizes the
+/// former bare `action: Option<String>` so new one-tap actions (copy a rescued
+/// transcript, add a term to the dictionary, …) are incremental: a new `kind`,
+/// a Rust emit site, and a `FloatingPill` switch arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PillAction {
+    /// "copyTranscript" | "addDictionaryTerm" — selects the frontend handler.
+    pub kind: String,
+    /// Button label, e.g. "Copy" or "Add \"foo\"".
+    pub label: String,
+    /// Action data, e.g. the term to add. `copyTranscript` reads the rescue
+    /// transcript from `payload.transcript`, so its `value` stays `None`.
+    pub value: Option<String>,
+}
+
+fn emit_pill_notice(
+    app: &AppHandle,
+    severity: &str,
+    title: impl Into<String>,
+    detail: Option<String>,
+    duration_ms: u64,
+) {
+    let _ = app.emit(
+        "voicewave://pill-notice",
+        PillNoticePayload {
+            id: now_utc_ms(),
+            severity: severity.to_string(),
+            title: title.into(),
+            detail,
+            duration_ms,
+            transcript: None,
+            action: None,
+        },
+    );
+}
+
+fn emit_pill_rescue(
+    app: &AppHandle,
+    severity: &str,
+    title: impl Into<String>,
+    detail: Option<String>,
+    transcript: String,
+    action: Option<&str>,
+) {
+    let _ = app.emit(
+        "voicewave://pill-notice",
+        PillNoticePayload {
+            id: now_utc_ms(),
+            severity: severity.to_string(),
+            title: title.into(),
+            detail,
+            // Rescue notices carry the user's words; give them time to react.
+            duration_ms: 10_000,
+            transcript: Some(transcript),
+            // The rescue transcript travels in `transcript`; the copy action
+            // reads it there, so `value` stays `None`.
+            action: action.map(|kind| PillAction {
+                kind: kind.to_string(),
+                label: "Copy".to_string(),
+                value: None,
+            }),
+        },
+    );
+}
+
+/// Emits an actionable notice carrying a typed [`PillAction`] (and no rescue
+/// transcript). Mirrors [`emit_pill_rescue`] but for actions whose data lives
+/// in the action itself. The frontend switches on `action.kind` to render the
+/// button and dispatch the handler.
+fn emit_pill_action_notice(
+    app: &AppHandle,
+    severity: &str,
+    title: impl Into<String>,
+    detail: Option<String>,
+    action: PillAction,
+    duration_ms: u64,
+) {
+    let _ = app.emit(
+        "voicewave://pill-notice",
+        PillNoticePayload {
+            id: now_utc_ms(),
+            severity: severity.to_string(),
+            title: title.into(),
+            detail,
+            duration_ms,
+            transcript: None,
+            action: Some(action),
+        },
+    );
+}
+
+/// Cooldown between repeats of the same recurring pill warning (mic guard,
+/// CPU fallback, poor audio) so a persistent condition doesn't nag on every
+/// single dictation.
+const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
+
+/// How often the background "Polished version ready" pill is allowed to
+/// surface: once per this many validated polishes. LLM polish improves nearly
+/// every dictation (a comma, a capital), so announcing each one buries the
+/// pill's important messages (fallback/error) in noise. Instead we surface it
+/// occasionally as a quiet reminder that on-device polishing is working; the
+/// polished text is always available via history regardless.
+const POLISH_PILL_ANNOUNCE_EVERY: u64 = 50;
+
+/// Claims a warn slot if its cooldown has elapsed; the caller only emits a
+/// notice when this returns true. Each recurring warning owns its own slot.
+fn take_notice_cooldown(last_warned_at: &StdMutex<Option<Instant>>) -> bool {
+    let Ok(mut guard) = last_warned_at.lock() else {
+        return false;
+    };
+    match *guard {
+        Some(previous) if previous.elapsed() < NOTICE_WARN_COOLDOWN => false,
+        _ => {
+            *guard = Some(Instant::now());
+            true
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +304,7 @@ struct LatencyBreakdownEvent {
     correction_candidates_count: u32,
     insertion_method: String,
     insertion_target_class: String,
+    mic_input_volume_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +312,17 @@ struct LatencyBreakdownEvent {
 struct MicLevelEvent {
     level: f32,
     error: Option<String>,
+}
+
+/// Tauri window label for the floating pill overlay (mirrors the constant in
+/// lib.rs). Mic-level frames are only rendered by the pill.
+const PILL_WINDOW_LABEL: &str = "voicewave-pill";
+
+/// Emit a mic-level frame to the pill window only. These fire at ~30 fps during
+/// capture, so broadcasting globally would needlessly wake the main webview,
+/// which never renders them (PERF-05).
+fn emit_mic_level(app: &AppHandle, event: MicLevelEvent) {
+    let _ = app.emit_to(PILL_WINDOW_LABEL, "voicewave://mic-level", event);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,8 +426,6 @@ const CORRECTION_SESSION_WINDOW_MS: u64 = 15_000;
 const CORRECTION_MIN_SHARED_RATIO: f32 = 0.72;
 const CORRECTION_MAX_CHANGED_TOKENS: usize = 2;
 const CORRECTION_MAX_TOKEN_EDIT_DISTANCE: usize = 2;
-#[cfg(target_os = "windows")]
-const HOTKEY_CUE_PRESS_WAV: &[u8] = include_bytes!("../assets/audio/cue_press.wav");
 #[cfg(target_os = "windows")]
 const HOTKEY_CUE_RELEASE_WAV: &[u8] = include_bytes!("../assets/audio/cue_release.wav");
 
@@ -506,6 +665,186 @@ fn asr_integrity_metrics(raw_transcript: &str, final_transcript: &str) -> (f32, 
     (integrity.clamp(0.0, 100.0), raw_count, final_count)
 }
 
+/// Fidelity validator for the off-by-default on-device LLM polish path
+/// (plan 005). Decides whether an LLM rewrite is SAFE to offer using ONLY the
+/// raw transcript and the rewrite — exactly what the app has at runtime.
+///
+/// This is a manual-string-scanning port of `scripts/llm-polish/validator.py`
+/// (NO regex crate, by design: an over-broad "protected token" detector yields
+/// more SAFE false rejects, never false accepts). When any check fails, the
+/// caller silently keeps the deterministic text.
+mod polish_validator {
+    /// Minimum token overlap (0..=1) between raw and polished. Below this the
+    /// rewrite has drifted too far and is rejected.
+    const MIN_TOKEN_OVERLAP: f32 = 0.55;
+    /// Punctuation trimmed from the ends of a whitespace token before
+    /// classification / comparison.
+    const TRIM_PUNCT: &str = ".,;:!?()\"'";
+
+    fn trim_token(token: &str) -> &str {
+        token.trim_matches(|c: char| TRIM_PUNCT.contains(c))
+    }
+
+    fn contains_ascii_digit(token: &str) -> bool {
+        token.chars().any(|c| c.is_ascii_digit())
+    }
+
+    /// True if the token has an internal capital (camelCase): some index i>0
+    /// where char[i] is uppercase and char[i-1] is lowercase.
+    fn has_internal_capital(token: &str) -> bool {
+        let chars: Vec<char> = token.chars().collect();
+        for i in 1..chars.len() {
+            if chars[i].is_uppercase() && chars[i - 1].is_lowercase() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True if the token contains an internal `.` with alphanumerics on both
+    /// sides (URLs, filenames, `voicewave.dev`, `diagnostics.json`, `2.0`).
+    fn has_internal_dot(token: &str) -> bool {
+        let chars: Vec<char> = token.chars().collect();
+        for i in 1..chars.len().saturating_sub(1) {
+            if chars[i] == '.' && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A raw token is "protected" (must survive verbatim) when, after trimming
+    /// surrounding punctuation, it looks like a name/number/code/URL/path/email
+    /// rather than an ordinary word. Mirrors the entity families of validator.py
+    /// via cheap character scans.
+    fn is_protected(token: &str) -> bool {
+        if token.is_empty() {
+            return false;
+        }
+        contains_ascii_digit(token)
+            || token.contains('_')
+            || token.contains('/')
+            || token.contains('\\')
+            || token.contains('@')
+            || token.contains("::")
+            || token.contains("()")
+            || has_internal_capital(token)
+            || has_internal_dot(token)
+    }
+
+    /// Core negation markers (after contraction expansion). Every `n't`
+    /// contraction becomes " not", so it collapses to `not` here.
+    const NEGATION_WORDS: &[&str] = &[
+        "not", "no", "never", "none", "nobody", "nothing", "nowhere", "neither", "nor",
+        "without", "cannot",
+    ];
+
+    /// Count negation markers in `text`, robust to contraction form:
+    /// `don't` == `do not` (both count 1) via the `n't` -> ` not` expansion.
+    fn negation_count(text: &str) -> usize {
+        let expanded = text
+            .to_lowercase()
+            .replace('\u{2019}', "'") // curly apostrophe -> straight
+            .replace("n't", " not");
+        expanded
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|word| NEGATION_WORDS.contains(word))
+            .count()
+    }
+
+    /// Validate an LLM rewrite against the raw transcript. Returns `true` only
+    /// when ALL checks pass; any failure -> `false` (keep deterministic text).
+    pub(super) fn validate_polish(raw: &str, polished: &str) -> bool {
+        let polished_trimmed = polished.trim();
+        if polished_trimmed.is_empty() {
+            return false;
+        }
+
+        // 1. Token overlap floor (guards wholesale rewrite / topic drift).
+        // asr_integrity_metrics returns a 0..=100 percent; compare on 0..=1.
+        let (integrity_percent, _, _) = super::asr_integrity_metrics(raw, polished_trimmed);
+        if integrity_percent / 100.0 < MIN_TOKEN_OVERLAP {
+            return false;
+        }
+
+        let polished_lower = polished_trimmed.to_lowercase();
+
+        // 2. Entity preservation: every protected raw token must survive
+        // verbatim (case-insensitive substring) in the rewrite.
+        for token in raw.split_whitespace() {
+            let trimmed = trim_token(token);
+            if is_protected(trimmed) && !polished_lower.contains(&trimmed.to_lowercase()) {
+                return false;
+            }
+        }
+
+        // 3. No invented numbers: any digit-bearing token in the rewrite must
+        // appear (case-insensitive substring) in the raw transcript.
+        let raw_lower = raw.to_lowercase();
+        for token in polished_trimmed.split_whitespace() {
+            let trimmed = trim_token(token);
+            if contains_ascii_digit(trimmed) && !raw_lower.contains(&trimmed.to_lowercase()) {
+                return false;
+            }
+        }
+
+        // 4. Polarity preservation: the rewrite must not add or drop a negation
+        // (e.g. "I don't think we should ship" -> "I think we should ship"). This
+        // is the highest-severity meaning drift and the one the token-overlap
+        // floor cannot catch, since a one-word negation flip keeps overlap high.
+        if negation_count(raw) != negation_count(polished_trimmed) {
+            return false;
+        }
+
+        true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::validate_polish;
+
+        #[test]
+        fn validate_polish_rejects_dropped_or_changed_number() {
+            // "5" is a protected token (contains a digit); the rewrite spells it
+            // as "five", so the digit is gone -> must reject.
+            assert!(!validate_polish(
+                "set the limit to 5",
+                "set the limit to five"
+            ));
+        }
+
+        #[test]
+        fn validate_polish_accepts_clean_filler_removal() {
+            // Pure grammar/filler cleanup with no entities touched -> accept.
+            assert!(validate_polish(
+                "um so we should ship on monday",
+                "We should ship on Monday."
+            ));
+        }
+
+        #[test]
+        fn validate_polish_rejects_negation_flip() {
+            // Dropping "don't" flips the meaning while keeping overlap high and
+            // touching no entities -> only the polarity guard catches this.
+            assert!(!validate_polish(
+                "i don't think we should ship this on friday",
+                "I think we should ship this on Friday."
+            ));
+        }
+
+        #[test]
+        fn validate_polish_accepts_contraction_expansion() {
+            // "don't" -> "do not" is the SAME polarity; must NOT be a false reject.
+            assert!(validate_polish(
+                "we don't need to refactor everything right now",
+                "We do not need to refactor everything right now."
+            ));
+        }
+    }
+}
+
+use polish_validator::validate_polish;
+
 fn should_reject_low_confidence_transcript_as_no_speech(
     use_faster_whisper: bool,
     captured_audio_ms: u64,
@@ -610,6 +949,7 @@ fn classify_insertion_target(target_app: Option<&str>) -> &'static str {
     }
     if normalized.contains("visual studio code")
         || normalized.contains("vscode")
+        || normalized.contains("vs code")
         || normalized.contains("cursor")
         || normalized.contains("notepad")
         || normalized.contains("notes")
@@ -683,22 +1023,6 @@ fn final_decode_timeout(sample_count: usize, sample_rate: u32) -> Duration {
     Duration::from_millis(adaptive.clamp(FINAL_DECODE_TIMEOUT_MS_MIN, FINAL_DECODE_TIMEOUT_MS_MAX))
 }
 
-fn play_pill_close_cue() {
-    #[cfg(target_os = "windows")]
-    unsafe {
-        use windows_sys::Win32::Media::Audio::{
-            PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
-        };
-
-        // SAFETY: HOTKEY_CUE_RELEASE_WAV is static WAV data for the process lifetime.
-        PlaySoundA(
-            HOTKEY_CUE_RELEASE_WAV.as_ptr(),
-            std::ptr::null_mut(),
-            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
-        );
-    }
-}
-
 fn play_hotkey_phase_cue(action: &HotkeyAction, phase: &HotkeyPhase) {
     let _ = (action, phase);
     #[cfg(target_os = "windows")]
@@ -706,32 +1030,6 @@ fn play_hotkey_phase_cue(action: &HotkeyAction, phase: &HotkeyPhase) {
         let cue = match (action, phase) {
             (HotkeyAction::PushToTalk, HotkeyPhase::Released) => Some(HOTKEY_CUE_RELEASE_WAV),
             _ => None,
-        };
-        if let Some(sound_bytes) = cue {
-            unsafe {
-                use windows_sys::Win32::Media::Audio::{
-                    PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
-                };
-
-                // SAFETY: `sound_bytes` points to static WAV data for the process lifetime.
-                PlaySoundA(
-                    sound_bytes.as_ptr(),
-                    std::ptr::null_mut(),
-                    SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
-                );
-            }
-        }
-    }
-}
-
-fn play_hotkey_listening_ready_cue(trigger: DictationStartTrigger) {
-    let _ = trigger;
-    #[cfg(target_os = "windows")]
-    {
-        let cue = match trigger {
-            DictationStartTrigger::PushToTalk => Some(HOTKEY_CUE_PRESS_WAV),
-            DictationStartTrigger::ToggleHotkey => Some(HOTKEY_CUE_RELEASE_WAV),
-            DictationStartTrigger::Manual => None,
         };
         if let Some(sound_bytes) = cue {
             unsafe {
@@ -899,10 +1197,25 @@ pub struct VoiceWaveController {
     active_session: Mutex<Option<DictationSession>>,
     session_counter: AtomicU64,
     watchdog_recovery_count: AtomicU64,
+    // Counts validated LLM-polish results across the app session. The polish
+    // pill is a background OFFER, not an action the user needs — surfacing it
+    // every time is noise, so we announce it only once every
+    // POLISH_PILL_ANNOUNCE_EVERY validated polishes as a quiet "still working"
+    // signal. Errors and fallback pills are unaffected. Arc so the
+    // fire-and-forget polish task can own a clone without borrowing self.
+    polish_success_count: Arc<AtomicU64>,
     hotkey_runtime_monitor: Mutex<Option<Arc<AtomicBool>>>,
     mic_level_monitor: Mutex<Option<Arc<AtomicBool>>>,
     decode_policy: Mutex<RuntimeDecodePolicy>,
     correction_session: Mutex<Option<CorrectionSession>>,
+    // Arc + std::sync::Mutex (not tokio) so the fire-and-forget guard task can
+    // own a clone without borrowing the controller.
+    mic_guard_last_warned_at: Arc<StdMutex<Option<Instant>>>,
+    backend_notice_last_at: Arc<StdMutex<Option<Instant>>>,
+    poor_audio_notice_last_at: Arc<StdMutex<Option<Instant>>>,
+    // Bluetooth hands-free profiles are a device property, not a transient
+    // condition — one heads-up per app session is enough.
+    mic_profile_notice_sent: AtomicBool,
 }
 
 impl VoiceWaveController {
@@ -1001,10 +1314,15 @@ impl VoiceWaveController {
             active_session: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             watchdog_recovery_count: AtomicU64::new(0),
+            polish_success_count: Arc::new(AtomicU64::new(0)),
             hotkey_runtime_monitor: Mutex::new(None),
             mic_level_monitor: Mutex::new(None),
             decode_policy: Mutex::new(RuntimeDecodePolicy::default()),
             correction_session: Mutex::new(None),
+            mic_guard_last_warned_at: Arc::new(StdMutex::new(None)),
+            backend_notice_last_at: Arc::new(StdMutex::new(None)),
+            poor_audio_notice_last_at: Arc::new(StdMutex::new(None)),
+            mic_profile_notice_sent: AtomicBool::new(false),
         })
     }
 
@@ -1294,6 +1612,16 @@ impl VoiceWaveController {
                 Some(format!("Dictation failed: {err}")),
             )
             .await;
+            // The pill's error color-flash carries no text; the notice is the
+            // only place the user actually learns what went wrong.
+            let (notice_title, notice_detail) = match &err {
+                ControllerError::MissingModel(_) => (
+                    "Install a model to start",
+                    "Double-click the pill, open Models, and install fw-small.en.".to_string(),
+                ),
+                _ => ("Dictation failed", err.to_string()),
+            };
+            emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
             return Err(err);
         }
         Ok(())
@@ -1570,8 +1898,8 @@ impl VoiceWaveController {
             let (stream, level_rx, error_rx) = match monitor {
                 Ok(row) => (row.stream, row.level_rx, row.error_rx),
                 Err(err) => {
-                    let _ = app_for_thread.emit(
-                        "voicewave://mic-level",
+                    emit_mic_level(
+                        &app_for_thread,
                         MicLevelEvent {
                             level: 0.0,
                             error: Some(err.to_string()),
@@ -1589,8 +1917,8 @@ impl VoiceWaveController {
                     break;
                 }
                 if let Ok(err) = error_rx.try_recv() {
-                    let _ = app_for_thread.emit(
-                        "voicewave://mic-level",
+                    emit_mic_level(
+                        &app_for_thread,
                         MicLevelEvent {
                             level: 0.0,
                             error: Some(err),
@@ -1607,8 +1935,8 @@ impl VoiceWaveController {
                 }
 
                 if last_emit.elapsed() >= Duration::from_millis(80) {
-                    let _ = app_for_thread.emit(
-                        "voicewave://mic-level",
+                    emit_mic_level(
+                        &app_for_thread,
                         MicLevelEvent {
                             level: latest_level,
                             error: None,
@@ -2620,6 +2948,22 @@ impl VoiceWaveController {
             .map_err(ControllerError::from)
     }
 
+    pub async fn export_dictionary(&self) -> DictionaryExport {
+        self.dictionary_manager.lock().await.export_terms()
+    }
+
+    pub async fn import_dictionary(
+        &self,
+        _app: AppHandle,
+        payload: String,
+    ) -> Result<DictionaryImportSummary, ControllerError> {
+        self.dictionary_manager
+            .lock()
+            .await
+            .import_terms(&payload)
+            .map_err(ControllerError::from)
+    }
+
     async fn ensure_pro_feature(&self, feature_key: &str) -> Result<(), ControllerError> {
         let entitlement = self.billing_manager.lock().await.snapshot();
         if entitlement.is_pro {
@@ -2689,6 +3033,94 @@ impl VoiceWaveController {
         } else {
             None
         };
+
+        // OS mic-volume guard: external apps (browser auto-gain, call apps,
+        // vendor utilities) silently lower the system capture volume and both
+        // whisper models degrade at once. Fire-and-forget so the COM query
+        // never adds latency to listening start; result lands in the pill as
+        // a Dynamic Island notice and in diagnostics for later triage.
+        let mic_input_volume_slot: Arc<StdMutex<Option<u8>>> = Arc::new(StdMutex::new(None));
+        if mode == DictationMode::Microphone {
+            let guard_mode = settings.mic_volume_guard;
+            let guard_app = app.clone();
+            let volume_slot = Arc::clone(&mic_input_volume_slot);
+            let last_warned_at = Arc::clone(&self.mic_guard_last_warned_at);
+            tauri::async_runtime::spawn(async move {
+                let reading = match tokio::task::spawn_blocking(
+                    input_volume::read_default_input_volume,
+                )
+                .await
+                {
+                    Ok(Ok(reading)) => reading,
+                    _ => return,
+                };
+                if let Ok(mut slot) = volume_slot.lock() {
+                    *slot = Some((reading.scalar * 100.0).round().clamp(0.0, 100.0) as u8);
+                }
+                match input_volume::plan_mic_guard(guard_mode, reading) {
+                    MicGuardPlan::Silent => {}
+                    MicGuardPlan::WarnMuted => {
+                        if take_notice_cooldown(&last_warned_at) {
+                            emit_pill_notice(
+                                &guard_app,
+                                "error",
+                                "Microphone is muted in Windows",
+                                Some("Unmute it in Sound settings to dictate.".to_string()),
+                                6_000,
+                            );
+                        }
+                    }
+                    MicGuardPlan::WarnLow { volume_percent } => {
+                        if take_notice_cooldown(&last_warned_at) {
+                            emit_pill_notice(
+                                &guard_app,
+                                "warning",
+                                format!("Mic input volume is at {volume_percent}%"),
+                                Some(
+                                    "Another app likely lowered it. Raise it to 100% in Sound settings for best accuracy."
+                                        .to_string(),
+                                ),
+                                6_500,
+                            );
+                        }
+                    }
+                    MicGuardPlan::Restore { from_percent } => {
+                        let restored = tokio::task::spawn_blocking(
+                            input_volume::restore_default_input_volume,
+                        )
+                        .await;
+                        match restored {
+                            Ok(Ok(())) => {
+                                if let Ok(mut slot) = volume_slot.lock() {
+                                    *slot = Some(100);
+                                }
+                                emit_pill_notice(
+                                    &guard_app,
+                                    "info",
+                                    format!("Mic volume restored to 100% (was {from_percent}%)"),
+                                    None,
+                                    4_500,
+                                );
+                            }
+                            _ => {
+                                if take_notice_cooldown(&last_warned_at) {
+                                    emit_pill_notice(
+                                        &guard_app,
+                                        "warning",
+                                        format!("Mic input volume is at {from_percent}%"),
+                                        Some(
+                                            "Auto-restore failed — raise it manually in Sound settings."
+                                                .to_string(),
+                                        ),
+                                        6_500,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let draft_worker = if incremental_enabled {
             Some(
@@ -2788,8 +3220,8 @@ impl VoiceWaveController {
                                 for sample in normalized_chunk {
                                     peak = peak.max(sample.abs());
                                 }
-                                let _ = app_for_capture.emit(
-                                    "voicewave://mic-level",
+                                emit_mic_level(
+                                    &app_for_capture,
                                     MicLevelEvent {
                                         level: peak.clamp(0.0, 1.0),
                                         error: None,
@@ -2869,6 +3301,13 @@ impl VoiceWaveController {
                             )),
                         )
                         .await;
+                        emit_pill_notice(
+                            &app,
+                            "info",
+                            "Didn't catch that",
+                            Some("Speak while holding the hotkey — release when done.".to_string()),
+                            3_800,
+                        );
                         return Ok(());
                     }
                     Err(err) => {
@@ -2913,6 +3352,13 @@ impl VoiceWaveController {
                 ),
             )
             .await;
+            emit_pill_notice(
+                &app,
+                "info",
+                "Didn't catch that",
+                Some("Speak while holding the hotkey — release when done.".to_string()),
+                3_800,
+            );
             return Ok(());
         }
 
@@ -2938,6 +3384,40 @@ impl VoiceWaveController {
             clamp_vad_threshold(settings.vad_threshold),
         );
         let _ = app.emit("voicewave://audio-quality", audio_quality.clone());
+
+        if mode == DictationMode::Microphone {
+            if audio_quality.quality == AudioQualityBand::Poor
+                && take_notice_cooldown(&self.poor_audio_notice_last_at)
+            {
+                emit_pill_notice(
+                    &app,
+                    "warning",
+                    "Audio quality looks poor",
+                    Some(
+                        "Move closer to the mic, or run the 10s audio check in Settings."
+                            .to_string(),
+                    ),
+                    6_000,
+                );
+            }
+            if settings
+                .input_device
+                .as_deref()
+                .is_some_and(is_likely_low_quality_input_name)
+                && !self.mic_profile_notice_sent.swap(true, Ordering::Relaxed)
+            {
+                emit_pill_notice(
+                    &app,
+                    "warning",
+                    "Headset hands-free profile detected",
+                    Some(
+                        "Bluetooth call profiles reduce accuracy — the laptop mic array usually transcribes better."
+                            .to_string(),
+                    ),
+                    6_500,
+                );
+            }
+        }
 
         let total_captured_samples = segments.iter().map(|segment| segment.len()).sum::<usize>();
         let captured_audio_ms =
@@ -3143,6 +3623,26 @@ impl VoiceWaveController {
         };
         let finalize_timeout =
             final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
+        // Long decodes leave the user staring at a spinner with no promise it
+        // is alive; past ~2.5s the pill says so explicitly.
+        let decode_watch_done = Arc::new(AtomicBool::new(false));
+        if mode == DictationMode::Microphone {
+            let done = Arc::clone(&decode_watch_done);
+            let watch_app = app.clone();
+            let watch_cancel = cancel_token.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+                if !done.load(Ordering::Relaxed) && !watch_cancel.is_cancelled() {
+                    emit_pill_notice(
+                        &watch_app,
+                        "info",
+                        "Still transcribing…",
+                        Some("Long dictations take a little more time.".to_string()),
+                        2_600,
+                    );
+                }
+            });
+        }
         let finalize_result = timeout(
             finalize_timeout,
             final_worker.transcribe_segment(
@@ -3152,6 +3652,7 @@ impl VoiceWaveController {
             ),
         )
         .await;
+        decode_watch_done.store(true, Ordering::Relaxed);
         let finalize_output = match finalize_result {
             Ok(Ok(text)) => text,
             Ok(Err(InferenceError::Cancelled)) => {
@@ -3203,6 +3704,31 @@ impl VoiceWaveController {
         let decode_telemetry = finalize_output.telemetry;
         if mode == DictationMode::Microphone && use_faster_whisper {
             note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
+        }
+        if mode == DictationMode::Microphone {
+            if decode_telemetry.backend_fallback
+                && take_notice_cooldown(&self.backend_notice_last_at)
+            {
+                emit_pill_notice(
+                    &app,
+                    "warning",
+                    "Ran on CPU this time",
+                    Some("GPU wasn't available, so this dictation was slower.".to_string()),
+                    5_500,
+                );
+            } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
+            {
+                emit_pill_notice(
+                    &app,
+                    "info",
+                    "Engine was cold",
+                    Some(
+                        "First dictation after a restart takes longer — the next ones are fast."
+                            .to_string(),
+                    ),
+                    4_500,
+                );
+            }
         }
         let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
         let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
@@ -3366,6 +3892,117 @@ impl VoiceWaveController {
             }
         }
 
+        // Off-by-default on-device LLM polish (plan 005, Phase 3). Only when the
+        // experimental flag is ON and the deterministic text actually landed.
+        // This runs in a background task spawned AFTER insertion, so it adds
+        // ZERO release-to-text latency and never touches the ASR worker/gate. It
+        // OFFERS the polished text via the pill's Copy action; it never
+        // overwrites the inserted text, and a rewrite is surfaced only if the
+        // fidelity validator passes. With the flag off (default) nothing spawns
+        // and behavior is byte-identical to before.
+        if insertion_success && settings.llm_polish_enabled {
+            let app_handle = app.clone();
+            let raw = final_transcript.clone();
+            let polish_count = Arc::clone(&self.polish_success_count);
+            let custom_terms = self
+                .dictionary_manager
+                .lock()
+                .await
+                .get_terms(None)
+                .into_iter()
+                .map(|row| row.term)
+                .collect::<Vec<_>>();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(Some(polished)) =
+                    crate::inference::llm_polish::polish_text(raw.clone()).await
+                {
+                    // Re-apply the dictionary-term stabilizer to the LLM output,
+                    // then gate strictly on the fidelity validator.
+                    let stabilized = stabilize_custom_terms(&polished, &custom_terms);
+                    if validate_polish(&raw, &stabilized) && stabilized.trim() != raw.trim() {
+                        // Polish succeeds on nearly every dictation, so we do NOT
+                        // pop the pill each time — that would bury the pill's
+                        // important fallback/error messages in noise. Announce
+                        // only once every POLISH_PILL_ANNOUNCE_EVERY validated
+                        // polishes as a quiet "on-device polishing is working"
+                        // signal. `fetch_add` returns the pre-increment value, so
+                        // the first success (0) announces immediately, then every
+                        // 50th thereafter.
+                        let nth = polish_count.fetch_add(1, Ordering::Relaxed);
+                        if nth % POLISH_PILL_ANNOUNCE_EVERY == 0 {
+                            emit_pill_rescue(
+                                &app_handle,
+                                "info",
+                                "Polished version ready",
+                                None,
+                                stabilized,
+                                Some("copyTranscript"),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
+        // Rescue pill (Wispr Flow fallback pattern): when the text did not
+        // land in the target app, the pill expands with the transcript so the
+        // words are visibly safe and one keystroke/click away.
+        if mode == DictationMode::Microphone {
+            if !insertion_success {
+                emit_pill_rescue(
+                    &app,
+                    "warning",
+                    "Couldn't insert — your text is safe",
+                    Some("Click Copy, then paste it where you need it.".to_string()),
+                    final_transcript.clone(),
+                    Some("copyTranscript"),
+                );
+            } else if insertion_method == "clipboardOnly" {
+                emit_pill_rescue(
+                    &app,
+                    "info",
+                    "Copied to clipboard",
+                    Some("Press Ctrl+V to paste it here.".to_string()),
+                    final_transcript.clone(),
+                    None,
+                );
+            } else if asr_final_word_count >= 30 {
+                // Success stays quiet for everyday dictations (Wispr-style
+                // restraint); only big ones earn a word-count confirmation.
+                emit_pill_notice(
+                    &app,
+                    "info",
+                    format!("Inserted · {asr_final_word_count} words"),
+                    None,
+                    2_600,
+                );
+            }
+
+            // Opt-in one-tap "Add to dictionary?" suggestion. Restraint gate:
+            // off by default (setting), and only when there is exactly one
+            // high-confidence correction candidate — the dictionary review
+            // popup already ingests these independently, so this never
+            // double-surfaces on the default calm UX.
+            if settings.pill_action_suggestions
+                && insertion_success
+                && correction_candidates.len() == 1
+            {
+                let term = correction_candidates[0].clone();
+                emit_pill_action_notice(
+                    &app,
+                    "info",
+                    "Add to dictionary?",
+                    None,
+                    PillAction {
+                        kind: "addDictionaryTerm".to_string(),
+                        label: format!("Add \"{term}\""),
+                        value: Some(term),
+                    },
+                    6_000,
+                );
+            }
+        }
+
         self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
             .await;
 
@@ -3453,6 +4090,10 @@ impl VoiceWaveController {
                 correction_candidates_count: correction_candidates.len() as u32,
                 insertion_method: insertion_method.clone(),
                 insertion_target_class: insertion_target_class.clone(),
+                mic_input_volume_percent: mic_input_volume_slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| *slot),
             },
         );
         if settings.diagnostics_opt_in {
@@ -3523,6 +4164,10 @@ impl VoiceWaveController {
                     insertion_method: Some(insertion_method),
                     insertion_target_class: Some(insertion_target_class),
                     success: insertion_success,
+                    mic_input_volume_percent: mic_input_volume_slot
+                        .lock()
+                        .ok()
+                        .and_then(|slot| *slot),
                 });
         }
 
@@ -3954,13 +4599,53 @@ mod tests {
         effective_release_watchdog_threshold_ms, floor_decode_mode, insertion_method_key,
         is_likely_low_quality_input_name, now_utc_ms, release_watchdog_recovered,
         push_release_allowed, push_to_talk_release_decision,
-        should_reject_low_confidence_transcript_as_no_speech, DictationStartTrigger,
-        PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD, RECOMMENDED_VAD_THRESHOLD,
+        should_reject_low_confidence_transcript_as_no_speech, DictationStartTrigger, PillAction,
+        PillNoticePayload, PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
+        RECOMMENDED_VAD_THRESHOLD,
     };
     use crate::audio::AudioQualityBand;
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
+
+    #[test]
+    fn pill_action_serializes_camel_case_kind_label_value() {
+        let action = PillAction {
+            kind: "addDictionaryTerm".to_string(),
+            label: "Add \"foo\"".to_string(),
+            value: Some("foo".to_string()),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("\"kind\":\"addDictionaryTerm\""), "{json}");
+        assert!(json.contains("\"label\":\"Add \\\"foo\\\"\""), "{json}");
+        assert!(json.contains("\"value\":\"foo\""), "{json}");
+
+        let round: PillAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.kind, "addDictionaryTerm");
+        assert_eq!(round.value.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn pill_notice_payload_carries_typed_action() {
+        let payload = PillNoticePayload {
+            id: 1,
+            severity: "info".to_string(),
+            title: "Add to dictionary?".to_string(),
+            detail: None,
+            duration_ms: 6_000,
+            transcript: None,
+            action: Some(PillAction {
+                kind: "addDictionaryTerm".to_string(),
+                label: "Add \"foo\"".to_string(),
+                value: Some("foo".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        // camelCase renaming on the payload's duration field survives.
+        assert!(json.contains("\"durationMs\":6000"), "{json}");
+        let round: PillNoticePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.action.unwrap().kind, "addDictionaryTerm");
+    }
 
     #[test]
     fn vad_threshold_is_clamped_to_safe_range() {

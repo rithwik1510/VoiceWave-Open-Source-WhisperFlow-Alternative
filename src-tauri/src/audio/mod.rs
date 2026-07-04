@@ -1,3 +1,5 @@
+pub mod input_volume;
+
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SampleFormat, Stream, StreamConfig,
@@ -1384,6 +1386,7 @@ mod tests {
             silence_timeout: Duration::from_millis(25),
             release_tail: Duration::from_millis(120),
             preserve_full_capture: false,
+            ..CaptureOptions::default()
         };
 
         audio_tx
@@ -1425,6 +1428,7 @@ mod tests {
             silence_timeout: Duration::from_millis(1_500),
             release_tail: Duration::from_millis(600),
             preserve_full_capture: false,
+            ..CaptureOptions::default()
         };
 
         // Speech at the very start, then silence; the user "releases" 520 ms
@@ -1476,6 +1480,7 @@ mod tests {
             silence_timeout: Duration::from_millis(1_500),
             release_tail: Duration::from_millis(600),
             preserve_full_capture: false,
+            ..CaptureOptions::default()
         };
 
         // Voiced chunks keep arriving until ~480 ms; the stop lands at 520 ms,
@@ -1531,6 +1536,7 @@ mod tests {
             silence_timeout: Duration::from_millis(40),
             release_tail: Duration::from_millis(0),
             preserve_full_capture: true,
+            ..CaptureOptions::default()
         };
 
         audio_tx
@@ -1568,6 +1574,7 @@ mod tests {
             silence_timeout: Duration::from_millis(40),
             release_tail: Duration::from_millis(0),
             preserve_full_capture: true,
+            ..CaptureOptions::default()
         };
 
         audio_tx
