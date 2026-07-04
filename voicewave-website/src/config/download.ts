@@ -5,7 +5,7 @@
 // Update this on every release. Or, set VITE_WINDOWS_DOWNLOAD_URL in the
 // Render dashboard env to override without a code change.
 const DEFAULT_WINDOWS_DOWNLOAD_URL =
-  'https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/download/v0.4.0/VoiceWave.Local.Core_0.4.0_x64-setup.exe'
+  'https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/download/v0.5.0/VoiceWave.Local.Core_0.5.0_x64-setup.exe'
 
 export const windowsDownloadUrl =
   (import.meta.env.VITE_WINDOWS_DOWNLOAD_URL as string | undefined)?.trim() ||

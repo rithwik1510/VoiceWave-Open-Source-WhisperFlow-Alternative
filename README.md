@@ -39,7 +39,7 @@ winget install VoiceWave.LocalCore
 
 `winget upgrade VoiceWave.LocalCore` keeps you current on every future release.
 
-Or grab the [v0.3.1 installer directly](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/download/v0.3.1/VoiceWave.Local.Core_0.3.1_x64-setup.exe) and run it.
+Or grab the [latest installer directly](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest) and run it. Once installed, VoiceWave keeps itself current via signed in-app auto-update.
 
 ---
 
@@ -60,6 +60,33 @@ Or grab the [v0.3.1 installer directly](https://github.com/rithwik1510/VoiceWave
 Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/pricing) (April 2026 — $15/mo, $12/mo billed annually).
 
 ---
+
+## What's New in 0.5.0
+
+**Zero-setup offline transcription**
+
+1. The installer now ships a self-contained CPU faster-whisper runtime — a fresh install transcribes the default model immediately, with no Python install and no manual setup, fully offline.
+
+**On-device AI polish (opt-in)**
+
+1. An optional local LLM pass cleans up filler, capitalization, and punctuation after dictation and offers the polished text on the pill. Runs entirely on-device, gated by a strict fidelity validator so it never changes your meaning, and is off by default.
+
+**Productivity**
+
+1. Dictionary export / import — back up and move your custom-term dictionary between machines.
+1. Interactive pill actions — one-tap actions on pill notices (copy the transcript, add a term).
+1. Mic-volume guard — a Dynamic-Island-style pill notice warns when your input level is too low, so quiet-mic dictations don't silently fail.
+
+**Insertion**
+
+1. Terminals are now detected by process, not window title — dictation pastes correctly into the Codex and Claude desktop apps (previously misread as CLIs and forced to clipboard-only).
+1. The "Polished version ready" pill surfaces occasionally rather than after every dictation; fallback and error notices still show every time.
+
+## What's New in 0.4.0
+
+**Updates**
+
+1. In-app auto-update — VoiceWave checks GitHub on launch and offers a one-click "Install & Restart" when a newer signed release is available. Updates are cryptographically signed and verified before install.
 
 ## What's New in 0.3.1
 
@@ -90,7 +117,7 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 | Area | Summary |
 | --- | --- |
 | Runtime | `Tauri 2` shell + `Rust` core + `React/Tailwind` frontend |
-| ASR (default) | `faster-whisper` via Python subprocess (`fw-small.en` / `fw-large-v3`), CUDA auto-detected |
+| ASR (default) | `faster-whisper` via a bundled CPU Python runtime (`fw-small.en` / `fw-large-v3`), CUDA auto-detected when present — works offline out of the box |
 | ASR (opt-in) | `whisper.cpp` via `whisper-rs` (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan feature flag |
 | Privacy Path | No outbound audio transport, no cloud transcription path in v1 |
 | UX Contract | Explicit state model: `idle -> listening -> transcribing -> inserted/error` |
@@ -275,12 +302,12 @@ References:
 
 ## ![Evidence](docs/assets/readme/section-evidence.svg) Latest Recorded Validation Evidence
 
-Latest recorded run: `2026-04-23` (against `0.3.0` baseline).
+Latest recorded run: `2026-07` (against `0.4.0` baseline).
 
-1. Rust library test suite: **180 pass / 1 pre-existing failure** (`state::tests::insertion_target_classification_covers_known_app_families`, unrelated to `0.3.x` changes).
-1. `npm run build` (voicewave-website): recorded pass.
+1. Rust library test suite: **218 pass / 0 fail**.
+1. Frontend test suite (`npx vitest run`): **34 pass / 0 fail**.
+1. `npm run build`: recorded pass.
 1. `cargo check --no-default-features --release`: recorded pass.
-1. `npm run phase3:validate`, `npm run phase4:gate`: last recorded pass from phase artifacts.
 
 Reference artifact trail:
 

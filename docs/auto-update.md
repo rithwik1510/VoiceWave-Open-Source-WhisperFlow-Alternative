@@ -65,7 +65,7 @@ non-prerelease GitHub Release):
 
 1. Bump the version in **all three**: `src-tauri/tauri.conf.json`,
    `src-tauri/Cargo.toml`, `package.json`. It must match the release tag
-   (tag `v0.4.0` → version `0.4.0`). The build fails fast if they disagree.
+   (tag `v0.5.0` → version `0.5.0`). The build fails fast if they disagree.
 2. Commit, tag, and publish a GitHub Release for `vX.Y.Z` (release notes become
    the update's "What's new").
 3. CI (`release.yml`) then:
@@ -83,8 +83,8 @@ local builds also emit a signed installer + `<installer>.exe.sig`. To produce
 
 ```powershell
 ./scripts/release/generate-latest-json.ps1 `
-  -Version 0.4.0 `
-  -InstallerPath "C:\vw-target\release\bundle\nsis\VoiceWave.Local.Core_0.4.0_x64-setup.exe" `
+  -Version 0.5.0 `
+  -InstallerPath "C:\vw-target\release\bundle\nsis\VoiceWave.Local.Core_0.5.0_x64-setup.exe" `
   -Notes "What changed in this release."
 ```
 

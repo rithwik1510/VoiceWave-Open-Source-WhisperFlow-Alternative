@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.0] – 2026-07-04
+
+The biggest VoiceWave release yet: a fresh install now transcribes offline out
+of the box with no setup, an optional on-device AI polish pass, and dictation
+that lands in every app — including terminal-style GUIs like Codex.
+
+### Added
+- **Bundled offline transcription engine.** The installer now ships a
+  self-contained CPU faster-whisper runtime, so a fresh install transcribes the
+  default model immediately — no Python, no manual setup, fully offline.
+- **On-device AI polish (opt-in).** An optional local LLM pass cleans up filler,
+  capitalization, and punctuation after dictation and offers the polished text
+  on the pill. Runs entirely on-device, gated by a strict fidelity validator so
+  it never changes your meaning, and is **off by default** (`llm_polish_enabled`).
+- **Dictionary export / import.** Back up and move your custom-term dictionary
+  between machines.
+- **Interactive pill actions.** One-tap actions on pill notices (e.g. copy the
+  transcript, add a term) via a typed action channel.
+- **Mic-volume guard.** Detects a too-low input level and surfaces a
+  Dynamic-Island-style pill notice so quiet-mic dictations don't silently fail.
+
+### Changed
+- **Terminals detected by process, not window title.** Dictation now pastes
+  correctly into the Codex and Claude desktop apps (previously misread as CLIs
+  by their window titles and forced to clipboard-only).
+- **Quieter polish notifications.** The "Polished version ready" pill surfaces
+  occasionally rather than after every dictation — it stays out of the way while
+  fallback and error notices still show every time.
+- Batch of performance and reliability refinements across the audio, inference,
+  and insertion paths.
+
+---
+
 ## [0.4.0] – 2026-06-14
 
 ### Added
