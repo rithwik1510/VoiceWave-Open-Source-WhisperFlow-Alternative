@@ -308,11 +308,110 @@ fn is_clipboard_preferred_target(app: &str) -> bool {
         || normalized.contains("notion")
 }
 
+/// Executable names of terminal hosts where SendInput keystroke injection
+/// and synthetic Ctrl+V are unreliable (ConPTY translation, raw stdin mode).
+/// Matching on the foreground *process* is authoritative: window titles lie.
+/// The Codex and Claude desktop apps carry "codex"/"claude" in their window
+/// titles but are ordinary Electron GUIs that paste fine — only the real
+/// terminal hosts belong here.
+pub fn is_terminal_process_exe(exe_name: &str) -> bool {
+    const TERMINAL_PROCESS_EXES: &[&str] = &[
+        // Windows Terminal (and the ConPTY console host it spawns)
+        "windowsterminal.exe",
+        "openconsole.exe",
+        // Legacy console host (cmd/powershell outside Windows Terminal)
+        "conhost.exe",
+        // Shells that own their own console window
+        "powershell.exe",
+        "pwsh.exe",
+        "cmd.exe",
+        // Third-party terminals
+        "alacritty.exe",
+        "wezterm-gui.exe",
+        "wezterm.exe",
+        "kitty.exe",
+        "hyper.exe",
+        "tabby.exe",
+        "warp.exe",
+        // Git Bash / MSYS2 / Cygwin
+        "mintty.exe",
+    ];
+    let lowered = exe_name.to_ascii_lowercase();
+    TERMINAL_PROCESS_EXES
+        .iter()
+        .any(|candidate| lowered == *candidate)
+}
+
+/// Resolve the executable file name (e.g. "windowsterminal.exe") of the
+/// process that owns the current foreground window. Returns `None` when the
+/// window, process handle, or image path cannot be queried.
+#[cfg(target_os = "windows")]
+fn foreground_process_exe_name() -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: hwnd is a live window handle and pid is a valid out pointer.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: PROCESS_QUERY_LIMITED_INFORMATION succeeds without admin for
+    // same-or-lower integrity processes; failure returns null, handled below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut len = buffer.len() as u32;
+    // SAFETY: handle is valid, buffer/len describe a real writable buffer.
+    let ok = unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len) };
+    // SAFETY: handle came from OpenProcess above.
+    unsafe { CloseHandle(handle) };
+    if ok == 0 || len == 0 {
+        return None;
+    }
+    let full_path = String::from_utf16_lossy(&buffer[..len as usize]);
+    full_path
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Combined terminal detection used by the live insertion paths. The
+/// foreground process executable is checked first because it cannot be
+/// confused by window titles (the "codex"/"claude" title fragments below
+/// also match the Codex/Claude *desktop* apps, which are normal GUI targets).
+/// The title heuristic only runs when the process cannot be resolved.
+fn foreground_is_terminal(window_title: Option<&str>) -> bool {
+    #[cfg(target_os = "windows")]
+    if let Some(exe) = foreground_process_exe_name() {
+        return is_terminal_process_exe(&exe);
+    }
+    is_terminal_target(window_title)
+}
+
 /// Returns true if the foreground window title suggests the target is a
 /// terminal/console application where SendInput keystroke injection is
 /// unreliable (ConPTY, raw stdin mode, etc.). When true, the insertion
 /// engine should skip Direct and ClipboardPaste and go straight to
 /// ClipboardOnly.
+///
+/// Title matching is a fallback only — `foreground_is_terminal` prefers the
+/// foreground process executable, which distinguishes the Codex/Claude CLIs
+/// (running inside a terminal host) from the Codex/Claude desktop apps
+/// (whose titles also contain those words but which paste normally).
 pub fn is_terminal_target(window_title: Option<&str>) -> bool {
     let Some(title) = window_title else {
         return false;
@@ -467,7 +566,7 @@ impl InsertionBackend for PlatformInsertionBackend {
             // SendInput keystroke injection is unreliable for terminal
             // applications (ConPTY translation, raw stdin mode). Route
             // through clipboard instead.
-            if is_terminal_target(current_title.as_deref()) {
+            if foreground_is_terminal(current_title.as_deref()) {
                 return Err(format!(
                     "Terminal target detected ({:?}); \
                      falling back to clipboard.",
@@ -502,7 +601,7 @@ impl InsertionBackend for PlatformInsertionBackend {
             // or the wrong text on repeat Ctrl+V. Dictation text stays in
             // the clipboard.
             let current_title = self.detect_target_app();
-            if is_terminal_target(current_title.as_deref()) {
+            if foreground_is_terminal(current_title.as_deref()) {
                 return Err(format!(
                     "Terminal target detected ({:?}); \
                      falling back to clipboard-only.",
@@ -1027,6 +1126,7 @@ mod tests {
                 text: "ok".to_string(),
                 target_app: Some("Notepad".to_string()),
                 prefer_clipboard: true,
+                force_clipboard_only: false,
             })
             .expect("insert should work");
         assert!(result.success);
@@ -1238,6 +1338,46 @@ mod tests {
         assert!(!is_terminal_target(Some("")));
     }
 
+    // --- Process-based terminal detection tests ---
+
+    #[test]
+    fn terminal_process_matches_terminal_hosts() {
+        assert!(is_terminal_process_exe("WindowsTerminal.exe"));
+        assert!(is_terminal_process_exe("windowsterminal.exe"));
+        assert!(is_terminal_process_exe("OpenConsole.exe"));
+        assert!(is_terminal_process_exe("conhost.exe"));
+        assert!(is_terminal_process_exe("pwsh.exe"));
+        assert!(is_terminal_process_exe("powershell.exe"));
+        assert!(is_terminal_process_exe("cmd.exe"));
+        assert!(is_terminal_process_exe("alacritty.exe"));
+        assert!(is_terminal_process_exe("mintty.exe"));
+    }
+
+    #[test]
+    fn terminal_process_rejects_gui_apps_even_with_terminal_like_names() {
+        // Regression for the Codex desktop app: its window title contains
+        // "codex" (which is in TERMINAL_TITLE_FRAGMENTS for the Codex CLI),
+        // but its process is an ordinary Electron GUI. Process-based
+        // detection must NOT flag it, so dictation pastes normally.
+        assert!(!is_terminal_process_exe("Codex.exe"));
+        assert!(!is_terminal_process_exe("codex.exe"));
+        assert!(!is_terminal_process_exe("Claude.exe"));
+        assert!(!is_terminal_process_exe("Code.exe")); // VS Code
+        assert!(!is_terminal_process_exe("cursor.exe"));
+        assert!(!is_terminal_process_exe("chrome.exe"));
+        assert!(!is_terminal_process_exe("notepad.exe"));
+        assert!(!is_terminal_process_exe("electron.exe"));
+    }
+
+    #[test]
+    fn terminal_process_requires_exact_file_name_match() {
+        // Substring matches would re-introduce title-style false positives
+        // (e.g. an app shipping "cmd.exe.helper.exe" or "mycmd.exe").
+        assert!(!is_terminal_process_exe("mycmd.exe"));
+        assert!(!is_terminal_process_exe("cmd.exe.helper.exe"));
+        assert!(!is_terminal_process_exe(""));
+    }
+
     // --- force_clipboard_only tests ---
 
     #[test]
@@ -1294,14 +1434,16 @@ mod tests {
 
     #[test]
     fn without_force_clipboard_only_gui_uses_direct_insertion() {
-        let backend = DeterministicMatrixBackend::new()
-            .with_active_app(Some("Google Chrome"));
+        // Notepad, not a browser: browsers are clipboard-preferred targets by
+        // policy (see is_clipboard_preferred_target), so only a plain GUI app
+        // exercises the Direct-first ladder.
+        let backend = DeterministicMatrixBackend::new().with_active_app(Some("Notepad"));
         let mut engine = InsertionEngine::new(Box::new(backend));
 
         let result = engine
             .insert_text(InsertTextRequest {
-                text: "hello chrome".to_string(),
-                target_app: Some("Google Chrome".to_string()),
+                text: "hello notepad".to_string(),
+                target_app: Some("Notepad".to_string()),
                 prefer_clipboard: false,
                 force_clipboard_only: false,
             })
