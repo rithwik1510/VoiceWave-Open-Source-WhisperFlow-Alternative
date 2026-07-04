@@ -98,6 +98,29 @@ function Ensure-NoSpaceTargetDir {
   $env:CARGO_TARGET_DIR = Join-Path $safeRoot "target-gnu-build"
 }
 
+function Ensure-EmbeddedRuntime([string]$repoRoot) {
+  # The bundled CPU faster-whisper runtime must exist BEFORE `tauri build`
+  # starts: tauri-build validates the bundle.resources globs at COMPILE time
+  # (its build script), which runs before beforeBundleCommand. If the
+  # windows/faster-whisper/python tree is missing, the compile fails with
+  # "glob pattern ... didn't match any files". So stage it here, up front.
+  # No-op when already present; VOICEWAVE_SKIP_EMBEDDED_RUNTIME=1 opts out.
+  if (Test-TruthyValue $env:VOICEWAVE_SKIP_EMBEDDED_RUNTIME) {
+    Write-Warning "VOICEWAVE_SKIP_EMBEDDED_RUNTIME set; building without the bundled faster-whisper runtime. Fresh installs will not transcribe."
+    return
+  }
+  $runtimePython = Join-Path $repoRoot "src-tauri\windows\faster-whisper\python\python.exe"
+  if (Test-Path $runtimePython) {
+    return
+  }
+  Write-Host "Embedded faster-whisper runtime not found; building it now (one-time download + pip install)..."
+  & (Join-Path $PSScriptRoot "..\faster_whisper\build-embedded-runtime.ps1")
+  if ($LASTEXITCODE -ne 0) { throw "Failed to build embedded faster-whisper runtime" }
+  if (-not (Test-Path $runtimePython)) {
+    throw "Embedded faster-whisper runtime is still missing at $runtimePython after build."
+  }
+}
+
 function Test-TruthyValue([string]$value) {
   if ([string]::IsNullOrWhiteSpace($value)) {
     return $false
@@ -220,6 +243,7 @@ Add-MingwToPathIfAvailable
 Add-VsCmakeToPath
 Add-BundlerToolsToPath
 Ensure-NoSpaceTargetDir
+Ensure-EmbeddedRuntime $repoRoot
 
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 

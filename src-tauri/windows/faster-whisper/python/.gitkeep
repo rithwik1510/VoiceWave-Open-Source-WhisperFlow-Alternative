@@ -1,0 +1,12 @@
+# Placeholder so this directory exists in a fresh checkout.
+#
+# tauri-build validates the bundle.resources entry
+# "windows/faster-whisper/python" at COMPILE time (its build script), so
+# `cargo check` / `cargo test` fail with "resource path doesn't exist" if the
+# directory is missing — even though those commands never build an installer.
+#
+# The real ~400 MB CPU faster-whisper runtime is NOT committed; it is staged
+# into this directory on demand by scripts/faster_whisper/build-embedded-runtime.ps1
+# before an installer build (run automatically by the tauri build wrapper and
+# the release workflow). See src-tauri/src/inference/faster_whisper.rs
+# (resolve_python_path) for how the app locates python.exe at runtime.

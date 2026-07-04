@@ -43,3 +43,13 @@ tmp-*
 
 # Local app data
 .voicewave/
+timeline-demo.mp4
+
+# Bundled faster-whisper CPU runtime (~400 MB): built on demand by
+# scripts/faster_whisper/build-embedded-runtime.ps1 for local/CI installer
+# builds, never committed. The .gitkeep placeholder IS tracked so the
+# directory exists — tauri-build validates the bundle.resources path at
+# compile time, so plain `cargo check`/`cargo test` (which don't stage the
+# runtime) would otherwise fail with "resource path doesn't exist".
+src-tauri/windows/faster-whisper/python/*
+!src-tauri/windows/faster-whisper/python/.gitkeep

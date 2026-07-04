@@ -1,0 +1,18 @@
+# Pinned dependency set for the CPU-only faster-whisper runtime that ships
+# INSIDE the VoiceWave installer (see build-embedded-runtime.ps1). These
+# versions match the dev .venv-faster-whisper that current builds are tested
+# against, so a shipped install behaves identically to local development.
+#
+# CPU only on purpose: GPU users still get CUDA acceleration through the
+# nvidia-* wheels resolved at runtime from a separate install, but the bundled
+# runtime must stay small and dependency-light so every fresh install can
+# transcribe offline with zero setup. Do NOT add nvidia-cuda-*, llama_cpp_python
+# (LLM polish ships its own runtime), or the sounddevice/pycaw/comtypes packages
+# here — none are imported by worker.py.
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+numpy==2.5.0
+av==16.1.0
+tokenizers==0.22.2
+onnxruntime==1.24.2
+huggingface_hub==1.4.1

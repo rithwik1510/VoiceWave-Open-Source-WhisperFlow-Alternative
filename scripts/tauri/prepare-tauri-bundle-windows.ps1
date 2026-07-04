@@ -1,6 +1,19 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Test-TruthyValue([string]$value) {
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return $false
+  }
+  switch ($value.Trim().ToLowerInvariant()) {
+    "1" { return $true }
+    "true" { return $true }
+    "yes" { return $true }
+    "on" { return $true }
+    default { return $false }
+  }
+}
+
 function Resolve-ExistingPath([string[]]$candidates) {
   foreach ($candidate in $candidates) {
     if ([string]::IsNullOrWhiteSpace($candidate)) {
@@ -74,6 +87,26 @@ function Resolve-DllSourcePath([string]$dllName, [string[]]$releaseRoots, [strin
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+
+# Ensure the bundled CPU faster-whisper Python runtime is staged before the
+# bundler collects resources. Without this, a fresh install has no Python +
+# faster-whisper and cannot transcribe the default fw-small.en model (it would
+# only work in `npm run tauri:dev`, which points at the dev .venv). The build
+# script is a no-op when the runtime is already present, so repeat local builds
+# stay fast; CI and first local builds do the one-time download + pip install.
+# Skip only when explicitly disabled (e.g. a deliberately runtime-less build).
+if (-not (Test-TruthyValue $env:VOICEWAVE_SKIP_EMBEDDED_RUNTIME)) {
+  $runtimePython = Join-Path $repoRoot "src-tauri\windows\faster-whisper\python\python.exe"
+  if (-not (Test-Path $runtimePython)) {
+    Write-Host "Embedded faster-whisper runtime not found; building it now..."
+    & (Join-Path $PSScriptRoot "..\faster_whisper\build-embedded-runtime.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Failed to build embedded faster-whisper runtime" }
+  }
+  if (-not (Test-Path $runtimePython)) {
+    throw "Embedded faster-whisper runtime is still missing at $runtimePython after build."
+  }
+}
+
 $resourceDir = Join-Path $repoRoot "src-tauri\windows"
 $resourceDll = Join-Path $resourceDir "WebView2Loader.dll"
 $workerResourceDir = Join-Path $resourceDir "faster-whisper"

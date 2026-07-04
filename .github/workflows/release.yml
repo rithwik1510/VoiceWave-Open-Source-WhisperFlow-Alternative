@@ -73,6 +73,31 @@ jobs:
       - name: Install npm dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Cache embedded faster-whisper runtime
+        id: cache-fw-runtime
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/windows/faster-whisper/python
+          # Rebuild only when the runtime recipe changes. The download +
+          # pip install (~400 MB) is otherwise reused across release runs.
+          key: fw-runtime-${{ runner.os }}-${{ hashFiles('scripts/faster_whisper/embedded-runtime-requirements.txt', 'scripts/faster_whisper/build-embedded-runtime.ps1') }}
+
+      - name: Build embedded faster-whisper runtime (CPU)
+        if: steps.cache-fw-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/faster_whisper/build-embedded-runtime.ps1
+
+      - name: Verify embedded runtime is present
+        shell: pwsh
+        run: |
+          # The bundle step (beforeBundleCommand) maps this tree into the
+          # installer at <install>/faster-whisper/python. If it is missing,
+          # a fresh install cannot transcribe the default fw-small.en model.
+          $py = "src-tauri/windows/faster-whisper/python/python.exe"
+          if (-not (Test-Path $py)) { throw "Embedded faster-whisper runtime missing at $py" }
+          & $py -c "from faster_whisper import WhisperModel; import ctranslate2; print('embedded runtime OK')"
+          if ($LASTEXITCODE -ne 0) { throw "Embedded runtime import check failed" }
+
       - name: Build signed installer + updater artifacts
         shell: pwsh
         env:
@@ -95,6 +120,24 @@ jobs:
             throw "Bundled libstdc++-6.dll lacks modern std::codecvt symbols — a stale/wrong MinGW runtime was bundled. The app would fail at launch with 'Entry Point Not Found'."
           }
           Write-Host "Bundled libstdc++-6.dll OK (has modern std::codecvt symbols)."
+
+      - name: Verify embedded runtime was packaged into build output
+        shell: pwsh
+        run: |
+          # Tauri copies bundle.resources next to the compiled binary in the
+          # target dir (so both dev and the installer resolve them). If the
+          # resources map for the python tree silently copied nothing, this
+          # catches it here instead of shipping an installer whose fresh
+          # users still cannot transcribe.
+          $roots = @(
+            "$env:VIBE_SAFE_TARGET_DIR\x86_64-pc-windows-gnu\release\faster-whisper\python\python.exe",
+            "$env:VIBE_SAFE_TARGET_DIR\release\faster-whisper\python\python.exe"
+          )
+          $found = $roots | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+            throw "Embedded python runtime was NOT packaged into the build output. Checked: $($roots -join '; '). The bundle.resources map for 'windows/faster-whisper/python' did not resolve."
+          }
+          Write-Host "Embedded runtime packaged at: $found"
 
       - name: Locate installer + signature
         id: artifact
@@ -141,11 +184,20 @@ jobs:
     needs: build-release
     runs-on: windows-latest
     steps:
+      - name: Derive winget version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          # winget package versions carry no "v" prefix (the existing
+          # VoiceWave.LocalCore manifest is versioned 0.3.1, not v0.3.1).
+          $version = "${{ github.event.inputs.tag || github.event.release.tag_name }}" -replace '^v', ''
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Submit manifest to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: VoiceWave.LocalCore
           installers-regex: 'VoiceWave\.Local\.Core_.*_x64-setup\.exe$'
-          version: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          version: ${{ steps.ver.outputs.version }}
           release-tag: ${{ github.event.inputs.tag || github.event.release.tag_name }}
           token: ${{ secrets.WINGET }}
