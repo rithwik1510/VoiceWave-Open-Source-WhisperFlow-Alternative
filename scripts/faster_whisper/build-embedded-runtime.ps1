@@ -107,6 +107,14 @@ try {
     throw "Extracted archive did not contain python/python.exe"
   }
 
+  # $pythonDir may already exist here (e.g. containing only the tracked
+  # .gitkeep placeholder from a fresh checkout). If it exists, Move-Item
+  # moves the source INSIDE it instead of renaming into place, landing
+  # python.exe one directory too deep. Clear it first so the move always
+  # renames $extractedPython to become $pythonDir.
+  if (Test-Path $pythonDir) {
+    Remove-Item -Recurse -Force $pythonDir
+  }
   Move-Item -LiteralPath $extractedPython -Destination $pythonDir
 }
 finally {
