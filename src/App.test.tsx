@@ -320,6 +320,21 @@ describe("App navigation and phase three panels", () => {
     expect(within(settingsDialog).getByText("Release Tail (ms)")).toBeInTheDocument();
   });
 
+  it("shows the updates section with a check-for-updates action", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const settingsDialog = screen.getByRole("dialog", { name: "Settings" });
+    fireEvent.click(within(settingsDialog).getByRole("button", { name: "Updates" }));
+
+    expect(within(settingsDialog).getByText("Current version")).toBeInTheDocument();
+    // Outside the Tauri desktop runtime the check button is disabled with an
+    // explanatory description instead of firing a doomed network request.
+    const checkButton = within(settingsDialog).getByRole("button", { name: "Check now" });
+    expect(checkButton).toBeDisabled();
+    expect(within(settingsDialog).getByText("Update checks run in the desktop app.")).toBeInTheDocument();
+  });
+
   it("opens style and help as separate popups", async () => {
     render(<App />);
 

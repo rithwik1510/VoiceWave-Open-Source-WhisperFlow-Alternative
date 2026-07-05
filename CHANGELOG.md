@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.1] – 2026-07-05
+
+### Added
+- **Check for updates in Settings.** New Settings → Updates pane shows the
+  installed version and a "Check now" button, so you can see you're up to date
+  (or install a new version) on demand instead of waiting for the silent
+  launch-time check.
+
+### Fixed
+- The AI-polish worker's GPU probe no longer opens a console window on setups
+  running a GPU-capable build.
+
+---
+
 ## [0.5.0] – 2026-07-04
 
 The biggest VoiceWave release yet: a fresh install now transcribes offline out

@@ -3,6 +3,7 @@ import {
   ChevronDown,
   CircleHelp,
   Crown,
+  Download,
   Keyboard,
   Mic,
   Palette,
@@ -30,6 +31,7 @@ import {
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
 import { UpdatePrompt } from "./components/UpdatePrompt";
+import { UpdateSection } from "./components/UpdateSection";
 import { useVoiceWave } from "./hooks/useVoiceWave";
 import { THEMES } from "./prototype/constants";
 import { Dashboard } from "./prototype/components/Dashboard";
@@ -50,14 +52,15 @@ type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
 type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
-type SettingsSection = "audio" | "dictation" | "polish" | "diagnostics" | "advanced";
+type SettingsSection = "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Mic }> = [
   { id: "audio", label: "Audio", icon: Mic },
   { id: "dictation", label: "Dictation", icon: Keyboard },
   { id: "polish", label: "AI Polish", icon: Sparkles },
   { id: "diagnostics", label: "Diagnostics", icon: Activity },
-  { id: "advanced", label: "Advanced", icon: SlidersHorizontal }
+  { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
+  { id: "updates", label: "Updates", icon: Download }
 ];
 
 interface DemoProfile {
@@ -2131,6 +2134,8 @@ function App() {
                   )}
                 </div>
               )}
+
+              {settingsSection === "updates" && <UpdateSection />}
             </div>
           </div>
         </OverlayModal>
