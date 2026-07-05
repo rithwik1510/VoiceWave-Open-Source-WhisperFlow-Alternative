@@ -8,7 +8,7 @@ name: Release (build, sign, publish auto-update)
 # Required repo secrets:
 #   TAURI_SIGNING_PRIVATE_KEY           contents of src-tauri/.tauri/voicewave-updater.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the key password ("" if generated with --ci)
-#   WINGET_TOKEN                         classic PAT with public_repo (for winget-pkgs PR)
+#   WINGET                               classic PAT with public_repo (for winget-pkgs PR)
 on:
   release:
     types: [released]
