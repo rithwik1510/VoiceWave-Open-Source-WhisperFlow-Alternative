@@ -66,3 +66,9 @@ src-tauri/windows/llm-polish/__pycache__/
 # small pure-Python deps come from PyPI at build time.
 scripts/llm-polish/wheelhouse/*
 !scripts/llm-polish/wheelhouse/llama_cpp_python-*-win_amd64.whl
+
+# Scratch / marketing material — not part of the app, never committed.
+# DemoVideo/ is a standalone Remotion project (has its own node_modules).
+/DemoVideo/
+/Marketing plans/
+/export-voicewave-demo.mjs

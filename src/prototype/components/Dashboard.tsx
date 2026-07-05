@@ -1,6 +1,5 @@
 import type React from "react";
 import { Cpu, Mic, Pause, Zap } from "lucide-react";
-import { MOCK_SESSIONS } from "../constants";
 import type { DictationState, ThemeConfig } from "../types";
 import { useEffect, useRef, useState } from "react";
 
@@ -78,7 +77,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   partialTranscript,
   finalTranscript,
   pushToTalkHotkey,
-  isPro = false,
   recentSentences = []
 }) => {
   const { colors, typography, shapes } = theme;
@@ -100,82 +98,43 @@ export const Dashboard: React.FC<DashboardProps> = ({
   }, [status]);
 
   const isRecording = visualStatus === "listening" || visualStatus === "transcribing";
-  const proIconGradient = "linear-gradient(135deg, rgba(10,42,140,0.1) 8%, rgba(27,142,255,0.2) 54%, rgba(126,216,255,0.26) 84%, rgba(167,232,255,0.2) 100%)";
   const idleHint = finalTranscript ?? partialTranscript ?? `Hold ${pushToTalkHotkey} to start capturing`;
   const statusMeta = STATUS_META[visualStatus];
   const stateClass = `vw-home-state-${visualStatus}`;
 
-  const fallbackRows =
-    recentSentences.length === 0
-      ? MOCK_SESSIONS.map((session) => ({
-          id: session.id,
-          time: session.date,
-          text: session.preview,
-          latest: false
-        }))
-      : [];
-  const syncedRows = recentSentences.map((session) => ({
+  const transcriptRows = recentSentences.map((session, index) => ({
     id: session.id,
     time: new Date(session.createdAtUtcMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
     text: session.text,
-    latest: false
-  }));
-  const transcriptRows = [...syncedRows, ...fallbackRows].map((row, index) => ({
-    ...row,
     latest: index === 0
   }));
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-16">
-      <section className="flex flex-col md:flex-row md:items-start justify-between gap-6">
+      <section className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div className="pt-2">
           <h1 className={`${typography.fontDisplay} text-5xl mb-2 ${colors.textPrimary} tracking-tight`}>Good morning, Rishi.</h1>
           <p className={`${colors.textSecondary} text-lg font-light opacity-80`}>System is local and secure. Ready to transcribe.</p>
-          {isPro && (
-            <div className="mt-3">
-              <span className="vw-home-pro-title-chip">Pro Workspace Active</span>
-            </div>
-          )}
         </div>
 
-        <div
-          className={`flex items-center justify-end gap-6 px-6 py-3 mt-1 ${colors.surface} border ${colors.surfaceBorder} rounded-3xl shadow-sm vw-home-secondary-metrics ${
-            isPro ? "vw-home-pro-metrics" : ""
-          }`}
-        >
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400">Streak</span>
-            <span className={`text-lg font-bold ${colors.textPrimary} leading-none`}>
-              12<span className="text-xs font-medium opacity-50 ml-0.5">days</span>
-            </span>
-          </div>
-          <div className="w-px h-8 bg-[rgba(9,9,11,0.12)]" />
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400">Today</span>
-            <span className={`text-lg font-bold ${colors.textPrimary} leading-none`}>
-              2.4k<span className="text-xs font-medium opacity-50 ml-0.5">words</span>
-            </span>
-          </div>
-          <div className="w-px h-8 bg-[rgba(9,9,11,0.12)]" />
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400">Accuracy</span>
-            <span className="vw-positive-stat text-lg font-bold leading-none">
-              99.2<span className="text-xs font-medium opacity-70 ml-0.5">%</span>
-            </span>
-          </div>
+        <div className="flex items-center gap-2 pb-1 text-sm text-[#71717A]">
+          <span>Hold</span>
+          <kbd className="rounded-lg border border-[#E4E4E7] bg-white px-2 py-1 font-sans text-xs font-semibold text-[#09090B] shadow-[0_1px_2px_rgba(9,9,11,0.05)]">
+            {pushToTalkHotkey}
+          </kbd>
+          <span>to dictate anywhere</span>
         </div>
       </section>
 
       <div className="space-y-6">
         <section>
           <div className="grid gap-4 md:grid-cols-[1fr_320px]">
-            <div className={isPro ? `vw-ring-shell vw-ring-shell-lg ${shapes.radius}` : ""}>
+            <div className={`vw-ring-shell vw-ring-shell-lg ${shapes.radius}`}>
               <div
                 className={`
                   p-8 flex flex-col md:flex-row md:items-center md:justify-between gap-5
-                  ${colors.surface} border border-[color:var(--vw-color-border)] ${shapes.radius}
-                  vw-home-main-card vw-home-state-card ${stateClass}
-                  ${isPro ? "vw-home-pro-panel vw-ring-inner" : ""}
+                  ${colors.surface} ${shapes.radius}
+                  vw-ring-inner vw-home-state-card ${stateClass}
                 `}
               >
                 <div>
@@ -255,7 +214,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     ${colors.accentFg} ${shapes.buttonShape}
                     vw-home-mic-state ${stateClass}
                     ${isRecording ? "vw-home-mic-button-active" : ""}
-                    ${isPro ? "vw-home-pro-mic" : ""}
                   `}
                   type="button"
                   aria-label="Hold to dictate"
@@ -266,19 +224,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             <div className="space-y-3">
-              <div className={isPro ? "vw-ring-shell vw-ring-shell-sm rounded-3xl" : ""}>
-                <div
-                  className={`rounded-3xl border ${colors.surfaceBorder} ${colors.surface} px-4 py-3 shadow-sm vw-home-secondary-card ${
-                    isPro ? "vw-home-pro-sidecard vw-ring-inner" : ""
-                  }`}
-                >
+              <div className="vw-ring-shell vw-ring-shell-sm rounded-3xl">
+                <div className={`rounded-3xl ${colors.surface} px-4 py-3 vw-ring-inner vw-home-secondary-card`}>
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div
                         className="h-9 w-9 rounded-xl flex items-center justify-center"
-                        style={{ backgroundImage: isPro ? proIconGradient : colors.accentGradientSoft }}
+                        style={{ backgroundImage: colors.accentGradientSoft }}
                       >
-                        <Cpu size={16} style={isPro ? { color: colors.accentBlue } : undefined} className={!isPro ? "text-[#18181B]" : undefined} />
+                        <Cpu size={16} style={{ color: colors.accentBlue }} />
                       </div>
                       <div>
                         <p className="vw-section-heading text-sm font-semibold text-[color:var(--vw-color-text-primary)] leading-none">Model</p>
@@ -292,32 +246,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </div>
               </div>
 
-              <div className={isPro ? "vw-ring-shell vw-ring-shell-sm rounded-3xl" : ""}>
-                <div
-                  className={`rounded-3xl border ${colors.surfaceBorder} ${colors.surface} px-4 py-3 shadow-sm vw-home-secondary-card ${
-                    isPro ? "vw-home-pro-sidecard vw-ring-inner" : ""
-                  }`}
-                >
+              <div className="vw-ring-shell vw-ring-shell-sm rounded-3xl">
+                <div className={`rounded-3xl ${colors.surface} px-4 py-3 vw-ring-inner vw-home-secondary-card`}>
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div
                         className="h-9 w-9 rounded-xl flex items-center justify-center"
-                        style={{ backgroundImage: isPro ? proIconGradient : colors.accentGradientSoft }}
+                        style={{ backgroundImage: colors.accentGradientSoft }}
                       >
-                        <Zap size={16} style={isPro ? { color: colors.accentCyan } : undefined} className={!isPro ? "text-[#18181B]" : undefined} />
+                        <Zap size={16} style={{ color: colors.accentCyan }} />
                       </div>
                       <div>
                         <p className="vw-section-heading text-sm font-semibold text-[color:var(--vw-color-text-primary)] leading-none">Mode</p>
                         <p className="mt-1 text-[11px] tracking-[0.14em] text-[color:var(--vw-color-text-muted)]">{statusMeta.modeLabel}</p>
                       </div>
                     </div>
-                    <span
-                      className={`rounded-xl border px-2 py-0.5 text-[10px] font-semibold ${
-                        isPro
-                          ? "border-[rgba(27,142,255,0.52)] bg-[rgba(27,142,255,0.14)] text-[#18181B]"
-                          : `vw-home-mode-chip ${stateClass}`
-                      }`}
-                    >
+                    <span className={`rounded-xl border px-2 py-0.5 text-[10px] font-semibold vw-home-mode-chip ${stateClass}`}>
                       {statusMeta.badge}
                     </span>
                   </div>
@@ -331,9 +275,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div
             className={`
               w-full min-h-24 relative overflow-hidden transition-colors duration-200 vw-home-state-output ${stateClass}
-              ${isRecording ? "bg-black shadow-xl" : `${colors.surface} border ${colors.surfaceBorder} shadow-sm`}
-              ${isPro && !isRecording ? "vw-home-pro-output" : ""}
-              ${isPro && !isRecording ? "vw-home-main-card" : ""}
+              ${isRecording ? "bg-black" : `${colors.surface} border ${colors.surfaceBorder} shadow-[0_1px_2px_rgba(9,9,11,0.04)]`}
               ${shapes.radius} flex items-center px-8 py-6
             `}
           >
@@ -371,8 +313,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div
               key={row.id}
               className={`grid grid-cols-[110px_1fr] gap-0 ${
-                index !== transcriptRows.length - 1 ? `border-b ${colors.surfaceBorder}` : ""
-              } ${isPro && row.latest ? "vw-home-row-latest" : ""}`}
+                index !== transcriptRows.length - 1 ? `border-b border-[#F1F1F3]` : ""
+              } ${row.latest ? "vw-home-row-latest" : ""}`}
             >
               <div className="px-6 py-4 text-sm text-[#71717A]">{row.time}</div>
               <div
@@ -387,7 +329,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
           ))}
           {transcriptRows.length === 0 && (
-            <div className="px-6 py-8 text-[#71717A]">No transcript results yet.</div>
+            <div className="px-6 py-10 text-center">
+              <p className="text-sm font-medium text-[#09090B]">Nothing dictated yet today</p>
+              <p className="mt-1 text-sm text-[#71717A]">
+                Hold {pushToTalkHotkey} in any app and your words will land here.
+              </p>
+            </div>
           )}
         </div>
       </section>

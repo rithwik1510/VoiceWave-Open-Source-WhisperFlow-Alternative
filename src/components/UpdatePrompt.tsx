@@ -171,7 +171,7 @@ export function UpdatePrompt() {
             <div className="mt-4">
               <div className="h-2 w-full overflow-hidden rounded-full bg-[#E4E4E7]">
                 <div
-                  className="h-full rounded-full bg-[#09090B] transition-all"
+                  className="vw-progress-fill h-full rounded-full transition-all"
                   style={{ width: `${percent ?? 8}%` }}
                 />
               </div>

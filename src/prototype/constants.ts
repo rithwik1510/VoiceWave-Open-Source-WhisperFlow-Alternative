@@ -5,6 +5,7 @@ import {
   Cpu,
   FileText,
   HelpCircle,
+  History,
   Home,
   Palette,
   Settings,
@@ -48,7 +49,7 @@ const ONYX_PALETTE = {
   textPrimary: "text-[#09090B]",
   textSecondary: "text-[#475569]",
   textTertiary: "text-[#94A3B8]",
-  accent: "bg-[#18181B]",
+  accent: "vw-brand-accent",
   accentFg: "text-white",
   success: "text-[#18181B]",
   warning: "text-[#4B5563]",
@@ -103,6 +104,7 @@ export const NAV_ITEMS_TOP = [
   { id: "home", label: "Home", icon: Home },
   { id: "models", label: "Models", icon: Cpu },
   { id: "dictionary", label: "Dictionary", icon: FileText },
+  { id: "sessions", label: "History", icon: History },
   { id: "pro", label: "Pro", icon: Crown },
   { id: "pro-tools", label: "Pro Tools", icon: Zap }
 ];

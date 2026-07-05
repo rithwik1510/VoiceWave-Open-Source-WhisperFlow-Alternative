@@ -1,10 +1,15 @@
 import {
+  Activity,
   ChevronDown,
   CircleHelp,
   Crown,
+  Keyboard,
+  Mic,
   Palette,
   Search,
+  SlidersHorizontal,
   Sparkles,
+  Star,
   X
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -45,6 +50,15 @@ type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
 type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
+type SettingsSection = "audio" | "dictation" | "polish" | "diagnostics" | "advanced";
+
+const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Mic }> = [
+  { id: "audio", label: "Audio", icon: Mic },
+  { id: "dictation", label: "Dictation", icon: Keyboard },
+  { id: "polish", label: "AI Polish", icon: Sparkles },
+  { id: "diagnostics", label: "Diagnostics", icon: Activity },
+  { id: "advanced", label: "Advanced", icon: SlidersHorizontal }
+];
 
 interface DemoProfile {
   name: string;
@@ -143,16 +157,6 @@ const PRO_HIGHLIGHT_CARDS: Array<{
     title: "Power History",
     subtitle: "Search, tag, export"
   }
-];
-
-const PRO_FEATURE_CHIPS = [
-  "Format Profiles",
-  "Domain Packs",
-  "Code Mode",
-  "App Profiles",
-  "History Search",
-  "Tags + Stars",
-  "Export Presets"
 ];
 
 function detectProToolsMode(settings: VoiceWaveSettings): ProToolsMode {
@@ -313,7 +317,7 @@ function App() {
   const theme = THEMES.A;
   const [activeNav, setActiveNav] = useState("home");
   const [activeOverlay, setActiveOverlay] = useState<OverlayPanel | null>(null);
-  const [settingsAdvancedOpen, setSettingsAdvancedOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("audio");
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyTag, setHistoryTag] = useState("");
   const [dictionaryDraftTerm, setDictionaryDraftTerm] = useState("");
@@ -568,13 +572,13 @@ function App() {
 
   const closeOverlay = () => {
     setActiveOverlay(null);
-    setSettingsAdvancedOpen(false);
+    setSettingsSection("audio");
   };
 
   const openOverlay = (panel: OverlayPanel) => {
     pressActiveRef.current = false;
     if (panel !== "settings") {
-      setSettingsAdvancedOpen(false);
+      setSettingsSection("audio");
     }
     setActiveOverlay(panel);
   };
@@ -991,560 +995,514 @@ function App() {
           )}
 
           {activeNav === "pro" && (
-            <>
-              <section className="vw-panel vw-panel-soft">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="vw-kicker">VoiceWave Pro</p>
-                    <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Power Features for Coders + Students</h3>
-                    <p className="mt-1 text-sm text-[#71717A]">
-                      Initial release offer: everyone gets advanced formatting, domain packs, code mode, and power history tools from day one.
-                    </p>
-                  </div>
-                  <span className={`vw-chip ${isPro ? "vw-pro-chip-active vw-chip-accent" : ""}`}>{proStatusLabel}</span>
-                </div>
+            <section className="vw-panel vw-panel-soft">
+              <p className="vw-kicker">VoiceWave Pro</p>
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">
+                Power features for coders and students
+              </h3>
+              <p className="mt-1 max-w-2xl text-sm text-[#71717A]">
+                Advanced formatting, domain packs, code mode, and power history tools.
+              </p>
 
-                <div className="vw-ring-shell vw-ring-shell-lg mt-4">
-                  <div className="vw-ring-inner vw-pro-subscription-console rounded-3xl px-5 py-5">
-                    <div className="vw-pro-subscription-grid">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="vw-pro-subscription-kicker">Release Offer</span>
-                          <span className={`vw-chip ${isPro ? "vw-pro-chip-active vw-chip-accent" : ""}`}>
-                            {proStatusLabel}
-                          </span>
+              <div className="vw-ring-shell vw-ring-shell-lg mt-6">
+                <div className="vw-ring-inner px-6 py-6">
+                  <div className="flex flex-wrap items-start justify-between gap-6">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="vw-chip vw-chip-ink">Release Offer</span>
+                        <span className="vw-chip vw-chip-accent">{proStatusLabel}</span>
+                      </div>
+                      <p className="vw-section-heading mt-3 text-2xl font-semibold text-[#09090B]">
+                        {releaseOfferHeadline}
+                      </p>
+                      <p className="mt-2 text-sm text-[#3F3F46]">{releaseOfferLine}</p>
+                      <p className="mt-1 text-xs text-[#71717A]">{releaseOfferStateLine}</p>
+                    </div>
+                    <button type="button" className="vw-btn-primary" onClick={() => setActiveNav("pro-tools")}>
+                      Open Pro Tools
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {isPro && (
+                <div className="vw-pro-minimal-grid mt-4">
+                  {PRO_HIGHLIGHT_CARDS.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <article key={item.id} className="vw-pro-minimal-card">
+                        <div className="vw-pro-minimal-icon">
+                          <Icon size={15} />
                         </div>
-                        <p className="vw-section-heading mt-3 text-2xl font-semibold text-[#09090B]">
-                          {releaseOfferHeadline}
-                        </p>
-                        <p className="mt-2 text-sm text-[#3F3F46]">{releaseOfferLine}</p>
-                        <p className="mt-2 text-xs text-[#71717A]">{releaseOfferStateLine}</p>
-                      </div>
-
-                      <div className="vw-pro-subscription-actions">
-                        <button
-                          type="button"
-                          className="vw-btn-primary vw-action-button"
-                          onClick={() => setActiveNav("pro-tools")}
-                        >
-                          Open Pro Tools
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+                        <p className="text-sm font-semibold text-[#09090B]">{item.title}</p>
+                        <p className="mt-1 text-xs text-[#71717A]">{item.subtitle}</p>
+                      </article>
+                    );
+                  })}
                 </div>
+              )}
 
-                {isPro && (
-                  <div className="mt-6">
-                    <div className="flex flex-wrap items-end justify-between gap-3">
-                      <div>
-                        <h4 className="vw-section-heading text-lg font-semibold text-[#09090B]">Your Pro Toolkit</h4>
-                      </div>
-                      <span className="vw-chip vw-chip-accent">Pro Unlocked</span>
-                    </div>
-
-                    <div className="vw-pro-minimal-grid mt-4">
-                      {PRO_HIGHLIGHT_CARDS.map((item) => {
-                        const Icon = item.icon;
-                        return (
-                          <article key={item.id} className="vw-pro-minimal-card">
-                            <div className="vw-pro-minimal-icon">
-                              <Icon size={15} />
-                            </div>
-                            <p className="text-sm font-semibold text-[#09090B]">{item.title}</p>
-                            <p className="mt-1 text-xs text-[#71717A]">{item.subtitle}</p>
-                          </article>
-                        );
-                      })}
-                    </div>
-
-                    <div className="vw-pro-chip-cloud mt-3">
-                      {PRO_FEATURE_CHIPS.map((feature) => (
-                        <span key={feature} className="vw-chip vw-chip-accent">
-                          {feature}
-                        </span>
-                      ))}
-                    </div>
+              <div className="mt-8 border-t border-[#F1F1F3] pt-4">
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-[#A1A1AA] transition-colors hover:text-[#52525B]"
+                  onClick={() => setOwnerTapCount((count) => Math.min(count + 1, 5))}
+                >
+                  Owner tools
+                </button>
+                {showOwnerUnlock ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <input
+                      type="password"
+                      value={ownerPassphrase}
+                      onChange={(event) => setOwnerPassphrase(event.target.value)}
+                      placeholder="Owner passphrase"
+                      className="vw-field"
+                    />
+                    <button
+                      type="button"
+                      className="vw-btn-primary vw-btn-sm"
+                      onClick={() => void setOwnerOverride(true, ownerPassphrase)}
+                    >
+                      Enable Owner Pro
+                    </button>
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm"
+                      onClick={() => void setOwnerOverride(false, ownerPassphrase)}
+                    >
+                      Disable
+                    </button>
                   </div>
-                )}
-
-                <div className="mt-5 rounded-2xl border border-dashed border-[#D4D4D8] bg-[#FAFAFA] px-4 py-3">
-                  <button
-                    type="button"
-                    className="text-xs font-semibold text-[#52525B] underline underline-offset-2"
-                    onClick={() => setOwnerTapCount((count) => Math.min(count + 1, 5))}
-                  >
-                    Owner tools
-                  </button>
-                  {showOwnerUnlock ? (
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <input
-                        type="password"
-                        value={ownerPassphrase}
-                        onChange={(event) => setOwnerPassphrase(event.target.value)}
-                        placeholder="Owner passphrase"
-                        className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
-                      />
-                      <button
-                        type="button"
-                        className="vw-btn-primary vw-action-button"
-                        onClick={() => void setOwnerOverride(true, ownerPassphrase)}
-                      >
-                        Enable Owner Pro
-                      </button>
-                      <button
-                        type="button"
-                        className="vw-btn-secondary"
-                        onClick={() => void setOwnerOverride(false, ownerPassphrase)}
-                      >
-                        Disable
-                      </button>
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-xs text-[#71717A]">Tap owner tools five times to reveal device override controls.</p>
-                  )}
-                </div>
-              </section>
-            </>
+                ) : null}
+              </div>
+            </section>
           )}
 
           {activeNav === "models" && (
             <>
               <section className="vw-panel vw-panel-soft">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="vw-kicker">Phase III</p>
-                  <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Model Manager</h3>
-                  <p className="mt-1 text-sm text-[#71717A]">
-                    Windows-only local model install, checksum verification, benchmark, and activation.
-                  </p>
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <p className="vw-kicker">On-device Models</p>
+                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Model Manager</h3>
+                    <p className="mt-1 text-sm text-[#71717A]">
+                      {installedModels.length} of {modelCatalog.length} installed · active{" "}
+                      <span className="font-semibold text-[#09090B]">{settings.activeModel}</span>
+                    </p>
+                  </div>
+                  <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void refreshPhase3Data()}>
+                    Refresh
+                  </button>
                 </div>
-                <button type="button" className="vw-btn-secondary" onClick={() => void refreshPhase3Data()}>
-                  Refresh
-                </button>
-              </div>
 
-              <div className="vw-model-summary mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                <span className="vw-chip">Catalog {modelCatalog.length}</span>
-                <span className="vw-chip">Installed {installedModels.length}</span>
-                <span className="vw-chip">Active {settings.activeModel}</span>
-                <span className="vw-chip">
-                  Recommended {modelRecommendation?.modelId ?? "Pending"}
-                </span>
-              </div>
-
-              <div className="vw-list-stagger mt-4 space-y-3">
-                {modelCatalog.map((model) => {
-                  const statusRow = modelStatuses[model.modelId];
-                  const isInstalled = installedModelSet.has(model.modelId);
-                  const canInstall =
-                    !isInstalled &&
-                    statusRow?.state !== "downloading" &&
-                    statusRow?.state !== "paused";
-                  const installLabel =
-                    statusRow?.state === "failed" || statusRow?.state === "cancelled"
-                      ? "Retry"
-                      : "Install";
-                  return (
-                    <div
-                      key={model.modelId}
-                      className="vw-interactive-row rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-3"
-                    >
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-semibold text-[#09090B]">{model.displayName}</p>
-                          {model.modelId === "fw-small.en" && (
-                            <span className="vw-chip" title="Default model. Fast, accurate, works on any machine.">
-                              Recommended
-                            </span>
-                          )}
-                          <span className="vw-chip">
-                            {statusRow?.state ?? (isInstalled ? "installed" : "idle")}
-                          </span>
-                        </div>
-                        <p className="text-xs text-[#71717A] mt-1">
-                          v{model.version} • {formatBytes(model.sizeBytes)} • {model.license}
-                        </p>
-                        {typeof statusRow?.downloadedBytes === "number" &&
-                          typeof statusRow?.totalBytes === "number" &&
-                          statusRow.totalBytes > 0 &&
-                          statusRow.state !== "installed" && (
-                            <p className="text-[11px] text-[#71717A] mt-1">
-                              {formatBytes(statusRow.downloadedBytes)} / {formatBytes(statusRow.totalBytes)}
-                              {statusRow.state === "downloading" &&
-                                typeof modelSpeeds[model.modelId] === "number" && (
-                                  <span className="ml-2">
-                                    {formatBytes(Math.round(modelSpeeds[model.modelId]))}/s
-                                  </span>
-                                )}
+                <div className="vw-row-list mt-5">
+                  {modelCatalog.map((model) => {
+                    const statusRow = modelStatuses[model.modelId];
+                    const isInstalled = installedModelSet.has(model.modelId);
+                    const isActiveModel = settings.activeModel === model.modelId;
+                    const isBusy = statusRow?.state === "downloading" || statusRow?.state === "paused";
+                    const canInstall = !isInstalled && !isBusy;
+                    const installLabel =
+                      statusRow?.state === "failed" || statusRow?.state === "cancelled" ? "Retry" : "Install";
+                    const statusLabel = statusRow?.state ?? (isInstalled ? "installed" : "not installed");
+                    const statusDotClass =
+                      statusRow?.state === "downloading"
+                        ? "bg-[#1B8EFF]"
+                        : statusRow?.state === "failed" || statusRow?.state === "cancelled"
+                          ? "bg-[#EF4444]"
+                          : isInstalled
+                            ? "bg-[#10B981]"
+                            : "bg-[#D4D4D8]";
+                    return (
+                      <div key={model.modelId} className="px-5 py-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold text-[#09090B]">{model.displayName}</p>
+                              {isActiveModel && <span className="vw-chip vw-chip-ink">Active</span>}
+                              {!isActiveModel && model.modelId === "fw-small.en" && (
+                                <span className="vw-chip" title="Default model. Fast, accurate, works on any machine.">
+                                  Recommended
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-1 flex items-center gap-2 text-xs text-[#71717A]">
+                              <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
+                              <span className="capitalize">{statusLabel}</span>
+                              <span className="text-[#D4D4D8]">·</span>
+                              <span>
+                                v{model.version} · {formatBytes(model.sizeBytes)} · {model.license}
+                              </span>
                             </p>
+                            {statusRow?.message && <p className="mt-1 text-xs text-[#71717A]">{statusRow.message}</p>}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {canInstall && (
+                              <button
+                                type="button"
+                                className="vw-btn-primary vw-btn-sm"
+                                onClick={() => void installModel(model.modelId)}
+                              >
+                                {installLabel}
+                              </button>
+                            )}
+                            {statusRow?.state === "downloading" && (
+                              <button
+                                type="button"
+                                className="vw-btn-secondary vw-btn-sm"
+                                onClick={() => void pauseModelInstall(model.modelId)}
+                              >
+                                Pause
+                              </button>
+                            )}
+                            {statusRow?.state === "paused" && (
+                              <button
+                                type="button"
+                                className="vw-btn-secondary vw-btn-sm"
+                                onClick={() => void resumeModelInstall(model.modelId)}
+                              >
+                                Resume
+                              </button>
+                            )}
+                            {(statusRow?.state === "downloading" ||
+                              statusRow?.state === "paused" ||
+                              statusRow?.state === "failed" ||
+                              statusRow?.state === "cancelled") && (
+                              <button
+                                type="button"
+                                className="vw-btn-danger vw-btn-sm"
+                                onClick={() => void cancelModelInstall(model.modelId)}
+                              >
+                                Cancel
+                              </button>
+                            )}
+                            {isInstalled && !isActiveModel && (
+                              <button
+                                type="button"
+                                className="vw-btn-secondary vw-btn-sm"
+                                onClick={() => void makeModelActive(model.modelId)}
+                              >
+                                Make Active
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {isBusy &&
+                          typeof statusRow?.downloadedBytes === "number" &&
+                          typeof statusRow?.totalBytes === "number" &&
+                          statusRow.totalBytes > 0 && (
+                            <div className="mt-3">
+                              <div className="vw-progress">
+                                <div
+                                  className="vw-progress-fill vw-progress-fill-accent"
+                                  style={{
+                                    width: `${Math.min(
+                                      100,
+                                      Math.round((statusRow.downloadedBytes / statusRow.totalBytes) * 100)
+                                    )}%`
+                                  }}
+                                />
+                              </div>
+                              <p className="mt-1.5 text-[11px] text-[#71717A]">
+                                {formatBytes(statusRow.downloadedBytes)} / {formatBytes(statusRow.totalBytes)}
+                                {statusRow.state === "downloading" &&
+                                  typeof modelSpeeds[model.modelId] === "number" && (
+                                    <span className="ml-2">{formatBytes(Math.round(modelSpeeds[model.modelId]))}/s</span>
+                                  )}
+                              </p>
+                            </div>
                           )}
-                        {statusRow?.message && <p className="text-xs text-[#71717A] mt-1">{statusRow.message}</p>}
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {canInstall && (
-                          <button
-                            type="button"
-                            className="vw-btn-primary"
-                            onClick={() => void installModel(model.modelId)}
-                          >
-                            {installLabel}
-                          </button>
-                        )}
-                        {statusRow?.state === "downloading" && (
-                          <button
-                            type="button"
-                            className="vw-btn-secondary"
-                            onClick={() => void pauseModelInstall(model.modelId)}
-                          >
-                            Pause
-                          </button>
-                        )}
-                        {statusRow?.state === "paused" && (
-                          <button
-                            type="button"
-                            className="vw-btn-secondary"
-                            onClick={() => void resumeModelInstall(model.modelId)}
-                          >
-                            Resume
-                          </button>
-                        )}
-                        {(statusRow?.state === "downloading" ||
-                          statusRow?.state === "paused" ||
-                          statusRow?.state === "failed" ||
-                          statusRow?.state === "cancelled") && (
-                          <button
-                            type="button"
-                            className="vw-btn-danger"
-                            onClick={() => void cancelModelInstall(model.modelId)}
-                          >
-                            Cancel
-                          </button>
-                        )}
-                        {isInstalled && (
-                          <button
-                            type="button"
-                            className={
-                              settings.activeModel === model.modelId
-                                ? "vw-btn-primary vw-accent-button"
-                                : "vw-btn-secondary"
-                            }
-                            onClick={() => void makeModelActive(model.modelId)}
-                          >
-                            {settings.activeModel === model.modelId ? "Active" : "Make Active"}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
               </section>
 
-              <section className="vw-panel mt-6">
-              <button
-                type="button"
-                className="vw-model-benchmark-toggle"
-                onClick={() => setBenchmarkPanelOpen((open) => !open)}
-                aria-expanded={benchmarkPanelOpen}
-              >
-                <div>
-                  <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Benchmark Recommendation</h3>
-                  <p className="mt-1 text-sm text-[#71717A]">
-                    {benchmarkPanelOpen
-                      ? "Runs local benchmark and updates recommendation."
-                      : "Tap to expand benchmark options."}
-                  </p>
-                </div>
-                <ChevronDown
-                  size={17}
-                  className={`text-[#71717A] transition-transform ${benchmarkPanelOpen ? "rotate-180" : ""}`}
-                />
-              </button>
-
-              {benchmarkPanelOpen && (
-                <div className="mt-4">
+              <section className="vw-panel vw-panel-soft mt-2 pt-0">
+                <div className="vw-surface-base">
                   <button
                     type="button"
-                    className="vw-btn-primary vw-action-button"
-                    onClick={() => void runBenchmarkAndRecommend()}
+                    className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left"
+                    onClick={() => setBenchmarkPanelOpen((open) => !open)}
+                    aria-expanded={benchmarkPanelOpen}
                   >
-                    Run Benchmark
+                    <div>
+                      <p className="text-sm font-semibold text-[#09090B]">Benchmark Recommendation</p>
+                      <p className="mt-0.5 text-xs text-[#71717A]">
+                        {modelRecommendation
+                          ? `Recommended: ${modelRecommendation.modelId}`
+                          : "Run a local benchmark to find the best model for this machine."}
+                      </p>
+                    </div>
+                    <ChevronDown
+                      size={16}
+                      className={`shrink-0 text-[#71717A] transition-transform ${benchmarkPanelOpen ? "rotate-180" : ""}`}
+                    />
                   </button>
 
-                  {modelRecommendation && (
-                    <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
-                      <p className="text-sm font-semibold text-[#09090B]">
-                        Recommended: {modelRecommendation.modelId}
-                      </p>
-                      <p className="text-xs text-[#71717A]">{modelRecommendation.reason}</p>
-                    </div>
-                  )}
+                  {benchmarkPanelOpen && (
+                    <div className="border-t border-[#F1F1F3] px-5 py-4">
+                      <button
+                        type="button"
+                        className="vw-btn-primary vw-btn-sm"
+                        onClick={() => void runBenchmarkAndRecommend()}
+                      >
+                        Run Benchmark
+                      </button>
 
-                  {benchmarkResults && (
-                    <div className="vw-surface-base mt-4 overflow-x-auto rounded-2xl border border-[#E4E4E7]">
-                      <table className="w-full text-left text-sm">
-                        <thead className="bg-[#FAFAFA] text-[#71717A]">
-                          <tr>
-                            <th className="px-3 py-2">Model</th>
-                            <th className="px-3 py-2">P50</th>
-                            <th className="px-3 py-2">P95</th>
-                            <th className="px-3 py-2">Avg RTF</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {benchmarkResults.rows.map((row) => (
-                            <tr key={row.modelId} className="border-t border-[#E4E4E7] text-[#09090B]">
-                              <td className="px-3 py-2">{row.modelId}</td>
-                              <td className="px-3 py-2">{row.p50LatencyMs} ms</td>
-                              <td className="px-3 py-2">{row.p95LatencyMs} ms</td>
-                              <td className="px-3 py-2">{row.averageRtf.toFixed(2)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                      {modelRecommendation && (
+                        <p className="mt-3 text-sm text-[#3F3F46]">
+                          <span className="font-semibold text-[#09090B]">Recommended: {modelRecommendation.modelId}</span>
+                          {" — "}
+                          {modelRecommendation.reason}
+                        </p>
+                      )}
+
+                      {benchmarkResults && (
+                        <div className="mt-4 overflow-x-auto rounded-xl border border-[#F1F1F3]">
+                          <table className="w-full text-left text-sm">
+                            <thead className="text-xs uppercase tracking-wide text-[#A1A1AA]">
+                              <tr>
+                                <th className="px-3 py-2 font-semibold">Model</th>
+                                <th className="px-3 py-2 font-semibold">P50</th>
+                                <th className="px-3 py-2 font-semibold">P95</th>
+                                <th className="px-3 py-2 font-semibold">Avg RTF</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {benchmarkResults.rows.map((row) => (
+                                <tr key={row.modelId} className="border-t border-[#F1F1F3] text-[#09090B]">
+                                  <td className="px-3 py-2">{row.modelId}</td>
+                                  <td className="px-3 py-2 tabular-nums">{row.p50LatencyMs} ms</td>
+                                  <td className="px-3 py-2 tabular-nums">{row.p95LatencyMs} ms</td>
+                                  <td className="px-3 py-2 tabular-nums">{row.averageRtf.toFixed(2)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
               </section>
             </>
           )}
 
           {activeNav === "sessions" && (
             <section className="vw-panel vw-panel-soft">
-            <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Session History and Retention</h3>
-            <p className="mt-1 text-sm text-[#71717A]">
-              Configure retention and review local session history.
-            </p>
+              <p className="vw-kicker">Local Only</p>
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">History</h3>
+              <p className="mt-1 text-sm text-[#71717A]">
+                Every dictation stays on this machine. Retention is under your control.
+              </p>
 
-            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="vw-stat-card">
-                <p className="vw-kicker">Current Policy</p>
-                <p className="mt-1 text-lg font-semibold text-[#09090B]">{policyLabel(historyPolicy)}</p>
+              <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div className="vw-stat-card">
+                  <p className="vw-kicker">Retention</p>
+                  <p className="mt-1 text-lg font-semibold text-[#09090B]">{policyLabel(historyPolicy)}</p>
+                </div>
+                <div className="vw-stat-card">
+                  <p className="vw-kicker">Records</p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">{sessionHistory.length}</p>
+                </div>
+                <div className="vw-stat-card">
+                  <p className="vw-kicker">Success Ratio</p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">
+                    {sessionHistory.length === 0
+                      ? "—"
+                      : `${Math.round(
+                          (sessionHistory.filter((record) => record.success).length / sessionHistory.length) * 100
+                        )}%`}
+                  </p>
+                </div>
               </div>
-              <div className="vw-stat-card">
-                <p className="vw-kicker">Records</p>
-                <p className="mt-1 text-lg font-semibold text-[#09090B]">{sessionHistory.length}</p>
-              </div>
-              <div className="vw-stat-card">
-                <p className="vw-kicker">Success Ratio</p>
-                <p className="mt-1 text-lg font-semibold text-[#09090B]">
-                  {sessionHistory.length === 0
-                    ? "n/a"
-                    : `${Math.round(
-                        (sessionHistory.filter((record) => record.success).length / sessionHistory.length) * 100
-                      )}%`}
-                </p>
-              </div>
-            </div>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              {retentionOptions.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  className={historyPolicy === option ? "vw-btn-primary" : "vw-btn-secondary"}
-                  onClick={() => void updateRetentionPolicy(option)}
-                >
-                  {policyLabel(option)}
-                </button>
-              ))}
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button type="button" className="vw-btn-secondary" onClick={() => void pruneHistory()}>
-                Prune Now
-              </button>
-              <button type="button" className="vw-btn-danger" onClick={() => void clearSessionHistory()}>
-                Clear All
-              </button>
-            </div>
-
-            <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-[#09090B]">Advanced History Tools</p>
-                <span className={`vw-chip ${isPro ? "vw-chip-accent" : ""}`}>
-                  {isPro ? "Pro Unlocked" : "Pro"}
-                </span>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="vw-seg" role="group" aria-label="History retention policy">
+                  {retentionOptions.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={`vw-seg-btn ${historyPolicy === option ? "vw-seg-btn-active" : ""}`}
+                      onClick={() => void updateRetentionPolicy(option)}
+                    >
+                      {policyLabel(option)}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void pruneHistory()}>
+                    Prune Now
+                  </button>
+                  <button type="button" className="vw-btn-danger vw-btn-sm" onClick={() => void clearSessionHistory()}>
+                    Clear All
+                  </button>
+                </div>
               </div>
-              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-                <input
-                  value={historyQuery}
-                  onChange={(event) => setHistoryQuery(event.target.value)}
-                  placeholder="Search query"
-                  className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
-                />
-                <input
-                  value={historyTag}
-                  onChange={(event) => setHistoryTag(event.target.value)}
-                  placeholder="Tag filter (optional)"
-                  className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
-                />
-                <button
-                  type="button"
-                  className={isPro ? "vw-btn-secondary" : "vw-btn-primary vw-action-button"}
-                  onClick={() => {
-                    if (!isPro) {
-                      setActiveNav("pro");
-                      return;
-                    }
-                    const tags = historyTag.trim() ? [historyTag.trim()] : null;
-                    void searchHistory(historyQuery, tags, null);
-                  }}
-                >
-                  {isPro ? "Run Search" : "Open Pro Offer"}
-                </button>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {(["plain", "markdownNotes", "studySummary"] as const).map((preset) => (
+
+              <div className="vw-surface-base mt-5 px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-[#09090B]">Search &amp; Export</p>
+                  <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>{isPro ? "Pro Unlocked" : "Pro"}</span>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_200px_auto]">
+                  <input
+                    value={historyQuery}
+                    onChange={(event) => setHistoryQuery(event.target.value)}
+                    placeholder="Search transcripts"
+                    className="vw-field"
+                  />
+                  <input
+                    value={historyTag}
+                    onChange={(event) => setHistoryTag(event.target.value)}
+                    placeholder="Tag filter"
+                    className="vw-field"
+                  />
                   <button
-                    key={preset}
                     type="button"
-                    className={isPro ? "vw-btn-secondary" : "vw-btn-primary vw-action-button"}
+                    className="vw-btn-primary"
                     onClick={() => {
                       if (!isPro) {
                         setActiveNav("pro");
                         return;
                       }
-                      void exportHistoryPreset(preset);
+                      const tags = historyTag.trim() ? [historyTag.trim()] : null;
+                      void searchHistory(historyQuery, tags, null);
                     }}
                   >
-                    Export {preset}
+                    {isPro ? "Search" : "Open Pro Offer"}
                   </button>
-                ))}
-              </div>
-              {!isPro && (
-                <p className="mt-2 text-xs text-[#71717A]">
-                  Search, tagging, starring, and exports are Pro features. Free retains full timeline and retention controls.
-                </p>
-              )}
-              {lastHistoryExport && (
-                <div className="vw-surface-base-sm mt-3 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2">
-                  <p className="text-xs font-semibold text-[#09090B]">
-                    Export ready: {lastHistoryExport.preset} ({lastHistoryExport.recordCount} records)
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-[#A1A1AA]">Export as</span>
+                  {(["plain", "markdownNotes", "studySummary"] as const).map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm"
+                      onClick={() => {
+                        if (!isPro) {
+                          setActiveNav("pro");
+                          return;
+                        }
+                        void exportHistoryPreset(preset);
+                      }}
+                    >
+                      {preset === "plain" ? "Plain text" : preset === "markdownNotes" ? "Markdown notes" : "Study summary"}
+                    </button>
+                  ))}
+                </div>
+                {!isPro && (
+                  <p className="mt-2 text-xs text-[#71717A]">
+                    Search, tagging, starring, and exports are Pro features. Free keeps the full timeline and retention controls.
                   </p>
-                  <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-[#52525B]">
-                    {lastHistoryExport.content}
-                  </pre>
-                </div>
-              )}
-            </div>
-
-            <div className="vw-list-stagger mt-4 space-y-2">
-              {sessionHistory.length === 0 && (
-                <p className="text-sm text-[#71717A]">No sessions available.</p>
-              )}
-              {sessionHistory.map((record) => (
-                <div
-                  key={record.recordId}
-                  className="vw-interactive-row rounded-2xl border border-[#E4E4E7] bg-white px-3 py-2"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-semibold text-[#09090B]">
-                      {record.source} / {record.success ? "success" : "failed"}
+                )}
+                {lastHistoryExport && (
+                  <div className="mt-3 rounded-xl border border-[#F1F1F3] bg-[#FAFAFA] px-3 py-2">
+                    <p className="text-xs font-semibold text-[#09090B]">
+                      Export ready: {lastHistoryExport.preset} ({lastHistoryExport.recordCount} records)
                     </p>
-                    {record.method && <span className="vw-chip">{record.method}</span>}
-                    {record.starred && <span className="vw-chip">Starred</span>}
-                  </div>
-                  <p className="text-xs text-[#71717A] mt-1">{record.preview}</p>
-                  {record.tags.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {record.tags.map((tag) => (
-                        <span key={`${record.recordId}-${tag}`} className="vw-chip">
-                          #{tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className={isPro ? "vw-btn-secondary text-xs px-3 py-1" : "vw-btn-primary text-xs px-3 py-1"}
-                      onClick={() => {
-                        if (!isPro) {
-                          setActiveNav("pro");
-                          return;
-                        }
-                        void setSessionStarred(record.recordId, !record.starred);
-                      }}
-                    >
-                      {record.starred ? "Unstar" : "Star"}
-                    </button>
-                    <button
-                      type="button"
-                      className={isPro ? "vw-btn-secondary text-xs px-3 py-1" : "vw-btn-primary text-xs px-3 py-1"}
-                      onClick={() => {
-                        if (!isPro) {
-                          setActiveNav("pro");
-                          return;
-                        }
-                        if (!historyTag.trim()) {
-                          return;
-                        }
-                        void addSessionTag(record.recordId, historyTag.trim());
-                      }}
-                    >
-                      Tag
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-[#A1A1AA] mt-1">{formatDate(record.timestampUtcMs)}</p>
-                </div>
-              ))}
-            </div>
-            </section>
-          )}
-
-          {activeNav === "dictionary" && (
-            <section className="vw-panel">
-              <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Personal Dictionary</h3>
-              <p className="mt-1 text-sm text-[#71717A]">
-                Keep this compact: approved words live here, while new suggestions are reviewed in the floating pill.
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <span className="vw-chip">Approved: {activeDictionaryTerms.length}</span>
-                <span className="vw-chip">Pending: {dictionaryQueue.length}</span>
-                <span className={`vw-chip ${cloudUserId ? "vw-chip-accent" : ""}`}>
-                  {cloudUserId ? "Synced Across Devices" : "Device Local"}
-                </span>
-              </div>
-
-              <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#09090B]">Recent Sentences</p>
-                  <span className="vw-chip">{cloudUserId ? "Cloud Sync" : "Local"}</span>
-                </div>
-                <p className="mt-1 text-xs text-[#71717A]">
-                  Showing your latest five sentences for quick dictionary review.
-                </p>
-                {recentSentences.length === 0 ? (
-                  <p className="mt-3 text-sm text-[#71717A]">No recent sentences yet.</p>
-                ) : (
-                  <div className="mt-3 space-y-2">
-                    {recentSentences.map((entry) => (
-                      <div
-                        key={entry.id}
-                        className="rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2"
-                      >
-                        <p className="text-sm text-[#09090B]">{entry.text}</p>
-                        <p className="mt-1 text-[11px] text-[#A1A1AA]">{formatDate(entry.createdAtUtcMs)}</p>
-                      </div>
-                    ))}
+                    <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-[#52525B]">
+                      {lastHistoryExport.content}
+                    </pre>
                   </div>
                 )}
               </div>
 
-              <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#09090B]">Add Term</p>
-                  <span className="vw-chip">{cloudUserId ? "Cloud + Manual" : "Manual"}</span>
+              {sessionHistory.length === 0 ? (
+                <div className="mt-5 rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-10 text-center">
+                  <p className="text-sm font-medium text-[#09090B]">No sessions yet</p>
+                  <p className="mt-1 text-sm text-[#71717A]">Dictations will appear here as you use VoiceWave.</p>
                 </div>
-                <p className="mt-1 text-xs text-[#71717A]">
-                  {cloudUserId
-                    ? "New approved terms are saved to your account and follow you to every install."
-                    : "Sign in to sync dictionary terms across devices."}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
+              ) : (
+                <div className="vw-row-list vw-list-stagger mt-5">
+                  {sessionHistory.map((record) => (
+                    <div key={record.recordId} className="vw-interactive-row px-5 py-3.5">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm text-[#09090B]">{record.preview}</p>
+                          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#A1A1AA]">
+                            <span>{formatDate(record.timestampUtcMs)}</span>
+                            <span className="text-[#E4E4E7]">·</span>
+                            <span className="capitalize">{record.source}</span>
+                            {record.method && (
+                              <>
+                                <span className="text-[#E4E4E7]">·</span>
+                                <span>{record.method}</span>
+                              </>
+                            )}
+                            {!record.success && (
+                              <>
+                                <span className="text-[#E4E4E7]">·</span>
+                                <span className="font-semibold text-[#B3261E]">failed</span>
+                              </>
+                            )}
+                            {record.tags.map((tag) => (
+                              <span key={`${record.recordId}-${tag}`} className="vw-chip">
+                                #{tag}
+                              </span>
+                            ))}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            className="vw-icon-btn"
+                            aria-label={record.starred ? "Unstar session" : "Star session"}
+                            title={record.starred ? "Unstar" : "Star"}
+                            onClick={() => {
+                              if (!isPro) {
+                                setActiveNav("pro");
+                                return;
+                              }
+                              void setSessionStarred(record.recordId, !record.starred);
+                            }}
+                          >
+                            <Star
+                              size={15}
+                              className={record.starred ? "fill-[#09090B] text-[#09090B]" : ""}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            className="vw-btn-secondary vw-btn-sm"
+                            title="Apply the tag from the tag filter box"
+                            onClick={() => {
+                              if (!isPro) {
+                                setActiveNav("pro");
+                                return;
+                              }
+                              if (!historyTag.trim()) {
+                                return;
+                              }
+                              void addSessionTag(record.recordId, historyTag.trim());
+                            }}
+                          >
+                            Tag
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {activeNav === "dictionary" && (
+            <section className="vw-panel vw-panel-soft">
+              <p className="vw-kicker">{cloudUserId ? "Synced Across Devices" : "Device Local"}</p>
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Personal Dictionary</h3>
+              <p className="mt-1 text-sm text-[#71717A]">
+                {activeDictionaryTerms.length} approved {activeDictionaryTerms.length === 1 ? "term" : "terms"}
+                {dictionaryQueue.length > 0 ? ` · ${dictionaryQueue.length} pending review` : ""} — new suggestions
+                surface in the floating pill.
+              </p>
+
+              <div className="vw-surface-base mt-5 px-5 py-4">
+                <div className="flex flex-wrap gap-2">
                   <input
                     value={dictionaryDraftTerm}
                     onChange={(event) => setDictionaryDraftTerm(event.target.value)}
@@ -1554,54 +1512,29 @@ function App() {
                         submitDictionaryDraft();
                       }
                     }}
-                    placeholder="Add a custom term"
-                    className="min-w-[220px] flex-1 rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                    placeholder="Add a name, product, or term VoiceWave should always spell right"
+                    className="vw-field min-w-[220px] flex-1"
                   />
                   <button type="button" className="vw-btn-primary" onClick={submitDictionaryDraft}>
                     Add
                   </button>
                 </div>
-              </div>
-
-              <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#09090B]">Backup &amp; Restore</p>
-                  <span className="vw-chip">Local</span>
-                </div>
-                <p className="mt-1 text-xs text-[#71717A]">
-                  Export your approved terms to a JSON file, or import a file to restore them on a
-                  new install. Duplicates are skipped.
+                <p className="mt-2 text-xs text-[#71717A]">
+                  {cloudUserId
+                    ? "New terms are saved to your account and follow you to every install."
+                    : "Sign in to sync dictionary terms across devices."}
                 </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button type="button" className="vw-btn-secondary" onClick={handleExportDictionary}>
-                    Export
-                  </button>
-                  <button
-                    type="button"
-                    className="vw-btn-secondary"
-                    onClick={() => dictionaryImportInputRef.current?.click()}
-                  >
-                    Import
-                  </button>
-                  <input
-                    ref={dictionaryImportInputRef}
-                    type="file"
-                    accept="application/json"
-                    className="hidden"
-                    onChange={handleImportDictionaryFile}
-                  />
-                </div>
-                {dictionaryPortNotice && (
-                  <p className="mt-2 text-xs text-[#71717A]">{dictionaryPortNotice}</p>
-                )}
               </div>
 
-              <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
+              <div className="vw-surface-base mt-4 px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#09090B]">Domain Dictionaries (Pro)</p>
-                  <span className={`vw-chip ${isPro ? "vw-chip-accent" : ""}`}>
-                    {isPro ? "Unlocked" : "Pro"}
-                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-[#09090B]">Domain packs</p>
+                    <p className="mt-0.5 text-xs text-[#71717A]">
+                      Curated vocabulary for your field, applied on top of your own terms.
+                    </p>
+                  </div>
+                  <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>{isPro ? "Pro Unlocked" : "Pro"}</span>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {domainPackOptions.map((pack) => {
@@ -1610,7 +1543,8 @@ function App() {
                       <button
                         key={pack}
                         type="button"
-                        className={active ? "vw-btn-primary vw-accent-button" : "vw-btn-secondary"}
+                        className={`vw-seg-btn ${active ? "vw-seg-btn-active" : ""} border border-[#E4E4E7] capitalize`}
+                        aria-pressed={active}
                         onClick={() => {
                           if (!isPro) {
                             setActiveNav("pro");
@@ -1629,71 +1563,82 @@ function App() {
                 </div>
               </div>
 
-              <div className="vw-surface-base mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h4 className="vw-section-heading text-sm font-semibold text-[#09090B]">
-                    Approved Terms {cloudUserId ? "(Synced)" : ""}
-                  </h4>
-                  <span className="text-xs text-[#71717A]">{sortedDictionaryTerms.length} total</span>
+              <div className="mt-4">
+                <div className="flex items-center justify-between gap-2 px-1 pb-2">
+                  <h4 className="text-sm font-semibold text-[#09090B]">Approved terms</h4>
+                  <span className="text-xs tabular-nums text-[#A1A1AA]">{sortedDictionaryTerms.length} total</span>
                 </div>
-                <div className="vw-list-stagger mt-3 max-h-[380px] space-y-2 overflow-y-auto pr-1">
-                  {sortedDictionaryTerms.length === 0 && (
-                    <p className="text-sm text-[#71717A]">No approved terms yet.</p>
-                  )}
-                  {sortedDictionaryTerms.map((term) => (
-                    <div
-                      key={term.termId}
-                      className="vw-interactive-row rounded-xl border border-[#E4E4E7] bg-white px-3 py-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-[#09090B]">{term.term}</p>
+                {sortedDictionaryTerms.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-8 text-center">
+                    <p className="text-sm font-medium text-[#09090B]">No approved terms yet</p>
+                    <p className="mt-1 text-sm text-[#71717A]">
+                      Add one above, or approve suggestions from the pill after dictating.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="vw-row-list vw-list-stagger max-h-[380px] overflow-y-auto">
+                    {sortedDictionaryTerms.map((term) => (
+                      <div key={term.termId} className="vw-interactive-row flex items-center justify-between gap-3 px-4 py-2.5">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-[#09090B]">{term.term}</p>
+                          <p className="text-[11px] text-[#A1A1AA]">{term.source}</p>
+                        </div>
                         <button
                           type="button"
-                          className="vw-btn-danger text-xs px-3 py-1"
+                          className="vw-icon-btn"
+                          aria-label={`Remove ${term.term}`}
+                          title="Remove term"
                           onClick={() => handleDeleteDictionaryTerm(term.termId)}
                         >
-                          Remove
+                          <X size={14} />
                         </button>
                       </div>
-                      <p className="text-xs text-[#71717A] mt-1">{term.source}</p>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              <div className="mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
+              <div className="vw-surface-base mt-4">
                 <button
                   type="button"
-                  className="flex w-full items-center justify-between gap-2 text-left"
+                  className="flex w-full items-center justify-between gap-2 px-5 py-4 text-left"
                   onClick={() => setDictionaryPendingOpen((open) => !open)}
                   aria-expanded={dictionaryPendingOpen}
                 >
-                  <p className="text-sm font-semibold text-[#09090B]">Pending Review Queue</p>
-                  <span className="text-xs text-[#71717A]">{dictionaryQueue.length} items</span>
+                  <p className="text-sm font-semibold text-[#09090B]">Pending review queue</p>
+                  <span className="flex items-center gap-2 text-xs text-[#71717A]">
+                    {dictionaryQueue.length} {dictionaryQueue.length === 1 ? "item" : "items"}
+                    <ChevronDown
+                      size={14}
+                      className={`transition-transform ${dictionaryPendingOpen ? "rotate-180" : ""}`}
+                    />
+                  </span>
                 </button>
                 {dictionaryPendingOpen && (
-                  <div className="vw-list-stagger mt-3 space-y-2">
+                  <div className="border-t border-[#F1F1F3]">
                     {sortedDictionaryQueue.length === 0 && (
-                      <p className="text-sm text-[#71717A]">Queue is empty.</p>
+                      <p className="px-5 py-4 text-sm text-[#71717A]">Queue is empty.</p>
                     )}
                     {sortedDictionaryQueue.map((item) => (
                       <div
                         key={item.entryId}
-                        className="vw-interactive-row rounded-xl border border-[#E4E4E7] bg-white px-3 py-2"
+                        className="flex items-center justify-between gap-3 border-b border-[#F1F1F3] px-5 py-3 last:border-b-0"
                       >
-                        <p className="text-sm font-semibold text-[#09090B]">{item.term}</p>
-                        <p className="text-xs text-[#71717A] mt-1">{item.sourcePreview}</p>
-                        <div className="mt-2 flex gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-[#09090B]">{item.term}</p>
+                          <p className="mt-0.5 truncate text-xs text-[#A1A1AA]">{item.sourcePreview}</p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
                           <button
                             type="button"
-                            className="vw-btn-primary text-xs px-3 py-1"
+                            className="vw-btn-primary vw-btn-sm"
                             onClick={() => handleApproveDictionaryQueueEntry(item.entryId)}
                           >
                             Approve
                           </button>
                           <button
                             type="button"
-                            className="vw-btn-danger text-xs px-3 py-1"
+                            className="vw-btn-danger vw-btn-sm"
                             onClick={() => void rejectDictionaryQueueEntry(item.entryId)}
                           >
                             Dismiss
@@ -1704,23 +1649,50 @@ function App() {
                   </div>
                 )}
               </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-1">
+                <p className="text-xs text-[#A1A1AA]">
+                  Back up approved terms as JSON, or restore them on a new install. Duplicates are skipped.
+                </p>
+                <div className="flex gap-2">
+                  <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={handleExportDictionary}>
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    className="vw-btn-secondary vw-btn-sm"
+                    onClick={() => dictionaryImportInputRef.current?.click()}
+                  >
+                    Import
+                  </button>
+                  <input
+                    ref={dictionaryImportInputRef}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={handleImportDictionaryFile}
+                  />
+                </div>
+              </div>
+              {dictionaryPortNotice && <p className="mt-2 px-1 text-xs text-[#71717A]">{dictionaryPortNotice}</p>}
             </section>
           )}
 
           {activeNav === "pro-tools" && (
             <>
               <section className="vw-panel vw-panel-soft">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-end justify-between gap-2">
                   <div>
-                    <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">Pro Tools Modes</h3>
+                    <p className="vw-kicker">Workflows</p>
+                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Pro Tools Modes</h3>
                     <p className="mt-1 text-sm text-[#71717A]">
                       Pick one mode and VoiceWave reconfigures output behavior for that workflow.
                     </p>
                   </div>
-                  <span className="vw-chip vw-chip-accent">Pro Active</span>
+                  <span className="vw-chip vw-chip-ink">Pro Active</span>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
                   {PRO_TOOLS_MODE_CARDS.map((mode) => {
                     const isActiveMode = displayedProToolsMode === mode.id;
                     const isApplying = modeApplyPending === mode.id;
@@ -1729,7 +1701,7 @@ function App() {
                         key={mode.id}
                         type="button"
                         className={`vw-mode-card rounded-2xl border px-4 py-4 text-left ${
-                          isActiveMode ? "vw-pro-mode-card-active" : "vw-pro-mode-card"
+                          isActiveMode ? "vw-pro-mode-card-active" : ""
                         }`}
                         onClick={() => void applyProToolsMode(mode.id)}
                         aria-disabled={modeApplyPending ? "true" : "false"}
@@ -1811,319 +1783,355 @@ function App() {
       {activeOverlay === "settings" && (
         <OverlayModal
           title="Settings"
-          subtitle="Essential controls only. Advanced tuning is available on demand."
+          subtitle="Tune how VoiceWave listens, inserts, and polishes."
           onClose={closeOverlay}
+          maxWidthClassName="max-w-4xl"
         >
-          <div className="space-y-5">
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-[#09090B]">Microphone Input</p>
-                  <p className="text-xs text-[#71717A]">Choose the device used for dictation.</p>
-                </div>
-                <button type="button" className="vw-btn-secondary" onClick={() => void refreshInputDevices()}>
-                  Refresh
-                </button>
-              </div>
-              <div className="mt-3 flex flex-col gap-2">
-                <select
-                  className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
-                  value={settings.inputDevice ?? ""}
-                  onChange={(event) => void setInputDevice(event.target.value ? event.target.value : null)}
-                >
-                  <option value="">Default system input</option>
-                  {inputDevices.map((device) => (
-                    <option key={device} value={device}>
-                      {device}
-                    </option>
-                  ))}
-                </select>
-                {inputDevices.length === 0 && (
-                  <p className="text-xs text-[#C45E5E]">No input devices detected.</p>
-                )}
-              </div>
-            </section>
-
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <p className="text-sm font-semibold text-[#09090B]">Microphone volume guard</p>
-              <p className="text-xs text-[#71717A]">
-                Call apps and browser tabs can silently lower your Windows mic input volume, which
-                hurts accuracy.
-              </p>
-              <div className="mt-3 flex flex-col gap-2">
-                <select
-                  className="rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
-                  value={settings.micVolumeGuard}
-                  onChange={(event) =>
-                    void setMicVolumeGuard(event.target.value as MicVolumeGuardMode)
-                  }
-                >
-                  <option value="off">Off</option>
-                  <option value="warn">Warn me</option>
-                  <option value="autoRestore">Auto-restore</option>
-                </select>
-                <p className="text-xs text-[#71717A]">
-                  {settings.micVolumeGuard === "off"
-                    ? "Never check the Windows mic volume."
-                    : settings.micVolumeGuard === "autoRestore"
-                    ? "Restore mic volume to 100% automatically and tell you it happened."
-                    : "Show a pill notice when another app has lowered your mic volume."}
-                </p>
-              </div>
-            </section>
-
-            {micQualityWarning && (
-              <section className="vw-surface-elevated rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-4">
-                <p className="text-sm font-semibold text-[#09090B]">Microphone Quality Warning</p>
-                <p className="mt-1 text-sm text-[#3F3F46]">{micQualityWarning.message}</p>
-                <p className="mt-2 text-xs text-[#71717A]">Current input: {micQualityWarning.currentDevice}</p>
-                {micQualityWarning.recommendedDevice && (
-                  <p className="mt-1 text-xs text-[#71717A]">
-                    Suggested input: {micQualityWarning.recommendedDevice}
-                  </p>
-                )}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {micQualityWarning.recommendedDevice && (
-                    <button type="button" className="vw-btn-primary" onClick={() => void switchToRecommendedInput()}>
-                      Switch to Suggested Input
-                    </button>
-                  )}
-                  <button type="button" className="vw-btn-secondary" onClick={() => void refreshInputDevices()}>
-                    Refresh Devices
+          <div className="vw-settings-shell">
+            <nav className="vw-settings-rail" aria-label="Settings sections">
+              {SETTINGS_SECTIONS.map((section) => {
+                const SectionIcon = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    className="vw-settings-rail-btn"
+                    aria-selected={settingsSection === section.id}
+                    onClick={() => setSettingsSection(section.id)}
+                  >
+                    <SectionIcon size={15} className={settingsSection === section.id ? "text-[#1B8EFF]" : "text-[#A1A1AA]"} />
+                    {section.label}
                   </button>
-                </div>
-              </section>
-            )}
+                );
+              })}
+            </nav>
 
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <div className="flex flex-wrap gap-2">
-                <span className="vw-chip">Microphone: {permissions.microphone}</span>
-                <span className="vw-chip">Insertion: {permissions.insertionCapability}</span>
-              </div>
-              {permissions.message && <p className="mt-2 text-xs text-[#71717A]">{permissions.message}</p>}
-              <div className="mt-4 space-y-3">
-                <label className="flex items-center gap-2 text-sm text-[#09090B]">
-                  <input
-                    type="checkbox"
-                    checked={settings.preferClipboardFallback}
-                    onChange={(event) => void setPreferClipboardFallback(event.target.checked)}
-                  />
-                  Prefer clipboard fallback for insertion
-                </label>
-                <button type="button" className="vw-btn-secondary" onClick={() => void requestMicAccess()}>
-                  Check Microphone Permission
-                </button>
-              </div>
-            </section>
-
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <p className="text-sm font-semibold text-[#09090B]">On-device AI polish (experimental)</p>
-              <p className="text-xs text-[#71717A]">
-                After dictation, a local model offers a cleaned-up version in the pill. Off by
-                default; nothing is sent to the cloud.
-              </p>
-              <div className="mt-3">
-                <label className="flex items-center gap-2 text-sm text-[#09090B]">
-                  <input
-                    type="checkbox"
-                    checked={settings.llmPolishEnabled ?? false}
-                    onChange={(event) => void setLlmPolishEnabled(event.target.checked)}
-                  />
-                  Enable on-device AI polish
-                </label>
-                {polishModelProgress && !polishModelProgress.done && !polishModelProgress.error && (
-                  <div className="mt-3">
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E4E4E7]">
-                      <div
-                        className="h-full rounded-full bg-[#09090B] transition-all"
-                        style={{
-                          width: `${
-                            polishModelProgress.total > 0
-                              ? Math.min(
-                                  100,
-                                  Math.round((polishModelProgress.downloaded / polishModelProgress.total) * 100)
-                                )
-                              : 3
-                          }%`
-                        }}
-                      />
+            <div className="vw-settings-panel">
+              {settingsSection === "audio" && (
+                <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Microphone input</p>
+                      <p className="vw-set-desc">The device VoiceWave listens to during dictation.</p>
                     </div>
-                    <p className="mt-1.5 text-xs text-[#71717A]">
-                      {polishModelProgress.total > 0
-                        ? `Downloading AI polish model… ${Math.round(
-                            (polishModelProgress.downloaded / polishModelProgress.total) * 100
-                          )}% (one-time, ~1 GB)`
-                        : "Preparing AI polish model download… (one-time, ~1 GB)"}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="vw-field max-w-[240px]"
+                        aria-label="Microphone input device"
+                        value={settings.inputDevice ?? ""}
+                        onChange={(event) => void setInputDevice(event.target.value ? event.target.value : null)}
+                      >
+                        <option value="">Default system input</option>
+                        {inputDevices.map((device) => (
+                          <option key={device} value={device}>
+                            {device}
+                          </option>
+                        ))}
+                      </select>
+                      <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void refreshInputDevices()}>
+                        Refresh
+                      </button>
+                    </div>
                   </div>
-                )}
-                {polishModelProgress?.done && (
-                  <p className="mt-2 text-xs text-[#16803C]">AI polish model ready.</p>
-                )}
-                {polishModelProgress?.error && (
-                  <p className="mt-2 text-xs text-[#a94444]">
-                    Model download failed: {polishModelProgress.error}
-                  </p>
-                )}
-              </div>
-            </section>
+                  {inputDevices.length === 0 && (
+                    <p className="pb-3 text-xs text-[#B3261E]">No input devices detected.</p>
+                  )}
 
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <p className="text-sm font-semibold text-[#09090B]">Diagnostics</p>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                <label className="flex items-center gap-2 text-sm text-[#09090B]">
-                  <input
-                    type="checkbox"
-                    checked={settings.diagnosticsOptIn}
-                    onChange={(event) => void setDiagnosticsOptIn(event.target.checked)}
-                  />
-                  Enable diagnostics
-                </label>
-                <button type="button" className="vw-btn-secondary" onClick={() => void exportDiagnosticsBundle()}>
-                  Export Diagnostics Bundle
-                </button>
-              </div>
-              <div className="mt-3 text-xs text-[#71717A]">
-                <p>
-                  Records: {diagnosticsStatus.recordCount} | Watchdog recoveries:{" "}
-                  {diagnosticsStatus.watchdogRecoveryCount}
-                </p>
-                <p>
-                  Last export:{" "}
-                  {diagnosticsStatus.lastExportedAtUtcMs
-                    ? formatDate(diagnosticsStatus.lastExportedAtUtcMs)
-                    : "Never"}
-                </p>
-              </div>
-              {lastDiagnosticsExport && (
-                <div className="vw-surface-base-sm mt-3 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#52525B]">
-                  <p>
-                    Export complete:{" "}
-                    <span className="font-semibold">
-                      {formatDate(lastDiagnosticsExport.exportedAtUtcMs)}
-                    </span>
-                  </p>
-                  <p className="mt-1 break-all font-mono">{lastDiagnosticsExport.filePath}</p>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Volume guard</p>
+                      <p className="vw-set-desc">
+                        {settings.micVolumeGuard === "off"
+                          ? "Call apps can silently lower your Windows mic volume. VoiceWave will not check it."
+                          : settings.micVolumeGuard === "autoRestore"
+                          ? "Restores mic volume to 100% automatically and tells you it happened."
+                          : "Shows a pill notice when another app has lowered your mic volume."}
+                      </p>
+                    </div>
+                    <div className="vw-seg" role="group" aria-label="Microphone volume guard">
+                      {(["off", "warn", "autoRestore"] as MicVolumeGuardMode[]).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          className={`vw-seg-btn ${settings.micVolumeGuard === mode ? "vw-seg-btn-active" : ""}`}
+                          onClick={() => void setMicVolumeGuard(mode)}
+                        >
+                          {mode === "off" ? "Off" : mode === "warn" ? "Warn" : "Auto-restore"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {micQualityWarning && (
+                    <div className="mt-4 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3">
+                      <p className="text-sm font-semibold text-[#92400E]">Microphone quality warning</p>
+                      <p className="mt-1 text-sm text-[#92400E]">{micQualityWarning.message}</p>
+                      <p className="mt-2 text-xs text-[#A16207]">Current input: {micQualityWarning.currentDevice}</p>
+                      {micQualityWarning.recommendedDevice && (
+                        <p className="mt-1 text-xs text-[#A16207]">Suggested input: {micQualityWarning.recommendedDevice}</p>
+                      )}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {micQualityWarning.recommendedDevice && (
+                          <button type="button" className="vw-btn-primary vw-btn-sm" onClick={() => void switchToRecommendedInput()}>
+                            Switch to Suggested Input
+                          </button>
+                        )}
+                        <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void refreshInputDevices()}>
+                          Refresh Devices
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </section>
 
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white">
-              <button
-                type="button"
-                className="flex w-full items-center justify-between gap-3 px-4 py-4 text-left"
-                onClick={() => setSettingsAdvancedOpen((prev) => !prev)}
-                aria-expanded={settingsAdvancedOpen}
-              >
+              {settingsSection === "dictation" && (
                 <div>
-                  <p className="text-sm font-semibold text-[#09090B]">Advanced</p>
-                  <p className="text-xs text-[#71717A]">Expert tuning controls for dictation behavior.</p>
-                </div>
-                <ChevronDown
-                  size={16}
-                  className={`text-[#71717A] transition-transform ${settingsAdvancedOpen ? "rotate-180" : ""}`}
-                />
-              </button>
-              {settingsAdvancedOpen && (
-                <div className="space-y-4 border-t border-[#E4E4E7] px-4 py-4">
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div className="vw-stat-card">
-                      <p className="vw-kicker">VAD Threshold</p>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Permissions</p>
+                      <p className="vw-set-desc">
+                        Microphone {permissions.microphone} · Insertion {permissions.insertionCapability}
+                        {permissions.message ? ` — ${permissions.message}` : ""}
+                      </p>
+                    </div>
+                    <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void requestMicAccess()}>
+                      Check Microphone Permission
+                    </button>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Prefer clipboard insertion</p>
+                      <p className="vw-set-desc">
+                        Paste through the clipboard first instead of simulated typing. More reliable in some apps.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
                       <input
-                        className="mt-2 w-full accent-[#18181B]"
+                        type="checkbox"
+                        aria-label="Prefer clipboard fallback for insertion"
+                        checked={settings.preferClipboardFallback}
+                        onChange={(event) => void setPreferClipboardFallback(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {settingsSection === "polish" && (
+                <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">On-device AI polish</p>
+                      <p className="vw-set-desc">
+                        After dictation, a local model offers a cleaned-up version in the pill. Nothing is sent
+                        to the cloud. Needs a one-time ~1 GB model download.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Enable on-device AI polish"
+                        checked={settings.llmPolishEnabled ?? false}
+                        onChange={(event) => void setLlmPolishEnabled(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+
+                  {polishModelProgress && !polishModelProgress.done && !polishModelProgress.error && (
+                    <div className="mt-2">
+                      <div className="vw-progress">
+                        <div
+                          className="vw-progress-fill"
+                          style={{
+                            width: `${
+                              polishModelProgress.total > 0
+                                ? Math.min(
+                                    100,
+                                    Math.round((polishModelProgress.downloaded / polishModelProgress.total) * 100)
+                                  )
+                                : 3
+                            }%`
+                          }}
+                        />
+                      </div>
+                      <p className="mt-1.5 text-xs text-[#71717A]">
+                        {polishModelProgress.total > 0
+                          ? `Downloading AI polish model… ${Math.round(
+                              (polishModelProgress.downloaded / polishModelProgress.total) * 100
+                            )}%`
+                          : "Preparing AI polish model download…"}
+                      </p>
+                    </div>
+                  )}
+                  {polishModelProgress?.done && (
+                    <p className="mt-2 text-xs font-medium text-[#15803D]">AI polish model ready.</p>
+                  )}
+                  {polishModelProgress?.error && (
+                    <p className="mt-2 text-xs text-[#B3261E]">Model download failed: {polishModelProgress.error}</p>
+                  )}
+                </div>
+              )}
+
+              {settingsSection === "diagnostics" && (
+                <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Diagnostics</p>
+                      <p className="vw-set-desc">
+                        Keep an encrypted local log of dictation runs to help debug transcription issues.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Enable diagnostics"
+                        checked={settings.diagnosticsOptIn}
+                        onChange={(event) => void setDiagnosticsOptIn(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Export bundle</p>
+                      <p className="vw-set-desc">
+                        {diagnosticsStatus.recordCount} records · {diagnosticsStatus.watchdogRecoveryCount} watchdog
+                        recoveries · Last export{" "}
+                        {diagnosticsStatus.lastExportedAtUtcMs
+                          ? formatDate(diagnosticsStatus.lastExportedAtUtcMs)
+                          : "never"}
+                      </p>
+                    </div>
+                    <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void exportDiagnosticsBundle()}>
+                      Export Diagnostics Bundle
+                    </button>
+                  </div>
+
+                  {lastDiagnosticsExport && (
+                    <div className="mt-2 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#52525B]">
+                      <p>
+                        Export complete:{" "}
+                        <span className="font-semibold">{formatDate(lastDiagnosticsExport.exportedAtUtcMs)}</span>
+                      </p>
+                      <p className="mt-1 break-all font-mono">{lastDiagnosticsExport.filePath}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {settingsSection === "advanced" && (
+                <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">VAD Threshold</p>
+                      <p className="vw-set-desc">How loud audio must be before it counts as speech.</p>
+                    </div>
+                    <div className="flex w-56 flex-col items-end gap-1">
+                      <input
+                        className="w-full accent-[#18181B]"
                         type="range"
+                        aria-label="VAD threshold"
                         min={0.005}
                         max={0.04}
                         step={0.001}
                         value={settings.vadThreshold}
                         onChange={(event) => void setVadThreshold(Number(event.target.value))}
                       />
-                      <p className="mt-1 text-base font-semibold text-[#09090B]">
-                        {settings.vadThreshold.toFixed(3)}
-                      </p>
-                      <button
-                        type="button"
-                        className="vw-btn-secondary mt-2"
-                        onClick={() => void resetVadThreshold()}
-                      >
-                        Reset to {recommendedVadThreshold.toFixed(3)}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-[#09090B]">{settings.vadThreshold.toFixed(3)}</span>
+                        <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void resetVadThreshold()}>
+                          Reset to {recommendedVadThreshold.toFixed(3)}
+                        </button>
+                      </div>
                     </div>
-                    <div className="vw-stat-card">
-                      <p className="vw-kicker">Max Utterance (ms)</p>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Max Utterance (ms)</p>
+                      <p className="vw-set-desc">Longest single capture before VoiceWave finalizes on its own.</p>
+                    </div>
+                    <div className="flex w-56 flex-col items-end gap-1">
                       <input
-                        className="mt-2 w-full accent-[#18181B]"
+                        className="w-full accent-[#18181B]"
                         type="range"
+                        aria-label="Max utterance in milliseconds"
                         min={5000}
                         max={180000}
                         step={250}
                         value={settings.maxUtteranceMs}
                         onChange={(event) => void setMaxUtteranceMs(Number(event.target.value))}
                       />
-                      <p className="mt-1 text-base font-semibold text-[#09090B]">
-                        {settings.maxUtteranceMs}
-                      </p>
+                      <span className="text-sm font-semibold text-[#09090B]">{settings.maxUtteranceMs}</span>
                     </div>
-                    <div className="vw-stat-card md:col-span-2">
-                      <p className="vw-kicker">Release Tail (ms)</p>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Release Tail (ms)</p>
+                      <p className="vw-set-desc">Audio kept after you release push-to-talk so soft word endings land.</p>
+                    </div>
+                    <div className="flex w-56 flex-col items-end gap-1">
                       <input
-                        className="mt-2 w-full accent-[#18181B]"
+                        className="w-full accent-[#18181B]"
                         type="range"
+                        aria-label="Release tail in milliseconds"
                         min={120}
                         max={1500}
                         step={10}
                         value={settings.releaseTailMs}
                         onChange={(event) => void setReleaseTailMs(Number(event.target.value))}
                       />
-                      <p className="mt-1 text-base font-semibold text-[#09090B]">{settings.releaseTailMs}</p>
+                      <span className="text-sm font-semibold text-[#09090B]">{settings.releaseTailMs}</span>
                     </div>
                   </div>
-                  <div className="vw-surface-elevated rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-semibold text-[#09090B]">Audio Chunk Quality</p>
-                        <p className="text-xs text-[#71717A]">
-                          Run a quick capture quality check with real microphone audio.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="vw-btn-secondary"
-                        onClick={() => void runAudioQualityDiagnostic(10_000)}
-                      >
-                        Run 10s Check
-                      </button>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Audio chunk quality</p>
+                      <p className="vw-set-desc">Run a quick capture check with real microphone audio.</p>
                     </div>
-                    {audioQualityReport ? (
-                      <div className="mt-3 space-y-1 text-xs text-[#52525B]">
-                        <p>
-                          Quality: <span className="font-semibold">{audioQualityReport.quality}</span> | Segments:{" "}
-                          {audioQualityReport.segmentCount} | Duration:{" "}
-                          {(audioQualityReport.durationMs / 1000).toFixed(2)}s
-                        </p>
-                        <p>
-                          RMS: {audioQualityReport.rms.toFixed(3)} | Peak: {audioQualityReport.peak.toFixed(3)} |
-                          Clipping: {(audioQualityReport.clippingRatio * 100).toFixed(1)}%
-                        </p>
-                        <p>
-                          Low-energy frames:{" "}
-                          {(audioQualityReport.lowEnergyFrameRatio * 100).toFixed(1)}% | SNR proxy:{" "}
-                          {audioQualityReport.estimatedSnrDb.toFixed(1)} dB
-                        </p>
-                      </div>
-                    ) : (
-                      <p className="mt-3 text-xs text-[#71717A]">No capture diagnostics yet.</p>
-                    )}
-                    {lastLatency && (
-                      <p className="mt-3 text-xs text-[#71717A]">
-                        Latest latency: release-to-transcribing {lastLatency.releaseToTranscribingMs} ms, total{" "}
-                        {lastLatency.totalMs} ms.
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm"
+                      onClick={() => void runAudioQualityDiagnostic(10_000)}
+                    >
+                      Run 10s Check
+                    </button>
+                  </div>
+
+                  {audioQualityReport ? (
+                    <div className="mt-2 space-y-1 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#52525B]">
+                      <p>
+                        Quality: <span className="font-semibold">{audioQualityReport.quality}</span> · Segments:{" "}
+                        {audioQualityReport.segmentCount} · Duration: {(audioQualityReport.durationMs / 1000).toFixed(2)}s
                       </p>
-                    )}
-                  </div>
+                      <p>
+                        RMS: {audioQualityReport.rms.toFixed(3)} · Peak: {audioQualityReport.peak.toFixed(3)} · Clipping:{" "}
+                        {(audioQualityReport.clippingRatio * 100).toFixed(1)}%
+                      </p>
+                      <p>
+                        Low-energy frames: {(audioQualityReport.lowEnergyFrameRatio * 100).toFixed(1)}% · SNR proxy:{" "}
+                        {audioQualityReport.estimatedSnrDb.toFixed(1)} dB
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-xs text-[#A1A1AA]">No capture diagnostics yet.</p>
+                  )}
+                  {lastLatency && (
+                    <p className="mt-2 text-xs text-[#71717A]">
+                      Latest latency: release-to-transcribing {lastLatency.releaseToTranscribingMs} ms, total{" "}
+                      {lastLatency.totalMs} ms.
+                    </p>
+                  )}
                 </div>
               )}
-            </section>
+            </div>
           </div>
         </OverlayModal>
       )}
@@ -2135,7 +2143,7 @@ function App() {
           onClose={closeOverlay}
         >
           <div className="space-y-4">
-            <section className="vw-profile-summary-card rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+            <section className="rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="vw-profile-avatar">
@@ -2150,7 +2158,7 @@ function App() {
                     </p>
                   </div>
                 </div>
-                <span className={`vw-chip ${isPro ? "vw-pro-chip-active vw-chip-accent" : ""}`}>
+                <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>
                   {isPro ? "Pro Active" : "Free Plan"}
                 </span>
               </div>
@@ -2500,9 +2508,9 @@ function App() {
             </div>
 
             <div className="vw-model-gate-meta">
-              <span className="vw-chip-accent">{selectedSetupCatalogRow?.displayName ?? setupModelChoice}</span>
+              <span className="vw-chip">{selectedSetupCatalogRow?.displayName ?? setupModelChoice}</span>
               {selectedSetupCatalogRow && (
-                <span className="vw-chip-accent">{formatBytes(selectedSetupCatalogRow.sizeBytes)}</span>
+                <span className="vw-chip">{formatBytes(selectedSetupCatalogRow.sizeBytes)}</span>
               )}
             </div>
 
@@ -2524,7 +2532,7 @@ function App() {
             </div>
 
             {(setupModelError || selectedSetupStatus?.message || displayError) && (
-              <section className="mt-4 rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] px-4 py-3 text-sm text-[#1E40AF]">
+              <section className="mt-4 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3 text-sm text-[#3F3F46]">
                 {setupModelError ?? selectedSetupStatus?.message ?? displayError}
               </section>
             )}

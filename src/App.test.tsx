@@ -297,6 +297,8 @@ describe("App navigation and phase three panels", () => {
 
     const settingsDialog = screen.getByRole("dialog", { name: "Settings" });
     expect(within(settingsDialog).getByText("Diagnostics")).toBeInTheDocument();
+    // Diagnostics controls live in their own section of the settings rail.
+    fireEvent.click(within(settingsDialog).getByRole("button", { name: "Diagnostics" }));
     fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Enable diagnostics" }));
     expect(setDiagnosticsOptIn).toHaveBeenCalledWith(true);
 

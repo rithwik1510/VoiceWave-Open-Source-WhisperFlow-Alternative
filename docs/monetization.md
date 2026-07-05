@@ -1,5 +1,14 @@
 # VoiceWave Monetization (Windows First)
 
+> **Status: DEFERRED / FUTURE PLAN (as of 2026-07).** VoiceWave currently ships
+> **free with no subscription** — Pro is included for everyone and in-app
+> checkout is intentionally disabled (`src-tauri/src/billing/mod.rs`). The
+> pricing and entitlement design below is a forward-looking plan, not the
+> current product. The billing/entitlement subsystem is wired but dormant; it
+> lights up only when the Lemon Squeezy checkout URLs are configured. Do not
+> treat the numbers here as live pricing — see the README for the shipped
+> stance.
+
 ## Pricing
 
 - Base price: `~$4/mo~`

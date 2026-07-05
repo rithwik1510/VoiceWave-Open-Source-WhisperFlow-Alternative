@@ -1,5 +1,5 @@
 import type React from "react";
-import { Bell, LogIn, PanelLeftClose, PanelLeftOpen, Settings, UserCircle } from "lucide-react";
+import { LogIn, PanelLeftClose, PanelLeftOpen, Settings, UserCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { NAV_ITEMS_BOTTOM, NAV_ITEMS_TOP } from "../constants";
 import type { ThemeConfig } from "../types";
@@ -84,27 +84,24 @@ export const Layout: React.FC<LayoutProps> = ({
         aria-current={isActive ? "page" : undefined}
         title={sidebarCollapsed ? item.label : undefined}
         className={`
-          vw-nav-button w-full cursor-pointer select-none flex items-center ${sidebarCollapsed ? "justify-center px-2" : "justify-between px-4"} py-2.5 text-sm transition-all duration-200 group
+          vw-nav-button w-full cursor-pointer select-none flex items-center ${sidebarCollapsed ? "justify-center px-2" : "justify-between px-4"} py-2.5 text-sm transition-colors duration-150 group
           ${shapes.navItemShape}
           ${
             isActive
-              ? `${colors.navActiveBg} ${colors.navActiveFg} font-bold shadow-sm border border-[#2F2F2F]/28`
-              : `${colors.textSecondary} hover:bg-white/40 hover:${colors.textPrimary}`
+              ? "bg-white text-[#09090B] font-semibold shadow-[0_1px_2px_rgba(9,9,11,0.05)] border border-[#E4E4E7]"
+              : "border border-transparent text-[#52525B] hover:bg-white/55 hover:text-[#09090B]"
           }
         `}
         type="button"
       >
         <div className={`flex items-center ${sidebarCollapsed ? "gap-0 justify-center w-full" : "gap-3"}`}>
           <Icon
-            size={18}
-            className={`vw-nav-icon ${isActive ? "opacity-100" : "opacity-70 group-hover:opacity-100"}`}
+            size={17}
+            className={`vw-nav-icon ${isActive ? "text-[#09090B]" : "text-[#71717A] group-hover:text-[#09090B]"}`}
           />
           <span className="vw-nav-label">{item.label}</span>
         </div>
-        <div
-          className={`vw-nav-active-dot ${isActive ? "opacity-100" : "opacity-0"}`}
-          style={{ backgroundImage: colors.accentGradient }}
-        />
+        {!sidebarCollapsed && <div className={`vw-nav-active-dot ${isActive ? "opacity-100" : "opacity-0"}`} />}
       </button>
     );
   };
@@ -184,73 +181,37 @@ export const Layout: React.FC<LayoutProps> = ({
 
         <div className={`vw-sidebar-pro-wrap ${sidebarCollapsed ? "is-collapsed" : ""}`}>
           <div className="vw-sidebar-pro-wrap-inner">
-          <div
-            className={`
-              vw-sidebar-pro-panel p-4 relative overflow-hidden group
-              ${colors.surface} shadow-sm border ${colors.surfaceBorder}
-              ${shapes.radius}
-              ${isPro ? "vw-pro-sidebar-card vw-pro-glass-card" : ""}
-            `}
-          >
-              <div className="absolute -right-2 -top-2 opacity-80 pointer-events-none">
-                <svg width="76" height="54" viewBox="0 0 76 54" fill="none" aria-hidden="true">
-                  <path
-                    d="M8 31 L30 10 L24 24 L44 20 L24 44 L28 30 Z"
-                    stroke={colors.accentBlue}
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </div>
-              <div className="relative z-10">
-                <div className="flex items-center gap-2 mb-2">
-                  <span
-                    className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${
-                      isPro ? "vw-pro-badge-active" : "vw-pro-badge"
-                    }`}
-                  >
-                    {isPro ? "PRO ACTIVE" : "PRO"}
-                  </span>
-                </div>
-                {isPro ? (
-                  <>
-                    <p className="text-xs opacity-75 mb-2 leading-relaxed">
-                      Your Pro workspace is unlocked with advanced tools and clean premium visuals.
-                    </p>
-                    <p className="text-[11px] text-[#18181B] mb-2.5 leading-relaxed">
-                      Pro active on this device.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-xs opacity-75 mb-2 leading-relaxed">
-                      Initial release offer is active for coders and students.
-                    </p>
-                    <p className="text-[11px] text-[#52525B] mb-3 leading-relaxed">
-                      Pro is included for everyone right now. Open the offer panel to see what is unlocked.
-                    </p>
-                  </>
-                )}
-                <button
-                  className="vw-action-button vw-sidebar-pro-cta w-full text-xs py-2 font-bold transition-opacity hover:opacity-95"
-                  type="button"
-                  onClick={() => {
-                    if (isPro) {
-                      setActiveNav("pro-tools");
-                      return;
-                    }
-                    if (onUpgradeClick) {
-                      onUpgradeClick();
-                      return;
-                    }
-                    setActiveNav("pro");
-                  }}
-                >
-                  {isPro ? "Open Pro Tools" : "View Release Offer"}
-                </button>
-              </div>
-          </div>
+            <div className="vw-sidebar-pro-panel p-4">
+              <span
+                className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${
+                  isPro ? "vw-pro-badge-active" : "vw-pro-badge"
+                }`}
+              >
+                {isPro ? "PRO ACTIVE" : "PRO"}
+              </span>
+              <p className="mt-2.5 mb-3 text-xs leading-relaxed text-[#52525B]">
+                {isPro
+                  ? "Format profiles, code mode, and power history are unlocked on this device."
+                  : "The release offer unlocks every Pro tool for coders and students."}
+              </p>
+              <button
+                className="vw-btn-primary vw-btn-sm w-full"
+                type="button"
+                onClick={() => {
+                  if (isPro) {
+                    setActiveNav("pro-tools");
+                    return;
+                  }
+                  if (onUpgradeClick) {
+                    onUpgradeClick();
+                    return;
+                  }
+                  setActiveNav("pro");
+                }}
+              >
+                {isPro ? "Open Pro Tools" : "View Release Offer"}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -277,9 +238,6 @@ export const Layout: React.FC<LayoutProps> = ({
           </div>
 
           <div className="flex items-center gap-6">
-            <button className="opacity-60 hover:opacity-100 transition-opacity" type="button">
-              <Bell size={20} />
-            </button>
             <div ref={profileMenuRef} className="relative">
               <button
                 type="button"
@@ -334,9 +292,7 @@ export const Layout: React.FC<LayoutProps> = ({
 
         <div className="flex-1 overflow-hidden relative pr-2 pb-2">
           <div
-            className={`vw-canvas-scroll w-full h-full overflow-y-auto relative ${colors.canvasBg} rounded-3xl ${
-              isPro && activeNav === "home" ? "vw-pro-canvas" : "border border-[#DEE0E7]"
-            } shadow-[0_8px_20px_rgba(9,9,11,0.05),0_1px_4px_rgba(9,9,11,0.03)]`}
+            className={`vw-canvas-scroll w-full h-full overflow-y-auto relative ${colors.canvasBg} rounded-3xl border border-[#E4E4E7] shadow-[0_1px_3px_rgba(9,9,11,0.04)]`}
           >
             <div className="px-6 py-6 min-h-full">{children}</div>
           </div>
