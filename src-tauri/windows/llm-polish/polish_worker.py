@@ -65,10 +65,17 @@ def _gpu_free_mib() -> int | None:
     try:
         import subprocess
 
+        # CREATE_NO_WINDOW: this worker runs windowless, and on Windows a
+        # windowless parent spawning a console exe pops a NEW console window
+        # on the user's screen for every call without this flag.
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
             stderr=subprocess.DEVNULL,
             timeout=5,
+            **kwargs,
         )
         return int(out.decode().strip().splitlines()[0].strip())
     except Exception:  # noqa: BLE001
