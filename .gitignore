@@ -66,6 +66,8 @@ src-tauri/windows/llm-polish/__pycache__/
 # small pure-Python deps come from PyPI at build time.
 scripts/llm-polish/wheelhouse/*
 !scripts/llm-polish/wheelhouse/llama_cpp_python-*-win_amd64.whl
+# CUDA experiment wheels (build_llama_cuda.bat) — local-only, never shipped.
+scripts/llm-polish/wheelhouse-cuda/
 
 # Scratch / marketing material — not part of the app, never committed.
 # DemoVideo/ is a standalone Remotion project (has its own node_modules).

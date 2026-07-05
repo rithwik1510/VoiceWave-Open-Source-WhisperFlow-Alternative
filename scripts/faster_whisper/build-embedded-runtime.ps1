@@ -116,6 +116,13 @@ try {
     Remove-Item -Recurse -Force $pythonDir
   }
   Move-Item -LiteralPath $extractedPython -Destination $pythonDir
+  # Re-create the tracked .gitkeep the wipe above deleted, so a rebuild does
+  # not leave a spurious deletion in git status (the file is load-bearing:
+  # tauri-build validates the resource path at compile time on fresh checkouts).
+  $gitkeep = Join-Path $pythonDir ".gitkeep"
+  if (-not (Test-Path $gitkeep)) {
+    git -C $repoRoot checkout -- "src-tauri/windows/faster-whisper/python/.gitkeep" 2>$null
+  }
 }
 finally {
   if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -147,6 +154,15 @@ if (-not $llamaWheel) {
 }
 & $py -m pip install --no-warn-script-location $llamaWheel.FullName
 if ($LASTEXITCODE -ne 0) { throw "pip install of llama-cpp-python failed" }
+
+# Guard: the shipped wheel must be the CPU build. A CUDA-linked wheel loads
+# fine on dev machines that have the CUDA runtime, so the import self-check
+# below cannot catch the mix-up — but it crashes AI polish for every user
+# without CUDA (this exact mistake broke the v0.5.0 release builds).
+$cudaDll = Get-ChildItem -Path (Join-Path $pythonDir "Lib\site-packages\llama_cpp") -Recurse -Filter "ggml-cuda.dll" -ErrorAction SilentlyContinue
+if ($cudaDll) {
+  throw "The installed llama-cpp-python is a CUDA build ($($cudaDll[0].FullName)). Ship the CPU-only wheel (scripts/llm-polish/build_llama.bat); CUDA experiments belong in wheelhouse-cuda."
+}
 
 Write-Host "Trimming runtime to reduce installer size..."
 # Byte-caches and the stdlib test suite are dead weight in a shipped runtime.

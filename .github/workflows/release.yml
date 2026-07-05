@@ -80,7 +80,10 @@ jobs:
           path: src-tauri/windows/faster-whisper/python
           # Rebuild only when the runtime recipe changes. The download +
           # pip install (~400 MB) is otherwise reused across release runs.
-          key: fw-runtime-${{ runner.os }}-${{ hashFiles('scripts/faster_whisper/embedded-runtime-requirements.txt', 'scripts/faster_whisper/build-embedded-runtime.ps1') }}
+          # The wheelhouse MUST be part of the key: the llama-cpp-python wheel
+          # is baked into the runtime, so swapping the wheel without touching
+          # the script would otherwise restore a stale runtime forever.
+          key: fw-runtime-${{ runner.os }}-${{ hashFiles('scripts/faster_whisper/embedded-runtime-requirements.txt', 'scripts/faster_whisper/build-embedded-runtime.ps1', 'scripts/llm-polish/wheelhouse/*.whl') }}
 
       - name: Build embedded faster-whisper runtime (CPU)
         if: steps.cache-fw-runtime.outputs.cache-hit != 'true'
