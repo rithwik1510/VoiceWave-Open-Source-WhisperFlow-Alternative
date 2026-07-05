@@ -135,8 +135,9 @@ if ($LASTEXITCODE -ne 0) { throw "pip install of runtime requirements failed" }
 # wheel is compiled with AVX-512 and crashes with 0xC000001D (illegal
 # instruction) on CPUs that lack it. Our wheel (scripts/llm-polish/wheelhouse)
 # targets AVX2/FMA/F16C only — broad compatibility across shipped machines.
-# --find-links resolves llama-cpp-python from that local wheel; its small pure
-# deps (diskcache, jinja2) come from PyPI.
+# Pass pip the wheel's absolute path directly: a bare ".whl"-looking argument
+# is resolved by pip as a literal path relative to the CURRENT directory, not
+# via --find-links (that flag only affects resolution of named requirements).
 Write-Host "Installing on-device AI-polish runtime (llama-cpp-python, AVX2 CPU wheel)..."
 $llamaWheelhouse = Join-Path $repoRoot "scripts\llm-polish\wheelhouse"
 $llamaWheel = Get-ChildItem (Join-Path $llamaWheelhouse "llama_cpp_python-*-win_amd64.whl") -ErrorAction SilentlyContinue |
@@ -144,7 +145,7 @@ $llamaWheel = Get-ChildItem (Join-Path $llamaWheelhouse "llama_cpp_python-*-win_
 if (-not $llamaWheel) {
   throw "AVX2 llama-cpp-python wheel not found in $llamaWheelhouse. It must be committed (or built via scripts/llm-polish/build_llama.bat) so the AI-polish runtime can ship."
 }
-& $py -m pip install --no-warn-script-location --find-links $llamaWheelhouse $llamaWheel.Name
+& $py -m pip install --no-warn-script-location $llamaWheel.FullName
 if ($LASTEXITCODE -ne 0) { throw "pip install of llama-cpp-python failed" }
 
 Write-Host "Trimming runtime to reduce installer size..."
