@@ -1,7 +1,9 @@
 import {
   Activity,
+  Check,
   ChevronDown,
   CircleHelp,
+  Copy,
   Crown,
   Download,
   Keyboard,
@@ -30,6 +32,7 @@ import {
   subscribeCloudAuth
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
+import { copyTextToClipboard } from "./lib/tauri";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
 import { useVoiceWave } from "./hooks/useVoiceWave";
@@ -323,6 +326,7 @@ function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("audio");
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyTag, setHistoryTag] = useState("");
+  const [copiedHistoryId, setCopiedHistoryId] = useState<string | null>(null);
   const [dictionaryDraftTerm, setDictionaryDraftTerm] = useState("");
   const [dictionaryPortNotice, setDictionaryPortNotice] = useState<string | null>(null);
   const dictionaryImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -504,12 +508,6 @@ function App() {
       setActiveNav("pro");
     }
   }, [activeNav, isPro]);
-
-  useEffect(() => {
-    if (activeNav === "sessions") {
-      setActiveNav("home");
-    }
-  }, [activeNav]);
 
   useEffect(() => {
     if (!firebaseEnabled) {
@@ -994,6 +992,7 @@ function App() {
                 recentSentences={recentSentences}
                 pushToTalkHotkey={settings.pushToTalkHotkey}
                 isPro={isPro}
+                historyOff={historyPolicy === "off"}
               />
             </>
           )}
@@ -1302,6 +1301,26 @@ function App() {
                 Every dictation stays on this machine. Retention is under your control.
               </p>
 
+              {historyPolicy === "off" && (
+                <div className="mt-4 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#92400E]">History is off</p>
+                      <p className="mt-1 text-sm text-[#92400E]">
+                        Dictations are not being saved. Turn retention on to see your transcripts here and on the dashboard.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="vw-btn-primary vw-btn-sm"
+                      onClick={() => void updateRetentionPolicy("days30")}
+                    >
+                      Keep 30 days
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
                 <div className="vw-stat-card">
                   <p className="vw-kicker">Retention</p>
@@ -1451,6 +1470,40 @@ function App() {
                           </p>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            className="vw-icon-btn"
+                            aria-label="Copy transcript"
+                            title={copiedHistoryId === record.recordId ? "Copied" : "Copy transcript"}
+                            onClick={() => {
+                              const fullText = record.text?.length ? record.text : record.preview;
+                              void (async () => {
+                                try {
+                                  await copyTextToClipboard(fullText);
+                                } catch {
+                                  try {
+                                    await navigator.clipboard.writeText(fullText);
+                                  } catch {
+                                    return;
+                                  }
+                                }
+                                setCopiedHistoryId(record.recordId);
+                                window.setTimeout(
+                                  () =>
+                                    setCopiedHistoryId((prev) =>
+                                      prev === record.recordId ? null : prev
+                                    ),
+                                  1500
+                                );
+                              })();
+                            }}
+                          >
+                            {copiedHistoryId === record.recordId ? (
+                              <Check size={15} className="text-[#16A34A]" />
+                            ) : (
+                              <Copy size={15} />
+                            )}
+                          </button>
                           <button
                             type="button"
                             className="vw-icon-btn"

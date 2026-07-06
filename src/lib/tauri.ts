@@ -206,6 +206,16 @@ export async function listenVoicewaveLatency(
   return listen("voicewave://latency", (event: Event<LatencyBreakdownEvent>) => callback(event.payload));
 }
 
+/** Fired by the backend after a dictation's history record is persisted, so
+ * the UI can refresh its history list without polling. */
+export async function listenVoicewaveHistoryUpdated(callback: () => void): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://history-updated", () => callback());
+}
+
 export function canUseTauri(): boolean {
   return isTauriRuntime();
 }
@@ -449,6 +459,10 @@ export async function exportSessionHistoryPreset(
 
 export async function setHistoryRetention(policy: RetentionPolicy): Promise<RetentionPolicy> {
   return invokeVoicewave<RetentionPolicy>("set_history_retention", { policy });
+}
+
+export async function getHistoryRetention(): Promise<RetentionPolicy> {
+  return invokeVoicewave<RetentionPolicy>("get_history_retention");
 }
 
 export async function pruneHistoryNow(): Promise<number> {

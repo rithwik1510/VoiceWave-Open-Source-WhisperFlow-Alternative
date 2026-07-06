@@ -973,6 +973,14 @@ async fn set_history_retention(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+async fn get_history_retention(
+    runtime: State<'_, RuntimeContext>,
+) -> Result<RetentionPolicy, String> {
+    Ok(runtime.controller.get_history_retention().await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 async fn prune_history_now(
     app: tauri::AppHandle,
     runtime: State<'_, RuntimeContext>,
@@ -1302,6 +1310,7 @@ pub fn run() {
             toggle_star_session,
             export_session_history_preset,
             set_history_retention,
+            get_history_retention,
             prune_history_now,
             clear_history,
             get_dictionary_queue,

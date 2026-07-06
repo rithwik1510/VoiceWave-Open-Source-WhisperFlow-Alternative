@@ -369,6 +369,9 @@ export interface SessionHistoryRecord {
   recordId: string;
   timestampUtcMs: number;
   preview: string;
+  /** Full transcript text. Optional: records persisted before v0.5.2 only
+   * carry the 140-char preview. */
+  text?: string;
   method?: InsertionMethod | null;
   success: boolean;
   source: string;

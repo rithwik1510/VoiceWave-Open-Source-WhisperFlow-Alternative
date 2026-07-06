@@ -318,6 +318,10 @@ struct MicLevelEvent {
 /// lib.rs). Mic-level frames are only rendered by the pill.
 const PILL_WINDOW_LABEL: &str = "voicewave-pill";
 
+/// Tauri window label for the main app window (mirrors `get_webview_window("main")`
+/// usage in lib.rs).
+const MAIN_WINDOW_LABEL: &str = "main";
+
 /// Emit a mic-level frame to the pill window only. These fire at ~30 fps during
 /// capture, so broadcasting globally would needlessly wake the main webview,
 /// which never renders them (PERF-05).
@@ -2079,6 +2083,9 @@ impl VoiceWaveController {
             .lock()
             .await
             .record_insertion(&result, &payload.text)?;
+        if let Err(err) = app.emit_to(MAIN_WINDOW_LABEL, "voicewave://history-updated", ()) {
+            eprintln!("history-updated emit failed: {err}");
+        }
 
         if result.success {
             self.update_state(&app, VoiceWaveHudState::Inserted, result.message.clone())
@@ -2872,6 +2879,10 @@ impl VoiceWaveController {
             .await
             .set_retention_policy(policy)
             .map_err(ControllerError::from)
+    }
+
+    pub async fn get_history_retention(&self) -> RetentionPolicy {
+        self.history_manager.lock().await.retention_policy()
     }
 
     pub async fn prune_history_now(&self, _app: AppHandle) -> Result<usize, ControllerError> {
@@ -3844,12 +3855,16 @@ impl VoiceWaveController {
             force_clipboard_only: false,
         };
         let insert_started = Instant::now();
-        let (insertion_success, insertion_method, insertion_target_class) =
+        let (insertion_success, insertion_method, insertion_target_class, insertion_history_recorded) =
             match self.insert_text(app.clone(), insert_payload).await {
                 Ok(result) => (
                     result.success,
                     insertion_method_key(&result.method).to_string(),
                     classify_insertion_target(result.target_app.as_deref()).to_string(),
+                    // insert_text persisted a history record (with method and
+                    // success) before returning, so the transcript-side write
+                    // below must not duplicate it.
+                    true,
                 ),
                 Err(err) => {
                     self.update_state(
@@ -3860,7 +3875,7 @@ impl VoiceWaveController {
                     .await;
                     self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
                         .await;
-                    (false, "error".to_string(), "unknown".to_string())
+                    (false, "error".to_string(), "unknown".to_string(), false)
                 }
             };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
@@ -4178,13 +4193,31 @@ impl VoiceWaveController {
         let transcript_for_history = final_transcript.clone();
         let transcript_for_dictionary_preview = final_transcript;
         let correction_candidates_for_dictionary = correction_candidates;
+        let app_for_history = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(err) = history_manager
-                .lock()
-                .await
-                .record_transcript(&transcript_for_history)
-            {
-                eprintln!("history record failed: {err}");
+            // Rescue write only: when insert_text errored before persisting,
+            // keep the transcript anyway so a failed insertion never loses the
+            // user's words. On the happy path insert_text already recorded and
+            // emitted, and recording here again would double every dictation.
+            if !insertion_history_recorded {
+                match history_manager
+                    .lock()
+                    .await
+                    .record_transcript(&transcript_for_history)
+                {
+                    Ok(()) => {
+                        if let Err(err) = app_for_history.emit_to(
+                            MAIN_WINDOW_LABEL,
+                            "voicewave://history-updated",
+                            (),
+                        ) {
+                            eprintln!("history-updated emit failed: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("history record failed: {err}");
+                    }
+                }
             }
             if let Err(err) = dictionary_manager.lock().await.queue_correction_candidates(
                 &correction_candidates_for_dictionary,

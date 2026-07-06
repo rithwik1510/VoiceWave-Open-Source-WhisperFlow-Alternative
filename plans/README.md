@@ -25,6 +25,7 @@ pick by value/appetite. Priority reflects product value; Effort reflects the fix
 | 003 | Interactive pill actions (typed one-tap notice actions) | P2 | M | — | DONE |
 | 004 | Voice snippets (trigger → expansion) | P3 | M | — | TODO |
 | 005 | On-device LLM "polish" pass — feasibility SPIKE | P1 | L | — | DONE (spike GO; Phase 3 off-by-default app wiring landed, `llm_polish_enabled` defaults false) |
+| 006 | Live transcription history (dashboard + History page) | P1 | M | — | DONE (2026-07-06: full-text records, 200-cap, live refresh event, History page un-dead-ended, retention getter, record dedupe) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 

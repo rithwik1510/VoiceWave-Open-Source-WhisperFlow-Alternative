@@ -242,6 +242,18 @@ describe("App navigation and phase three panels", () => {
     expect(screen.getByText("Personal Dictionary")).toBeInTheDocument();
   });
 
+  it("opens the history page from the nav with retention controls and copyable records", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    expect(screen.getByRole("group", { name: "History retention policy" })).toBeInTheDocument();
+    // Web fallback mode seeds one demo record; it must render with a copy action.
+    expect(
+      screen.getByText("Phase three panel wiring is ready for desktop integration.")
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy transcript" }).length).toBeGreaterThan(0);
+  });
+
   it("supports model install action in web fallback mode", async () => {
     render(<App />);
 

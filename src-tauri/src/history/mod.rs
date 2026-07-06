@@ -13,6 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Count cap on stored records, on top of the time-based RetentionPolicy below.
+const MAX_HISTORY_RECORDS: usize = 200;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RetentionPolicy {
@@ -34,6 +37,10 @@ pub struct SessionHistoryRecord {
     pub record_id: String,
     pub timestamp_utc_ms: u64,
     pub preview: String,
+    /// Full final transcript. `#[serde(default)]` so records persisted before
+    /// this field existed decrypt/parse as empty (UI falls back to preview).
+    #[serde(default)]
+    pub text: String,
     pub method: Option<InsertionMethod>,
     pub success: bool,
     pub source: String,
@@ -42,6 +49,18 @@ pub struct SessionHistoryRecord {
     pub tags: Vec<String>,
     #[serde(default)]
     pub starred: bool,
+}
+
+impl SessionHistoryRecord {
+    /// Full transcript when available, falling back to the legacy preview
+    /// for records persisted before `text` existed.
+    fn display_text(&self) -> &str {
+        if self.text.is_empty() {
+            &self.preview
+        } else {
+            &self.text
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -183,6 +202,7 @@ impl HistoryManager {
                     true
                 } else {
                     row.preview.to_ascii_lowercase().contains(&search)
+                        || row.text.to_ascii_lowercase().contains(&search)
                         || row.source.to_ascii_lowercase().contains(&search)
                         || row
                             .message
@@ -223,6 +243,7 @@ impl HistoryManager {
             record_id: self.next_record_id(),
             timestamp_utc_ms: now_utc_ms(),
             preview: text.chars().take(140).collect(),
+            text: text.to_string(),
             method: Some(result.method.clone()),
             success: result.success,
             source: "insertion".to_string(),
@@ -230,9 +251,7 @@ impl HistoryManager {
             tags: Vec::new(),
             starred: false,
         };
-        self.store.records.push(record);
-        self.prune_expired()?;
-        self.persist()
+        self.append_record(record)
     }
 
     pub fn record_transcript(&mut self, transcript: &str) -> Result<(), HistoryError> {
@@ -244,6 +263,7 @@ impl HistoryManager {
             record_id: self.next_record_id(),
             timestamp_utc_ms: now_utc_ms(),
             preview: transcript.chars().take(140).collect(),
+            text: transcript.to_string(),
             method: None,
             success: true,
             source: "dictation".to_string(),
@@ -251,7 +271,16 @@ impl HistoryManager {
             tags: Vec::new(),
             starred: false,
         };
+        self.append_record(record)
+    }
+
+    /// Push a new record, enforce the count cap, prune expired records, then persist.
+    fn append_record(&mut self, record: SessionHistoryRecord) -> Result<(), HistoryError> {
         self.store.records.push(record);
+        if self.store.records.len() > MAX_HISTORY_RECORDS {
+            let keep_from = self.store.records.len() - MAX_HISTORY_RECORDS;
+            self.store.records = self.store.records.split_off(keep_from);
+        }
         self.prune_expired()?;
         self.persist()
     }
@@ -321,7 +350,7 @@ impl HistoryManager {
                     format!(
                         "[{}] {}{}",
                         row.timestamp_utc_ms,
-                        row.preview,
+                        row.display_text(),
                         if row.starred { " ?" } else { "" }
                     )
                 })
@@ -335,7 +364,7 @@ impl HistoryManager {
                     } else {
                         format!(" _(#{})_", row.tags.join(" #"))
                     };
-                    format!("- **{}**: {}{}", row.source, row.preview, tags)
+                    format!("- **{}**: {}{}", row.source, row.display_text(), tags)
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -561,6 +590,7 @@ mod tests {
             record_id: "hist-1".to_string(),
             timestamp_utc_ms: now_utc_ms(),
             preview: "hello".to_string(),
+            text: "hello".to_string(),
             method: None,
             success: true,
             source: "dictation".to_string(),
@@ -594,5 +624,83 @@ mod tests {
         let raw = fs::read_to_string(temp).expect("read persisted history");
         assert!(!raw.contains("secret phrase should not be plaintext"));
         assert!(raw.contains("ciphertextB64"));
+    }
+
+    #[test]
+    fn record_stores_full_text_and_truncated_preview() {
+        let key_path =
+            std::env::temp_dir().join(format!("voicewave-history-fulltext-{}.key", now_utc_ms()));
+        let key = load_or_create_key(&key_path).expect("key");
+        let mut manager = HistoryManager {
+            path: std::env::temp_dir()
+                .join(format!("voicewave-history-fulltext-{}.json", now_utc_ms())),
+            _key_path: key_path,
+            key,
+            store: HistoryStore::default(),
+        };
+        manager.store.retention_policy = RetentionPolicy::Forever;
+
+        let long_text: String = "abcdefghij".repeat(20); // 200 chars
+        manager
+            .record_transcript(&long_text)
+            .expect("record transcript");
+
+        let stored = manager.store.records.last().expect("record present");
+        assert_eq!(stored.text, long_text);
+        assert_eq!(
+            stored.preview,
+            long_text.chars().take(140).collect::<String>()
+        );
+        assert_eq!(stored.preview.chars().count(), 140);
+    }
+
+    #[test]
+    fn history_caps_at_max_records() {
+        let key_path =
+            std::env::temp_dir().join(format!("voicewave-history-cap-{}.key", now_utc_ms()));
+        let key = load_or_create_key(&key_path).expect("key");
+        let mut manager = HistoryManager {
+            path: std::env::temp_dir().join(format!("voicewave-history-cap-{}.json", now_utc_ms())),
+            _key_path: key_path,
+            key,
+            store: HistoryStore::default(),
+        };
+        manager.store.retention_policy = RetentionPolicy::Forever;
+
+        let total = MAX_HISTORY_RECORDS + 10;
+        for i in 0..total {
+            manager
+                .record_transcript(&format!("record number {i}"))
+                .expect("record transcript");
+        }
+
+        assert_eq!(manager.store.records.len(), MAX_HISTORY_RECORDS);
+        let oldest_survivor_index = total - MAX_HISTORY_RECORDS;
+        assert_eq!(
+            manager.store.records.first().expect("first record").text,
+            format!("record number {oldest_survivor_index}")
+        );
+        assert_eq!(
+            manager.store.records.last().expect("last record").text,
+            format!("record number {}", total - 1)
+        );
+    }
+
+    #[test]
+    fn legacy_record_without_text_field_parses() {
+        let json = r#"{
+            "recordId": "hist-1",
+            "timestampUtcMs": 123,
+            "preview": "hello world",
+            "method": null,
+            "success": true,
+            "source": "dictation",
+            "message": null
+        }"#;
+
+        let record: SessionHistoryRecord =
+            serde_json::from_str(json).expect("legacy record without text should parse");
+        assert_eq!(record.text, "");
+        assert_eq!(record.preview, "hello world");
     }
 }

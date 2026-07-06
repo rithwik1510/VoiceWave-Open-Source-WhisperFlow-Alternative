@@ -18,6 +18,9 @@ interface DashboardProps {
     text: string;
     createdAtUtcMs: number;
   }>;
+  /** True when the history retention policy is "off" — the empty state then
+   * explains why nothing appears instead of implying the user hasn't dictated. */
+  historyOff?: boolean;
 }
 
 const WAVE_BARS = [18, 34, 26, 44, 30, 50, 22, 42, 28, 36, 24, 40];
@@ -77,7 +80,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   partialTranscript,
   finalTranscript,
   pushToTalkHotkey,
-  recentSentences = []
+  recentSentences = [],
+  historyOff = false
 }) => {
   const { colors, typography, shapes } = theme;
   const activePointerIdRef = useRef<number | null>(null);
@@ -309,6 +313,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
         <div
           className={`overflow-hidden rounded-3xl border ${colors.surfaceBorder} ${colors.surface} vw-home-transcript-card`}
         >
+          {transcriptRows.length === 0 && (
+            <div className="px-6 py-8 text-center">
+              <p className="text-sm text-[#71717A]">
+                {historyOff
+                  ? "History is off, so dictations aren't kept. Turn it on in the History tab to see them here."
+                  : "Your recent dictations will appear here."}
+              </p>
+            </div>
+          )}
           {transcriptRows.map((row, index) => (
             <div
               key={row.id}

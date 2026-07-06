@@ -15,11 +15,13 @@ import {
   getDictionaryQueue,
   getDictionaryTerms,
   getEntitlementSnapshot,
+  getHistoryRetention,
   getPermissionSnapshot,
   getRecentInsertions,
   getSessionHistory,
   insertText,
   listenVoicewaveAudioQuality,
+  listenVoicewaveHistoryUpdated,
   listenVoicewaveHotkey,
   listenVoicewaveInsertion,
   listenVoicewaveLatency,
@@ -674,6 +676,19 @@ export function useVoiceWave() {
       setError(loadErr instanceof Error ? loadErr.message : "Failed to load Phase III data.");
     }
   }, [settings.activeModel, tauriAvailable]);
+
+  // Lightweight history-only refresh for the post-dictation event; avoids the
+  // full refreshPhase3Data reload (model catalog, dictionary, benchmarks).
+  const refreshSessionHistory = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setSessionHistory(await getSessionHistory({ includeFailed: true, limit: 50 }));
+    } catch {
+      // Non-critical; the next full refresh will catch up.
+    }
+  }, [tauriAvailable]);
 
   const runWebFixtureDemo = useCallback(() => {
     clearWebTimers();
@@ -1738,6 +1753,7 @@ export function useVoiceWave() {
     let modelUnlisten: (() => void) | null = null;
     let audioQualityUnlisten: (() => void) | null = null;
     let latencyUnlisten: (() => void) | null = null;
+    let historyUnlisten: (() => void) | null = null;
 
     void (async () => {
       try {
@@ -1773,6 +1789,11 @@ export function useVoiceWave() {
         setInputDevices(devices);
         setEntitlement(entitlementSnapshot);
         await refreshPhase3Data(safeLoadedSettings.activeModel);
+        try {
+          setHistoryPolicy(await getHistoryRetention());
+        } catch {
+          // Older backends without the getter: keep the optimistic default.
+        }
       } catch (loadErr) {
         setError(loadErr instanceof Error ? loadErr.message : "Failed to initialize VoiceWave runtime.");
       }
@@ -1851,6 +1872,10 @@ export function useVoiceWave() {
       latencyUnlisten = await listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
       });
+
+      historyUnlisten = await listenVoicewaveHistoryUpdated(() => {
+        void refreshSessionHistory();
+      });
     })();
 
     return () => {
@@ -1878,11 +1903,14 @@ export function useVoiceWave() {
       if (latencyUnlisten) {
         latencyUnlisten();
       }
+      if (historyUnlisten) {
+        historyUnlisten();
+      }
       if (tauriAvailable) {
         void stopMicLevelMonitor();
       }
     };
-  }, [refreshPhase3Data, refreshRecentInsertions, settings.activeModel, tauriAvailable]);
+  }, [refreshPhase3Data, refreshRecentInsertions, refreshSessionHistory, settings.activeModel, tauriAvailable]);
 
   useEffect(() => {
     return () => {
