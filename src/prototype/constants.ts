@@ -1,6 +1,7 @@
 import React from "react";
 import type { ThemeConfig } from "./types";
 import {
+  BarChart3,
   Crown,
   Cpu,
   FileText,
@@ -105,6 +106,7 @@ export const NAV_ITEMS_TOP = [
   { id: "models", label: "Models", icon: Cpu },
   { id: "dictionary", label: "Dictionary", icon: FileText },
   { id: "sessions", label: "History", icon: History },
+  { id: "stats", label: "Stats", icon: BarChart3 },
   { id: "pro", label: "Pro", icon: Crown },
   { id: "pro-tools", label: "Pro Tools", icon: Zap }
 ];

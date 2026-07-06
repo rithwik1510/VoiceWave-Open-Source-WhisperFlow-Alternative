@@ -245,6 +245,14 @@ describe("App navigation and phase three panels", () => {
     expect(screen.getByText("Personal Dictionary")).toBeInTheDocument();
   });
 
+  it("opens the stats page from the nav", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Stats" }));
+    // Web/test runtime has no Tauri backend, so the section explains itself.
+    expect(screen.getByText("Stats are computed inside the desktop app.")).toBeInTheDocument();
+  });
+
   it("opens the history page from the nav with retention controls and copyable records", async () => {
     render(<App />);
 

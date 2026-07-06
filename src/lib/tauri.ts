@@ -40,6 +40,7 @@ import type {
   HistoryExportResult,
   SessionHistoryQuery,
   SessionHistoryRecord,
+  StatsSummary,
   TranscriptEvent,
   UndoResult,
   VoiceWaveSettings,
@@ -469,6 +470,10 @@ export async function setHistoryRetention(policy: RetentionPolicy): Promise<Rete
 
 export async function getHistoryRetention(): Promise<RetentionPolicy> {
   return invokeVoicewave<RetentionPolicy>("get_history_retention");
+}
+
+export async function getStatsSummary(): Promise<StatsSummary> {
+  return invokeVoicewave<StatsSummary>("get_stats_summary");
 }
 
 export async function pruneHistoryNow(): Promise<number> {

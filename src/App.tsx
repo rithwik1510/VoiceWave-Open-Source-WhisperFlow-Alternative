@@ -34,6 +34,7 @@ import {
 import { firebaseEnabled } from "./lib/firebase";
 import { copyTextToClipboard } from "./lib/tauri";
 import { Onboarding } from "./components/Onboarding";
+import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
 import { useVoiceWave } from "./hooks/useVoiceWave";
@@ -1554,6 +1555,8 @@ function App() {
               )}
             </section>
           )}
+
+          {activeNav === "stats" && <StatsSection />}
 
           {activeNav === "dictionary" && (
             <section className="vw-panel vw-panel-soft">

@@ -209,6 +209,24 @@ export interface MicLevelEvent {
   error?: string | null;
 }
 
+/** Aggregate dictation statistics (hero tier). All values computed on-device
+ * from anonymous per-day rollups — never transcript text. */
+export interface StatsSummary {
+  todayWords: number;
+  weekWords: number;
+  monthWords: number;
+  prevMonthWords: number;
+  allTimeWords: number;
+  allTimeDictations: number;
+  speakingMs: number;
+  averageWpm: number;
+  bestDictationWpm: number;
+  timeSavedMsAllTime: number;
+  timeSavedMsMonth: number;
+  typingBaselineWpm: number;
+  activeDays: number;
+}
+
 export type AudioQualityBand = "good" | "fair" | "poor";
 
 export interface AudioQualityReport {

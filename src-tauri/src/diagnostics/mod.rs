@@ -251,6 +251,12 @@ impl DiagnosticsManager {
         Ok(manager)
     }
 
+    /// Read access to the raw per-utterance records (used by the stats
+    /// module's one-time backfill).
+    pub fn latency_records(&self) -> &[LatencyMetricRecord] {
+        &self.store.records
+    }
+
     pub fn record_latency(&mut self, record: LatencyMetricRecord) -> Result<(), DiagnosticsError> {
         self.store.records.push(record);
         if self.store.records.len() > Self::MAX_RECORDS {

@@ -46,6 +46,7 @@ use crate::{
         AppTargetClass, CodeModeSettings, DecodeMode, DomainPackId, FormatProfile, SettingsError,
         SettingsStore, VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
     },
+    stats::{StatsManager, StatsSummary},
     transcript::{
         finalize_pro_transcript, merge_incremental_transcript, sanitize_user_transcript,
         stabilize_custom_terms, ProTranscriptOptions,
@@ -1200,6 +1201,7 @@ pub struct VoiceWaveController {
     permission_manager: Mutex<PermissionManager>,
     insertion_engine: Mutex<InsertionEngine>,
     history_manager: Arc<Mutex<HistoryManager>>,
+    stats_manager: Arc<Mutex<StatsManager>>,
     billing_manager: Arc<Mutex<BillingManager>>,
     model_manager: Mutex<crate::model_manager::ModelManager>,
     dictionary_manager: Arc<Mutex<DictionaryManager>>,
@@ -1293,6 +1295,19 @@ impl VoiceWaveController {
         let model_manager = crate::model_manager::ModelManager::new()?;
         let dictionary_manager = DictionaryManager::new()?;
         let diagnostics_manager = DiagnosticsManager::new()?;
+        // Stats are non-critical: a broken store must never block dictation,
+        // so fall back to session-only aggregates instead of erroring out.
+        let mut stats_manager = StatsManager::new().unwrap_or_else(|err| {
+            eprintln!("stats store unavailable, keeping session-only stats: {err}");
+            StatsManager::in_memory()
+        });
+        if !stats_manager.backfilled() {
+            if let Err(err) =
+                stats_manager.backfill_from_latency_records(diagnostics_manager.latency_records())
+            {
+                eprintln!("stats backfill failed: {err}");
+            }
+        }
         if cpu_runtime_pool_enabled() && !is_faster_whisper_model(&settings.active_model) {
             if let Some(installed_model) = model_manager.get_installed(&settings.active_model) {
                 prewarm_runtime(
@@ -1317,6 +1332,7 @@ impl VoiceWaveController {
             permission_manager: Mutex::new(permission_manager),
             insertion_engine: Mutex::new(InsertionEngine::default()),
             history_manager: Arc::new(Mutex::new(history_manager)),
+            stats_manager: Arc::new(Mutex::new(stats_manager)),
             billing_manager: Arc::new(Mutex::new(billing_manager)),
             model_manager: Mutex::new(model_manager),
             dictionary_manager: Arc::new(Mutex::new(dictionary_manager)),
@@ -2897,6 +2913,10 @@ impl VoiceWaveController {
         self.history_manager.lock().await.retention_policy()
     }
 
+    pub async fn get_stats_summary(&self) -> StatsSummary {
+        self.stats_manager.lock().await.summary()
+    }
+
     pub async fn prune_history_now(&self, _app: AppHandle) -> Result<usize, ControllerError> {
         self.history_manager
             .lock()
@@ -4124,6 +4144,18 @@ impl VoiceWaveController {
                     .and_then(|slot| *slot),
             },
         );
+        // Always-on aggregate stats (counts and durations only, never text)
+        // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
+        // diagnostics gates the detailed per-utterance records below.
+        if let Err(err) = self.stats_manager.lock().await.record_dictation(
+            now_utc_ms(),
+            asr_final_word_count,
+            asr_raw_word_count,
+            audio_duration_ms,
+            Some(insertion_target_class.as_str()),
+        ) {
+            eprintln!("stats record failed: {err}");
+        }
         if settings.diagnostics_opt_in {
             let _ = self
                 .diagnostics_manager

@@ -12,6 +12,7 @@ pub mod model_manager;
 pub mod permissions;
 pub mod phase1;
 pub mod settings;
+pub mod stats;
 pub mod transcript;
 
 #[cfg(feature = "desktop")]
@@ -46,6 +47,8 @@ use settings::{
 };
 #[cfg(feature = "desktop")]
 use state::{DictationMode, VoiceWaveController, VoiceWaveSnapshot};
+#[cfg(feature = "desktop")]
+use stats::StatsSummary;
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
@@ -990,6 +993,12 @@ async fn get_history_retention(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+async fn get_stats_summary(runtime: State<'_, RuntimeContext>) -> Result<StatsSummary, String> {
+    Ok(runtime.controller.get_stats_summary().await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 async fn prune_history_now(
     app: tauri::AppHandle,
     runtime: State<'_, RuntimeContext>,
@@ -1321,6 +1330,7 @@ pub fn run() {
             export_session_history_preset,
             set_history_retention,
             get_history_retention,
+            get_stats_summary,
             prune_history_now,
             clear_history,
             get_dictionary_queue,
