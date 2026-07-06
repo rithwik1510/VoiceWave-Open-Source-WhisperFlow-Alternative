@@ -52,6 +52,9 @@ export interface VoiceWaveSettings {
   appProfileOverrides: AppProfileOverrides;
   codeMode: CodeModeSettings;
   proPostProcessingEnabled: boolean;
+  /** Always-on spoken structural commands ("new line", "new paragraph",
+   * "bullet point") independent of the format profile. Defaults to true. */
+  spokenEditCommands: boolean;
   micVolumeGuard: MicVolumeGuardMode;
   /** Opt-in one-tap "Add to dictionary?" pill suggestion. Off by default;
    * optional here since the backend supplies a default when absent. */

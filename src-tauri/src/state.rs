@@ -3766,6 +3766,7 @@ impl VoiceWaveController {
                     domain_packs: &settings.active_domain_packs,
                     code_mode: &settings.code_mode,
                     post_processing_enabled: settings.pro_post_processing_enabled,
+                    spoken_edit_commands: settings.spoken_edit_commands,
                     app_profile_behavior: &app_profile_behavior,
                     custom_terms: &custom_terms,
                 },

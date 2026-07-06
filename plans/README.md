@@ -21,7 +21,7 @@ pick by value/appetite. Priority reflects product value; Effort reflects the fix
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | Dictionary export/import | P2 | S | — | DONE |
-| 002 | Spoken edit commands (always-on new line / paragraph / bullet) | P2 | S | — | TODO |
+| 002 | Spoken edit commands (always-on new line / paragraph / bullet) | P2 | S | — | DONE (2026-07-06: always-on `apply_structural_commands` + `spokenEditCommands` toggle, default on; free tier untouched — Pro is forced on for everyone, so the Pro pipeline covers all users) |
 | 003 | Interactive pill actions (typed one-tap notice actions) | P2 | M | — | DONE |
 | 004 | Voice snippets (trigger → expansion) | P3 | M | — | TODO |
 | 005 | On-device LLM "polish" pass — feasibility SPIKE | P1 | L | — | DONE (spike GO; Phase 3 off-by-default app wiring landed, `llm_polish_enabled` defaults false) |

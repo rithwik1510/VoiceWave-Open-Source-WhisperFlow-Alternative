@@ -97,6 +97,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     setProPostProcessingEnabled: vi.fn(),
     setSessionStarred: vi.fn(),
     setPreferClipboardFallback: vi.fn(),
+    setSpokenEditCommands: vi.fn(),
     setVadThreshold: vi.fn(),
     addSessionTag: vi.fn(),
     addDictionaryTerm: vi.fn(),
@@ -130,7 +131,8 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
         preferredCasing: "preserve",
         wrapInFencedBlock: false
       },
-      proPostProcessingEnabled: false
+      proPostProcessingEnabled: false,
+      spokenEditCommands: true
     },
     switchToRecommendedInput: vi.fn(),
     recommendedVadThreshold: 0.014,

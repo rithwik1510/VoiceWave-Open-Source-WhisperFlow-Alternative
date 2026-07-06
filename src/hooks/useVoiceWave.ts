@@ -155,6 +155,7 @@ const fallbackSettings: VoiceWaveSettings = {
     wrapInFencedBlock: false
   },
   proPostProcessingEnabled: false,
+  spokenEditCommands: true,
   micVolumeGuard: "warn"
 };
 
@@ -388,6 +389,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     appProfileOverrides: settings.appProfileOverrides ?? fallbackSettings.appProfileOverrides,
     codeMode: settings.codeMode ?? fallbackSettings.codeMode,
     proPostProcessingEnabled: settings.proPostProcessingEnabled ?? false,
+    spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
     toggleHotkey: LOCKED_TOGGLE_HOTKEY,
     pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
@@ -1070,6 +1072,22 @@ export function useVoiceWave() {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
       } catch (persistErr) {
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save insertion preference");
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  const setSpokenEditCommands = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = { ...settings, spokenEditCommands: enabled };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save spoken commands setting");
       }
     },
     [settings, tauriAvailable]
@@ -2119,6 +2137,7 @@ export function useVoiceWave() {
     exportDiagnosticsBundle,
     recommendedVadThreshold: RECOMMENDED_VAD_THRESHOLD,
     setPreferClipboardFallback,
+    setSpokenEditCommands,
     setLlmPolishEnabled,
     polishModelProgress,
     updateHotkeys,

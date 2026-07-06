@@ -145,6 +145,11 @@ pub struct VoiceWaveSettings {
     pub app_profile_overrides: AppProfileOverrides,
     pub code_mode: CodeModeSettings,
     pub pro_post_processing_enabled: bool,
+    /// Always-on spoken structural commands ("new line", "new paragraph",
+    /// "bullet point") independent of the selected format profile. On by
+    /// default; NO per-field serde default here so the container-level
+    /// default (true) applies when the field is absent from older settings.
+    pub spoken_edit_commands: bool,
     pub prefer_clipboard_only_for_terminals: bool,
     /// OS input-volume guard behavior at dictation start. Defaults to Warn:
     /// external apps (browser AGC, call apps) silently lower the system mic
@@ -184,6 +189,7 @@ impl Default for VoiceWaveSettings {
             app_profile_overrides: AppProfileOverrides::default(),
             code_mode: CodeModeSettings::default(),
             pro_post_processing_enabled: true,
+            spoken_edit_commands: true,
             prefer_clipboard_only_for_terminals: true,
             mic_volume_guard: MicVolumeGuardMode::default(),
             pill_action_suggestions: false,

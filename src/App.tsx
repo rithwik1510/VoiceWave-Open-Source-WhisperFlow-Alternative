@@ -405,6 +405,7 @@ function App() {
     setOwnerOverride,
     setReleaseTailMs,
     setPreferClipboardFallback,
+    setSpokenEditCommands,
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
@@ -1901,6 +1902,24 @@ function App() {
                     <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void requestMicAccess()}>
                       Check Microphone Permission
                     </button>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Spoken edit commands</p>
+                      <p className="vw-set-desc">
+                        Say "new line", "new paragraph", or "bullet point" to add structure while dictating.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Enable spoken edit commands"
+                        checked={settings.spokenEditCommands}
+                        onChange={(event) => void setSpokenEditCommands(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
                   </div>
 
                   <div className="vw-set-row">

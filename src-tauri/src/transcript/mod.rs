@@ -25,6 +25,7 @@ pub struct ProTranscriptOptions<'a> {
     pub domain_packs: &'a [DomainPackId],
     pub code_mode: &'a CodeModeSettings,
     pub post_processing_enabled: bool,
+    pub spoken_edit_commands: bool,
     pub app_profile_behavior: &'a AppProfileBehavior,
     pub custom_terms: &'a [String],
 }
@@ -45,6 +46,10 @@ pub fn finalize_pro_transcript(input: &str, options: &ProTranscriptOptions<'_>) 
     let mut text = finalize_user_transcript(&cleaned);
     if text.is_empty() {
         return text;
+    }
+
+    if options.spoken_edit_commands {
+        text = apply_structural_commands(&text);
     }
 
     text = apply_domain_corrections(&text, options.domain_packs);
@@ -552,13 +557,27 @@ fn apply_format_profile(input: &str, profile: FormatProfile) -> String {
     }
 }
 
+/// Spoken structural commands that apply regardless of format profile.
+/// Recognized only as standalone boundary phrases (via
+/// `replace_boundary_phrase_case_insensitive`) so embedded usage such as
+/// "newline" inside an identifier is not rewritten. These were previously
+/// trapped inside the Academic/Concise profiles; this step is now the single
+/// source for them.
+fn apply_structural_commands(input: &str) -> String {
+    let mut text = input.to_string();
+    text = replace_boundary_phrase_case_insensitive(&text, "new paragraph", "\n\n");
+    text = replace_boundary_phrase_case_insensitive(&text, "new line", "\n");
+    text = replace_boundary_phrase_case_insensitive(&text, "next line", "\n");
+    text = replace_boundary_phrase_case_insensitive(&text, "bullet point", "\n- ");
+    text = replace_boundary_phrase_case_insensitive(&text, "new bullet", "\n- ");
+    text
+}
+
 fn apply_writing_profile(input: &str) -> String {
     let mut text = input.to_string();
     text = replace_boundary_phrase_case_insensitive(&text, "don't", "do not");
     text = replace_boundary_phrase_case_insensitive(&text, "can't", "cannot");
     text = replace_boundary_phrase_case_insensitive(&text, "won't", "will not");
-    text = replace_boundary_phrase_case_insensitive(&text, "new paragraph", "\n\n");
-    text = replace_boundary_phrase_case_insensitive(&text, "next line", "\n");
 
     if let Some(list) = format_spoken_numbered_list(&text) {
         return list;
@@ -573,8 +592,6 @@ fn apply_study_profile(input: &str) -> String {
         .replace("Basically ", "")
         .replace("Actually ", "")
         .replace("In order to", "To");
-    text = replace_boundary_phrase_case_insensitive(&text, "new paragraph", "\n\n");
-    text = replace_boundary_phrase_case_insensitive(&text, "next line", "\n");
 
     if let Some(note_sections) = format_study_note_sections(&text) {
         return note_sections;
@@ -1011,6 +1028,7 @@ mod tests {
                 domain_packs: &[],
                 code_mode: &code_mode,
                 post_processing_enabled: true,
+                spoken_edit_commands: true,
                 app_profile_behavior: &behavior,
                 custom_terms: &[],
             },
@@ -1063,6 +1081,7 @@ mod tests {
                 wrap_in_fenced_block: false,
             },
             post_processing_enabled: true,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1084,6 +1103,7 @@ mod tests {
                 wrap_in_fenced_block: false,
             },
             post_processing_enabled: false,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1104,6 +1124,7 @@ mod tests {
                 wrap_in_fenced_block: false,
             },
             post_processing_enabled: false,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1125,6 +1146,7 @@ mod tests {
                 wrap_in_fenced_block: false,
             },
             post_processing_enabled: false,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1141,6 +1163,7 @@ mod tests {
             domain_packs: &[],
             code_mode: &CodeModeSettings::default(),
             post_processing_enabled: true,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1156,6 +1179,7 @@ mod tests {
             domain_packs: &[],
             code_mode: &CodeModeSettings::default(),
             post_processing_enabled: true,
+            spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
             custom_terms: &[],
         };
@@ -1168,5 +1192,79 @@ mod tests {
             output,
             "Topic: Momentum.\nDefinition: Rate of change of velocity.\nExample: Pushing a cart.\nSummary: Revise this before exam."
         );
+    }
+
+    fn structural_options<'a>(
+        spoken_edit_commands: bool,
+        code_mode: &'a CodeModeSettings,
+        behavior: &'a AppProfileBehavior,
+    ) -> ProTranscriptOptions<'a> {
+        ProTranscriptOptions {
+            format_profile: FormatProfile::Default,
+            domain_packs: &[],
+            code_mode,
+            post_processing_enabled: true,
+            spoken_edit_commands,
+            app_profile_behavior: behavior,
+            custom_terms: &[],
+        }
+    }
+
+    #[test]
+    fn structural_commands_apply_in_default_profile() {
+        let code_mode = CodeModeSettings::default();
+        let behavior = AppProfileBehavior::default();
+        let options = structural_options(true, &code_mode, &behavior);
+
+        let output = finalize_pro_transcript("check the logs new line restart the app", &options);
+        assert_eq!(output, "Check the logs\nrestart the app.");
+    }
+
+    #[test]
+    fn new_paragraph_maps_to_double_newline() {
+        let code_mode = CodeModeSettings::default();
+        let behavior = AppProfileBehavior::default();
+        let options = structural_options(true, &code_mode, &behavior);
+
+        let output = finalize_pro_transcript("intro new paragraph details", &options);
+        assert_eq!(output, "Intro\n\ndetails.");
+    }
+
+    #[test]
+    fn bullet_point_starts_new_bulleted_line() {
+        let code_mode = CodeModeSettings::default();
+        let behavior = AppProfileBehavior::default();
+        let options = structural_options(true, &code_mode, &behavior);
+
+        let output = finalize_pro_transcript("buy milk bullet point buy eggs", &options);
+        assert_eq!(output, "Buy milk\n- buy eggs.");
+    }
+
+    #[test]
+    fn structural_commands_disabled_leaves_text_literal() {
+        let code_mode = CodeModeSettings::default();
+        let behavior = AppProfileBehavior::default();
+        let options = structural_options(false, &code_mode, &behavior);
+
+        let output = finalize_pro_transcript("buy milk bullet point buy eggs", &options);
+        assert_eq!(output, "Buy milk bullet point buy eggs.");
+        assert!(!output.contains('\n'));
+    }
+
+    #[test]
+    fn profile_mappings_not_double_applied() {
+        let options = ProTranscriptOptions {
+            format_profile: FormatProfile::Academic,
+            domain_packs: &[],
+            code_mode: &CodeModeSettings::default(),
+            post_processing_enabled: true,
+            spoken_edit_commands: true,
+            app_profile_behavior: &AppProfileBehavior::default(),
+            custom_terms: &[],
+        };
+
+        let output = finalize_pro_transcript("intro new paragraph details", &options);
+        assert_eq!(output, "Intro\n\ndetails.");
+        assert!(!output.contains("\n\n\n"));
     }
 }
