@@ -322,10 +322,22 @@ const PILL_WINDOW_LABEL: &str = "voicewave-pill";
 /// usage in lib.rs).
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// When true, mic-level frames are also forwarded to the main window. Only the
+/// onboarding mic check turns this on (via `set_mic_level_forwarding`); steady
+/// state stays pill-only so PERF-05 holds.
+static MIC_LEVEL_FORWARD_TO_MAIN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_mic_level_forwarding(enabled: bool) {
+    MIC_LEVEL_FORWARD_TO_MAIN.store(enabled, Ordering::Relaxed);
+}
+
 /// Emit a mic-level frame to the pill window only. These fire at ~30 fps during
 /// capture, so broadcasting globally would needlessly wake the main webview,
 /// which never renders them (PERF-05).
 fn emit_mic_level(app: &AppHandle, event: MicLevelEvent) {
+    if MIC_LEVEL_FORWARD_TO_MAIN.load(Ordering::Relaxed) {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, "voicewave://mic-level", event.clone());
+    }
     let _ = app.emit_to(PILL_WINDOW_LABEL, "voicewave://mic-level", event);
 }
 

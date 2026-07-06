@@ -62,6 +62,8 @@ export interface VoiceWaveSettings {
   /** Experimental on-device AI polish (plan 005). Off by default; optional
    * here since the backend supplies a `false` default when absent. */
   llmPolishEnabled?: boolean;
+  /** True once the first-run onboarding flow finished (or was skipped). */
+  onboardingCompleted?: boolean;
 }
 
 export interface VoiceWaveSnapshot {

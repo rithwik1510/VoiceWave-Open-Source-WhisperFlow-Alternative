@@ -324,6 +324,12 @@ export async function startMicLevelMonitor(): Promise<void> {
   await invokeVoicewave<void>("start_mic_level_monitor");
 }
 
+/** Forward live mic-level frames to the main window (onboarding mic check
+ * only — steady state keeps them pill-only for perf). */
+export async function setMicLevelForwarding(enabled: boolean): Promise<void> {
+  await invokeVoicewave<void>("set_mic_level_forwarding", { enabled });
+}
+
 export async function stopMicLevelMonitor(): Promise<void> {
   await invokeVoicewave<void>("stop_mic_level_monitor");
 }

@@ -33,6 +33,7 @@ import {
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
 import { copyTextToClipboard } from "./lib/tauri";
+import { Onboarding } from "./components/Onboarding";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
 import { useVoiceWave } from "./hooks/useVoiceWave";
@@ -410,6 +411,8 @@ function App() {
     setReleaseTailMs,
     setPreferClipboardFallback,
     setSpokenEditCommands,
+    completeOnboarding,
+    restartOnboarding,
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
@@ -486,7 +489,11 @@ function App() {
     () => modelCatalog.filter((row) => row.modelId === "fw-small.en" || row.modelId === "fw-large-v3-turbo"),
     [modelCatalog]
   );
-  const showModelSetupGate = tauriAvailable && !hasInstalledModel && setupCatalog.length > 0;
+  const showOnboarding = tauriAvailable && !settings.onboardingCompleted;
+  // The plain model gate stays as the fallback for users who skipped
+  // onboarding without installing a model; it hides while the flow is up.
+  const showModelSetupGate =
+    tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
   const selectedSetupCatalogRow = setupCatalog.find((row) => row.modelId === setupModelChoice) ?? null;
   const selectedSetupStatus = modelStatuses[setupModelChoice] ?? null;
 
@@ -2543,8 +2550,41 @@ function App() {
                 <li>3. Run the 10s audio quality check in Settings Advanced.</li>
               </ul>
             </section>
+            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-[#09090B]">First-run setup</p>
+                  <p className="mt-1 text-sm text-[#71717A]">
+                    Replay the guided mic check and dictation rehearsal.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="vw-btn-secondary vw-btn-sm"
+                  onClick={() => {
+                    closeOverlay();
+                    void restartOnboarding();
+                  }}
+                >
+                  Run setup again
+                </button>
+              </div>
+            </section>
           </div>
         </OverlayModal>
+      )}
+
+      {showOnboarding && (
+        <Onboarding
+          catalog={setupCatalog}
+          statuses={modelStatuses}
+          hasInstalledModel={hasInstalledModel}
+          installModel={installModel}
+          makeModelActive={makeModelActive}
+          hotkeyLabel={settings.pushToTalkHotkey}
+          snapshot={snapshot}
+          onComplete={() => void completeOnboarding()}
+        />
       )}
 
       {showModelSetupGate && (

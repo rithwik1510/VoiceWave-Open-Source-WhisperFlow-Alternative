@@ -158,7 +158,10 @@ const fallbackSettings: VoiceWaveSettings = {
   },
   proPostProcessingEnabled: false,
   spokenEditCommands: true,
-  micVolumeGuard: "warn"
+  micVolumeGuard: "warn",
+  // True in the pre-load fallback so the onboarding flow never flashes before
+  // real settings arrive; the backend value replaces this immediately.
+  onboardingCompleted: true
 };
 
 const fallbackSnapshot: VoiceWaveSnapshot = {
@@ -393,6 +396,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     proPostProcessingEnabled: settings.proPostProcessingEnabled ?? false,
     spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
+    onboardingCompleted: settings.onboardingCompleted ?? false,
     toggleHotkey: LOCKED_TOGGLE_HOTKEY,
     pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
   };
@@ -1091,6 +1095,33 @@ export function useVoiceWave() {
     },
     [settings, tauriAvailable]
   );
+
+  const completeOnboarding = useCallback(async () => {
+    const nextSettings = { ...settings, onboardingCompleted: true };
+    setSettings(nextSettings);
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setSettings(normalizeSettings(await updateSettings(nextSettings)));
+    } catch {
+      // Non-fatal: the flow simply shows again next launch.
+    }
+  }, [settings, tauriAvailable]);
+
+  // Help → "Run setup again": clears the flag so the flow re-mounts fresh.
+  const restartOnboarding = useCallback(async () => {
+    const nextSettings = { ...settings, onboardingCompleted: false };
+    setSettings(nextSettings);
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setSettings(normalizeSettings(await updateSettings(nextSettings)));
+    } catch {
+      // Non-fatal: the local state already reopened the flow.
+    }
+  }, [settings, tauriAvailable]);
 
   const setSpokenEditCommands = useCallback(
     async (enabled: boolean) => {
@@ -2166,6 +2197,8 @@ export function useVoiceWave() {
     recommendedVadThreshold: RECOMMENDED_VAD_THRESHOLD,
     setPreferClipboardFallback,
     setSpokenEditCommands,
+    completeOnboarding,
+    restartOnboarding,
     setLlmPolishEnabled,
     polishModelProgress,
     updateHotkeys,

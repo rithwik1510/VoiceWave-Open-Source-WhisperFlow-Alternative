@@ -168,6 +168,11 @@ pub struct VoiceWaveSettings {
     /// default so the shipping behavior is byte-identical unless opted in.
     #[serde(default)]
     pub llm_polish_enabled: bool,
+    /// True once the first-run onboarding flow has been completed or skipped.
+    /// Defaults to false so fresh installs (and installs predating the flow)
+    /// see it exactly once.
+    #[serde(default)]
+    pub onboarding_completed: bool,
 }
 
 impl Default for VoiceWaveSettings {
@@ -194,6 +199,7 @@ impl Default for VoiceWaveSettings {
             mic_volume_guard: MicVolumeGuardMode::default(),
             pill_action_suggestions: false,
             llm_polish_enabled: false,
+            onboarding_completed: false,
         }
     }
 }

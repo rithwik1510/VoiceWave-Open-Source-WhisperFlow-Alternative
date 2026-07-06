@@ -667,6 +667,15 @@ async fn request_microphone_access(
     Ok(runtime.controller.request_microphone_access(app).await)
 }
 
+/// Forward live mic-level frames to the main window while the onboarding mic
+/// check is on screen. Steady state keeps them pill-only (PERF-05).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_mic_level_forwarding(enabled: bool) -> Result<(), String> {
+    crate::state::set_mic_level_forwarding(enabled);
+    Ok(())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn start_mic_level_monitor(
@@ -1288,6 +1297,7 @@ pub fn run() {
             request_microphone_access,
             start_mic_level_monitor,
             stop_mic_level_monitor,
+            set_mic_level_forwarding,
             run_audio_quality_diagnostic,
             insert_text,
             undo_last_insertion,
