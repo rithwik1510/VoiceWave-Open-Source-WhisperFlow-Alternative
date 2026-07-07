@@ -1203,6 +1203,17 @@ async fn download_polish_model(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(feature = "desktop")]
 pub fn run() {
     tauri::Builder::default()
+        // Single instance: the push-to-talk monitor polls GetAsyncKeyState,
+        // so two running processes would BOTH capture and insert every
+        // dictation (text lands twice). A second launch must focus the
+        // existing window instead. Must be the first plugin registered.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         // Auto-update: checks the GitHub `latest.json` endpoint configured in
         // tauri.conf.json, verifies the artifact signature against `pubkey`,
         // and (driven from the frontend) downloads + installs the new NSIS

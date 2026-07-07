@@ -113,6 +113,7 @@ fn assert_paths_receive_full_transcript(transcript: &str, suffix_terms: &[&str])
             text: transcript.to_string(),
             target_app: Some("Notepad".to_string()),
             prefer_clipboard: false,
+            force_clipboard_only: false,
         })
         .expect("insertion should succeed");
     assert!(insert_result.success);

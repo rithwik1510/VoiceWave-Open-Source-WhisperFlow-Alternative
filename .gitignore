@@ -74,3 +74,4 @@ scripts/llm-polish/wheelhouse-cuda/
 /DemoVideo/
 /Marketing plans/
 /export-voicewave-demo.mjs
+.gstack/

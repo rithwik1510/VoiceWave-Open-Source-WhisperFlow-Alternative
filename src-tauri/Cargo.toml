@@ -14,7 +14,7 @@ tauri-build = { version = "2.0.2", features = [] }
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-plugin-updater", "dep:tauri-plugin-process"]
+desktop = ["dep:tauri", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:tauri-plugin-single-instance"]
 whisper-cuda = ["whisper-rs/cuda"]
 whisper-vulkan = ["whisper-rs/vulkan"]
 
@@ -33,6 +33,7 @@ sha2 = "0.10.9"
 tauri = { version = "2.10", features = ["tray-icon"], optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
 thiserror = "2.0.12"
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.13"
