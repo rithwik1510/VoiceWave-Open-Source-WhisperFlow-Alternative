@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{Mutex as StdMutex, OnceLock},
+};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +55,14 @@ pub enum HotkeyError {
     MissingMainKey { field: &'static str },
     #[error("toggle and push-to-talk hotkeys conflict")]
     Conflict,
+    #[error("global hotkey runtime failed: {0}")]
+    Runtime(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeySignal {
+    pub action: HotkeyAction,
+    pub phase: HotkeyPhase,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +73,283 @@ struct ParsedHotkey {
     super_key: bool,
     modifier_only: bool,
     main_vk: u16,
+}
+
+#[derive(Debug)]
+struct HotkeyEdgeTracker {
+    toggle: ParsedHotkey,
+    push_to_talk: ParsedHotkey,
+    keys_down: HashSet<u16>,
+}
+
+impl HotkeyEdgeTracker {
+    fn new(config: &HotkeyConfig) -> Result<Self, HotkeyError> {
+        Ok(Self {
+            toggle: parse_combo("toggle", &config.toggle)?,
+            push_to_talk: parse_combo("pushToTalk", &config.push_to_talk)?,
+            keys_down: HashSet::new(),
+        })
+    }
+
+    fn key_event(&mut self, vk: u16, pressed: bool) -> Vec<HotkeySignal> {
+        let push_was_active = parsed_is_active(&self.push_to_talk, &self.keys_down);
+
+        if pressed {
+            // Auto-repeat must not produce additional toggle or push edges.
+            if !self.keys_down.insert(vk) {
+                return Vec::new();
+            }
+        } else if !self.keys_down.remove(&vk) {
+            return Vec::new();
+        }
+
+        let mut signals = Vec::with_capacity(2);
+        if pressed
+            && !self.toggle.modifier_only
+            && vk == self.toggle.main_vk
+            && parsed_is_active(&self.toggle, &self.keys_down)
+        {
+            signals.push(HotkeySignal {
+                action: HotkeyAction::ToggleDictation,
+                phase: HotkeyPhase::Triggered,
+            });
+        }
+
+        let push_is_active = parsed_is_active(&self.push_to_talk, &self.keys_down);
+        if !push_was_active && push_is_active {
+            signals.push(HotkeySignal {
+                action: HotkeyAction::PushToTalk,
+                phase: HotkeyPhase::Pressed,
+            });
+        } else if push_was_active && !push_is_active {
+            signals.push(HotkeySignal {
+                action: HotkeyAction::PushToTalk,
+                phase: HotkeyPhase::Released,
+            });
+        }
+        signals
+    }
+}
+
+fn parsed_is_active(parsed: &ParsedHotkey, keys_down: &HashSet<u16>) -> bool {
+    let ctrl_down = key_set_contains_any(keys_down, &[VK_CONTROL_, VK_LCONTROL_, VK_RCONTROL_]);
+    let shift_down = key_set_contains_any(keys_down, &[VK_SHIFT_, VK_LSHIFT_, VK_RSHIFT_]);
+    let alt_down = key_set_contains_any(keys_down, &[VK_MENU_, VK_LMENU_, VK_RMENU_]);
+    let super_down = key_set_contains_any(keys_down, &[VK_LWIN_, VK_RWIN_]);
+
+    if parsed.ctrl != ctrl_down
+        || parsed.shift != shift_down
+        || parsed.alt != alt_down
+        || parsed.super_key != super_down
+    {
+        return false;
+    }
+    parsed.modifier_only || keys_down.contains(&parsed.main_vk)
+}
+
+fn key_set_contains_any(keys_down: &HashSet<u16>, candidates: &[u16]) -> bool {
+    candidates.iter().any(|vk| keys_down.contains(vk))
+}
+
+// Virtual-key values are stable Win32 ABI constants. Keeping the small set
+// here makes the edge tracker platform-neutral and directly unit-testable.
+const VK_CONTROL_: u16 = 0x11;
+const VK_SHIFT_: u16 = 0x10;
+const VK_MENU_: u16 = 0x12;
+const VK_LCONTROL_: u16 = 0xA2;
+const VK_RCONTROL_: u16 = 0xA3;
+const VK_LSHIFT_: u16 = 0xA0;
+const VK_RSHIFT_: u16 = 0xA1;
+const VK_LMENU_: u16 = 0xA4;
+const VK_RMENU_: u16 = 0xA5;
+const VK_LWIN_: u16 = 0x5B;
+const VK_RWIN_: u16 = 0x5C;
+
+pub struct HotkeyRuntime {
+    #[cfg(target_os = "windows")]
+    thread_id: u32,
+    #[cfg(target_os = "windows")]
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HotkeyRuntime {
+    pub fn start(
+        config: HotkeyConfig,
+        sender: UnboundedSender<HotkeySignal>,
+    ) -> Result<Self, HotkeyError> {
+        #[cfg(target_os = "windows")]
+        {
+            start_windows_hotkey_runtime(config, sender)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (config, sender);
+            Err(HotkeyError::Runtime(
+                "event-driven global hotkeys are currently available only on Windows".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for HotkeyRuntime {
+    fn drop(&mut self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        unsafe {
+            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct HookDispatch {
+    tracker: HotkeyEdgeTracker,
+    sender: UnboundedSender<HotkeySignal>,
+}
+
+#[cfg(target_os = "windows")]
+static HOOK_DISPATCH: OnceLock<StdMutex<Option<HookDispatch>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn start_windows_hotkey_runtime(
+    config: HotkeyConfig,
+    sender: UnboundedSender<HotkeySignal>,
+) -> Result<HotkeyRuntime, HotkeyError> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tracker = HotkeyEdgeTracker::new(&config)?;
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
+    let thread = std::thread::Builder::new()
+        .name("voicewave-hotkey-events".to_string())
+        .spawn(move || windows_hotkey_thread(tracker, sender, ready_tx))
+        .map_err(|err| HotkeyError::Runtime(format!("failed to spawn hook thread: {err}")))?;
+
+    match ready_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(thread_id)) => Ok(HotkeyRuntime {
+            thread_id,
+            thread: Some(thread),
+        }),
+        Ok(Err(message)) => {
+            let _ = thread.join();
+            Err(HotkeyError::Runtime(message))
+        }
+        Err(err) => Err(HotkeyError::Runtime(format!(
+            "hotkey hook startup timed out: {err}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_hotkey_thread(
+    tracker: HotkeyEdgeTracker,
+    sender: UnboundedSender<HotkeySignal>,
+    ready: std::sync::mpsc::SyncSender<Result<u32, String>>,
+) {
+    use windows_sys::Win32::{
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, MSG, PM_NOREMOVE, WH_KEYBOARD_LL,
+        },
+    };
+
+    let thread_id = unsafe { GetCurrentThreadId() };
+    // Force creation of the thread message queue before publishing readiness,
+    // so Drop can always wake GetMessageW with WM_QUIT.
+    let mut message: MSG = unsafe { std::mem::zeroed() };
+    unsafe {
+        let _ = PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+    }
+
+    let module = unsafe { GetModuleHandleW(std::ptr::null()) };
+    if module.is_null() {
+        let _ = ready.send(Err("GetModuleHandleW failed for hotkey hook".to_string()));
+        return;
+    }
+    let hook = unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(low_level_keyboard_proc),
+            module,
+            0,
+        )
+    };
+    if hook.is_null() {
+        let _ = ready.send(Err("SetWindowsHookExW(WH_KEYBOARD_LL) failed".to_string()));
+        return;
+    }
+
+    let dispatch = HOOK_DISPATCH.get_or_init(|| StdMutex::new(None));
+    {
+        let Ok(mut slot) = dispatch.lock() else {
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            let _ = ready.send(Err("hotkey hook state lock is poisoned".to_string()));
+            return;
+        };
+        if slot.is_some() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            let _ = ready.send(Err("a hotkey hook is already running".to_string()));
+            return;
+        }
+        *slot = Some(HookDispatch { tracker, sender });
+    }
+    let _ = ready.send(Ok(thread_id));
+
+    loop {
+        let result = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
+        if result <= 0 {
+            break;
+        }
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    if let Ok(mut slot) = dispatch.lock() {
+        *slot = None;
+    }
+    unsafe {
+        let _ = UnhookWindowsHookEx(hook);
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
+
+    if code >= 0 {
+        let pressed = wparam == WM_KEYDOWN as usize || wparam == WM_SYSKEYDOWN as usize;
+        let released = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
+        if pressed || released {
+            let event = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if let Some(dispatch) = HOOK_DISPATCH.get() {
+                if let Ok(mut state) = dispatch.lock() {
+                    if let Some(state) = state.as_mut() {
+                        for signal in state.tracker.key_event(event.vkCode as u16, pressed) {
+                            let _ = state.sender.send(signal);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +655,10 @@ fn vk_f(number: u8) -> u16 {
 mod tests {
     use super::*;
 
+    fn tracker() -> HotkeyEdgeTracker {
+        HotkeyEdgeTracker::new(&HotkeyConfig::default()).expect("default tracker")
+    }
+
     #[test]
     fn default_hotkeys_are_valid() {
         let manager =
@@ -407,5 +700,86 @@ mod tests {
         let parsed = parse_combo("toggle", "Ctrl+F13").expect("combo should parse");
         assert!(parsed.ctrl);
         assert_eq!(parsed.main_vk, vk_f(13));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_event_runtime_installs_and_shuts_down_cleanly() {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = HotkeyRuntime::start(HotkeyConfig::default(), sender)
+            .expect("Windows low-level keyboard hook should install");
+        drop(runtime);
+    }
+
+    #[test]
+    fn toggle_edge_fires_once_even_for_a_short_press_and_ignores_repeat() {
+        let mut tracker = tracker();
+        assert!(tracker.key_event(VK_LCONTROL_, true).is_empty());
+        assert!(tracker.key_event(VK_LMENU_, true).is_empty());
+        assert_eq!(
+            tracker.key_event(b'X' as u16, true),
+            vec![HotkeySignal {
+                action: HotkeyAction::ToggleDictation,
+                phase: HotkeyPhase::Triggered,
+            }]
+        );
+        assert!(tracker.key_event(b'X' as u16, true).is_empty());
+        assert!(tracker.key_event(b'X' as u16, false).is_empty());
+    }
+
+    #[test]
+    fn push_to_talk_emits_edges_when_modifiers_arrive_in_either_order() {
+        for (first, second) in [(VK_LCONTROL_, VK_LWIN_), (VK_RWIN_, VK_RCONTROL_)] {
+            let mut tracker = tracker();
+            assert!(tracker.key_event(first, true).is_empty());
+            assert_eq!(
+                tracker.key_event(second, true),
+                vec![HotkeySignal {
+                    action: HotkeyAction::PushToTalk,
+                    phase: HotkeyPhase::Pressed,
+                }]
+            );
+            assert_eq!(
+                tracker.key_event(second, false),
+                vec![HotkeySignal {
+                    action: HotkeyAction::PushToTalk,
+                    phase: HotkeyPhase::Released,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn rapid_push_press_release_is_never_debounced_away() {
+        let mut tracker = tracker();
+        assert!(tracker.key_event(VK_LCONTROL_, true).is_empty());
+        assert_eq!(tracker.key_event(VK_LWIN_, true).len(), 1);
+        assert_eq!(tracker.key_event(VK_LWIN_, false).len(), 1);
+    }
+
+    #[test]
+    fn push_auto_repeat_and_release_bounce_do_not_duplicate_edges() {
+        let mut tracker = tracker();
+        assert!(tracker.key_event(VK_LCONTROL_, true).is_empty());
+        assert_eq!(tracker.key_event(VK_LWIN_, true).len(), 1);
+        assert!(tracker.key_event(VK_LWIN_, true).is_empty());
+        assert_eq!(tracker.key_event(VK_LWIN_, false).len(), 1);
+        assert!(tracker.key_event(VK_LWIN_, false).is_empty());
+    }
+
+    #[test]
+    fn releasing_one_of_two_control_keys_keeps_push_session_active() {
+        let mut tracker = tracker();
+        assert!(tracker.key_event(VK_LCONTROL_, true).is_empty());
+        assert!(tracker.key_event(VK_RCONTROL_, true).is_empty());
+        assert_eq!(tracker.key_event(VK_LWIN_, true).len(), 1);
+        assert!(tracker.key_event(VK_LCONTROL_, false).is_empty());
+        assert_eq!(
+            tracker.key_event(VK_LWIN_, false),
+            vec![HotkeySignal {
+                action: HotkeyAction::PushToTalk,
+                phase: HotkeyPhase::Released,
+            }]
+        );
     }
 }
