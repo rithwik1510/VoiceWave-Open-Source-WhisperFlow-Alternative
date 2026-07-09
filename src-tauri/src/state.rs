@@ -23,7 +23,10 @@ use crate::{
         HistoryError, HistoryExportPreset, HistoryExportResult, HistoryManager, RetentionPolicy,
         SessionHistoryQuery, SessionHistoryRecord,
     },
-    hotkey::{HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager, HotkeyPhase, HotkeySnapshot},
+    hotkey::{
+        HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager, HotkeyPhase, HotkeyRuntime,
+        HotkeySnapshot,
+    },
     inference::{
         cpu_runtime_pool_enabled, ensure_faster_whisper_ready, faster_whisper_cache_hint,
         faster_whisper_runtime_model_id, is_faster_whisper_model,
@@ -1003,10 +1006,10 @@ enum PushReleaseDecision {
 /// dictation session running until the 12 s max-capture timeout. The user
 /// symptom was "I released but the pill didn't stop."
 ///
-/// The monitor's 3-sample debounce is the authoritative source of truth for
+/// The event-driven keyboard hook is the authoritative source of truth for
 /// release. If the user genuinely re-pressed immediately after releasing,
-/// the monitor will emit a subsequent Pressed event for the new session —
-/// we don't lose anything by acting on the Released event we received.
+/// it emits a subsequent Pressed edge for the new session — we don't lose
+/// anything by acting on the Released event already received.
 fn push_to_talk_release_decision(session_eligible: bool) -> PushReleaseDecision {
     if session_eligible {
         PushReleaseDecision::Stop
@@ -1063,6 +1066,13 @@ fn play_hotkey_phase_cue(action: &HotkeyAction, phase: &HotkeyPhase) {
             }
         }
     }
+}
+
+fn play_cue_without_blocking(cue: crate::cue::CueSound) {
+    // Re-establishing a WASAPI stream can involve a slow driver call. Audio
+    // recovery must never hold up the Listening state event that makes the
+    // pill visible, so cue supervision runs on the blocking pool.
+    tauri::async_runtime::spawn_blocking(move || crate::cue::play(cue));
 }
 
 #[derive(Debug, Clone)]
@@ -1222,7 +1232,7 @@ pub struct VoiceWaveController {
     // signal. Errors and fallback pills are unaffected. Arc so the
     // fire-and-forget polish task can own a clone without borrowing self.
     polish_success_count: Arc<AtomicU64>,
-    hotkey_runtime_monitor: Mutex<Option<Arc<AtomicBool>>>,
+    hotkey_runtime: Mutex<Option<HotkeyRuntime>>,
     mic_level_monitor: Mutex<Option<Arc<AtomicBool>>>,
     decode_policy: Mutex<RuntimeDecodePolicy>,
     correction_session: Mutex<Option<CorrectionSession>>,
@@ -1347,7 +1357,7 @@ impl VoiceWaveController {
             session_counter: AtomicU64::new(0),
             watchdog_recovery_count: AtomicU64::new(0),
             polish_success_count: Arc::new(AtomicU64::new(0)),
-            hotkey_runtime_monitor: Mutex::new(None),
+            hotkey_runtime: Mutex::new(None),
             mic_level_monitor: Mutex::new(None),
             decode_policy: Mutex::new(RuntimeDecodePolicy::default()),
             correction_session: Mutex::new(None),
@@ -1556,7 +1566,7 @@ impl VoiceWaveController {
     }
 
     pub async fn start_dictation(
-        &self,
+        self: &Arc<Self>,
         app: AppHandle,
         mode: DictationMode,
     ) -> Result<(), ControllerError> {
@@ -1565,7 +1575,7 @@ impl VoiceWaveController {
     }
 
     async fn start_dictation_with_trigger(
-        &self,
+        self: &Arc<Self>,
         app: AppHandle,
         mode: DictationMode,
         trigger: DictationStartTrigger,
@@ -1592,7 +1602,7 @@ impl VoiceWaveController {
         // open cue the moment the press is accepted, before mic-stream setup
         // adds 50-200 ms. (Fixture runs stay silent.)
         if mode == DictationMode::Microphone {
-            crate::cue::play(crate::cue::CueSound::Open);
+            play_cue_without_blocking(crate::cue::CueSound::Open);
         }
 
         let session_id = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1615,47 +1625,86 @@ impl VoiceWaveController {
             flag
         };
 
-        let run_result = self
-            .run_dictation_flow(app.clone(), mode, session_id, trigger, cancel_token, stop_flag)
-            .await;
-        {
-            let mut token_slot = self.cancel_token.lock().await;
-            *token_slot = None;
-        }
-        {
-            let mut stop_slot = self.stop_flag.lock().await;
-            *stop_slot = None;
-        }
-        {
-            let mut active = self.active_session.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|session| session.session_id == session_id)
-            {
-                *active = None;
-            }
-        }
-        if let Err(err) = run_result {
-            self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
-                .await;
+        // Feedback is an invariant of accepting the physical action, not of
+        // successfully opening the microphone. Publishing Listening here
+        // guarantees the pill appears alongside the cue even when device
+        // setup is slow; a later setup failure transitions it to Error.
+        if mode == DictationMode::Microphone {
             self.update_state(
                 &app,
-                VoiceWaveHudState::Error,
-                Some(format!("Dictation failed: {err}")),
+                VoiceWaveHudState::Listening,
+                Some("Listening for speech...".to_string()),
             )
             .await;
-            // The pill's error color-flash carries no text; the notice is the
-            // only place the user actually learns what went wrong.
-            let (notice_title, notice_detail) = match &err {
-                ControllerError::MissingModel(_) => (
-                    "Install a model to start",
-                    "Double-click the pill, open Models, and install fw-small.en.".to_string(),
-                ),
-                _ => ("Dictation failed", err.to_string()),
-            };
-            emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
-            return Err(err);
         }
+
+        // The start command now returns once the session is accepted. Keeping
+        // the long capture/decode flow in its own task lets the event-driven
+        // hotkey dispatcher process a rapid release only after active_session
+        // and stop_flag are fully established, eliminating the old start/
+        // release task race.
+        let controller = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let run_result = controller
+                .run_dictation_flow(
+                    app.clone(),
+                    mode,
+                    session_id,
+                    trigger,
+                    cancel_token,
+                    stop_flag,
+                )
+                .await;
+            let still_owns_session = {
+                let mut active = controller.active_session.lock().await;
+                if active
+                    .as_ref()
+                    .is_some_and(|session| session.session_id == session_id)
+                {
+                    *active = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            // A cancelled session may be replaced immediately. Never let the
+            // old task clear the replacement session's token or stop flag.
+            if still_owns_session {
+                let mut token_slot = controller.cancel_token.lock().await;
+                *token_slot = None;
+                drop(token_slot);
+                let mut stop_slot = controller.stop_flag.lock().await;
+                *stop_slot = None;
+            }
+            if let Err(err) = run_result {
+                if !still_owns_session {
+                    eprintln!(
+                        "voicewave: stale dictation session {session_id} failed after replacement: {err}"
+                    );
+                    return;
+                }
+                controller
+                    .set_session_state(session_id, DictationLifecycleState::Error, None, None)
+                    .await;
+                controller
+                    .update_state(
+                        &app,
+                        VoiceWaveHudState::Error,
+                        Some(format!("Dictation failed: {err}")),
+                    )
+                    .await;
+                // The pill's error color-flash carries no text; the notice is
+                // the only place the user actually learns what went wrong.
+                let (notice_title, notice_detail) = match &err {
+                    ControllerError::MissingModel(_) => (
+                        "Install a model to start",
+                        "Double-click the pill, open Models, and install fw-small.en.".to_string(),
+                    ),
+                    _ => ("Dictation failed", err.to_string()),
+                };
+                emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+            }
+        });
         Ok(())
     }
 
@@ -1664,7 +1713,7 @@ impl VoiceWaveController {
             // Close cue on the physical cancel action (not the later state
             // transition), and only when a session was actually running.
             if !token.is_cancelled() {
-                crate::cue::play(crate::cue::CueSound::Close);
+                play_cue_without_blocking(crate::cue::CueSound::Close);
             }
             token.cancel();
         }
@@ -1694,7 +1743,7 @@ impl VoiceWaveController {
             );
             // Close cue on the physical release action — immediate feedback,
             // independent of how long transcription takes afterwards.
-            crate::cue::play(crate::cue::CueSound::Close);
+            play_cue_without_blocking(crate::cue::CueSound::Close);
         } else {
             eprintln!("voicewave: stop_dictation requested with no active session");
         }
@@ -1726,106 +1775,46 @@ impl VoiceWaveController {
     }
 
     pub async fn ensure_hotkey_runtime_monitor(self: Arc<Self>, app: AppHandle) {
-        let mut slot = self.hotkey_runtime_monitor.lock().await;
+        let mut slot = self.hotkey_runtime.lock().await;
         if slot.is_some() {
             return;
         }
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        *slot = Some(stop_flag.clone());
+        let config = self.hotkey_manager.lock().await.config();
+        let (event_tx, mut event_rx) = unbounded_channel();
+        match HotkeyRuntime::start(config, event_tx) {
+            Ok(runtime) => {
+                *slot = Some(runtime);
+                eprintln!("voicewave: event-driven global hotkey runtime started");
+            }
+            Err(err) => {
+                eprintln!("voicewave: global hotkey runtime unavailable: {err}");
+                emit_pill_notice(
+                    &app,
+                    "error",
+                    "VoiceWave hotkeys are unavailable",
+                    Some(
+                        "Restart VoiceWave. If this continues, export diagnostics from Settings."
+                            .to_string(),
+                    ),
+                    8_000,
+                );
+                return;
+            }
+        }
         drop(slot);
 
         let controller = self.clone();
         tauri::async_runtime::spawn(async move {
-            eprintln!(
-                "voicewave: global hotkey runtime monitor started (Windows key-state polling)"
-            );
-            const PUSH_PRESS_CONFIRM_SAMPLES: u8 = 2;
-            const PUSH_RELEASE_CONFIRM_SAMPLES: u8 = 3;
-            let mut toggle_was_down = false;
-            let mut push_was_down = false;
-            let mut push_down_streak: u8 = 0;
-            let mut push_up_streak: u8 = 0;
-            loop {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
+            while let Some(signal) = event_rx.recv().await {
+                if let Err(err) = controller
+                    .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
+                    .await
+                {
+                    eprintln!("voicewave: hotkey action failed: {err}");
                 }
-
-                let (toggle_down, push_down) = {
-                    let manager = controller.hotkey_manager.lock().await;
-                    (
-                        manager.is_action_pressed(HotkeyAction::ToggleDictation),
-                        manager.is_action_pressed(HotkeyAction::PushToTalk),
-                    )
-                };
-
-                if toggle_down && !toggle_was_down {
-                    let controller_for_action = controller.clone();
-                    let app_for_action = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = controller_for_action
-                            .trigger_hotkey_action(
-                                app_for_action,
-                                HotkeyAction::ToggleDictation,
-                                HotkeyPhase::Triggered,
-                            )
-                            .await;
-                    });
-                }
-
-                if push_down {
-                    if !push_was_down {
-                        push_down_streak = push_down_streak.saturating_add(1);
-                    }
-                } else if !push_was_down {
-                    push_down_streak = 0;
-                }
-
-                // Debounce polling edges to avoid transient press/release oscillation
-                // on Windows key state sampling.
-                if !push_was_down && push_down_streak >= PUSH_PRESS_CONFIRM_SAMPLES {
-                    let controller_for_action = controller.clone();
-                    let app_for_action = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = controller_for_action
-                            .trigger_hotkey_action(
-                                app_for_action,
-                                HotkeyAction::PushToTalk,
-                                HotkeyPhase::Pressed,
-                            )
-                            .await;
-                    });
-                    push_was_down = true;
-                    push_down_streak = 0;
-                    push_up_streak = 0;
-                } else if push_was_down {
-                    if push_down {
-                        push_up_streak = 0;
-                    } else {
-                        push_up_streak = push_up_streak.saturating_add(1);
-                    }
-                }
-
-                if push_was_down && push_up_streak >= PUSH_RELEASE_CONFIRM_SAMPLES {
-                    let controller_for_action = controller.clone();
-                    let app_for_action = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = controller_for_action
-                            .trigger_hotkey_action(
-                                app_for_action,
-                                HotkeyAction::PushToTalk,
-                                HotkeyPhase::Released,
-                            )
-                            .await;
-                    });
-                    push_was_down = false;
-                    push_down_streak = 0;
-                    push_up_streak = 0;
-                }
-
-                toggle_was_down = toggle_down;
-                sleep(Duration::from_millis(15)).await;
             }
+            eprintln!("voicewave: global hotkey event channel closed");
         });
     }
 
@@ -2150,7 +2139,7 @@ impl VoiceWaveController {
     }
 
     pub async fn trigger_hotkey_action(
-        &self,
+        self: &Arc<Self>,
         app: AppHandle,
         action: HotkeyAction,
         phase: HotkeyPhase,
@@ -2179,13 +2168,6 @@ impl VoiceWaveController {
                 }
             }
             (HotkeyAction::PushToTalk, HotkeyPhase::Pressed) => {
-                let still_pressed = {
-                    let manager = self.hotkey_manager.lock().await;
-                    manager.is_action_pressed(HotkeyAction::PushToTalk)
-                };
-                if !still_pressed {
-                    return Ok(());
-                }
                 if self.is_dictation_active().await {
                     Ok(())
                 } else {
@@ -2198,11 +2180,11 @@ impl VoiceWaveController {
                 }
             }
             (HotkeyAction::PushToTalk, HotkeyPhase::Released) => {
-                // Trust the monitor's ~45 ms release debounce. A re-check of
-                // GetAsyncKeyState here used to drop the event if it caught a
-                // transient re-press, leaving capture running until the 12 s
-                // max timeout. See push_to_talk_release_decision for full
-                // rationale.
+                // Trust the keyboard hook's Released edge. A live
+                // GetAsyncKeyState re-check here used to drop the event if it
+                // caught a transient re-press, leaving capture running until
+                // the 12 s max timeout. See push_to_talk_release_decision for
+                // full rationale.
                 let session_eligible = self.active_push_session_ready_for_release().await;
                 match push_to_talk_release_decision(session_eligible) {
                     PushReleaseDecision::Stop => {
@@ -3030,7 +3012,7 @@ impl VoiceWaveController {
         app: AppHandle,
         mode: DictationMode,
         session_id: u64,
-        trigger: DictationStartTrigger,
+        _trigger: DictationStartTrigger,
         cancel_token: CancellationToken,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<(), ControllerError> {
