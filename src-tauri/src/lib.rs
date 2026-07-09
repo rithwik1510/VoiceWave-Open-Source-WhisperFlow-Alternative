@@ -142,13 +142,15 @@ fn ensure_pill_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, St
     let window = builder
         .build()
         .map_err(|err| format!("failed to create floating pill window: {err}"))?;
-    position_pill_window(
+    if let Err(err) = position_pill_window(
         app,
         &window,
         PILL_WINDOW_COMPACT_WIDTH,
         PILL_WINDOW_COMPACT_HEIGHT,
         PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-    );
+    ) {
+        eprintln!("voicewave: initial pill positioning deferred: {err}");
+    }
     Ok(window)
 }
 
@@ -159,7 +161,7 @@ fn position_pill_window(
     width_logical: f64,
     height_logical: f64,
     bottom_margin_logical: f64,
-) {
+) -> Result<(), String> {
     // Anchor the pill to the monitor the user is actually working on (cursor
     // position), not the main window's monitor: the main window is usually
     // minimized to tray, and on multi-monitor setups it can be parked on a
@@ -175,9 +177,7 @@ fn position_pill_window(
         })
         .or_else(|| app.primary_monitor().ok().flatten());
 
-    let Some(monitor) = monitor else {
-        return;
-    };
+    let monitor = monitor.ok_or_else(|| "no monitor available for floating pill".to_string())?;
 
     // work_area is in physical pixels; the pill dimensions are logical, so
     // scale them before mixing the two or the pill drifts off-center (and
@@ -192,29 +192,59 @@ fn position_pill_window(
     let nudge_x = ((PILL_WINDOW_NUDGE_X as f64) * scale).round() as i32;
     let x = work_area.position.x + center_offset_x + nudge_x;
     let y = work_area.position.y + bottom_offset_y;
-    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(|err| format!("failed to position floating pill: {err}"))
+}
+
+#[cfg(feature = "desktop")]
+fn show_pill_for_listening(app: &tauri::AppHandle) -> Result<(), String> {
+    let pill = ensure_pill_window(app)?;
+
+    // Showing is the final, non-negotiable operation. Failures in cosmetic
+    // setup are logged but must never prevent a valid existing pill window
+    // from becoming visible when dictation has been accepted.
+    if let Err(err) = pill.set_ignore_cursor_events(true) {
+        eprintln!("voicewave: failed to make listening pill click-through: {err}");
+    }
+    if let Err(err) = pill.set_size(Size::Logical(LogicalSize::new(
+        PILL_WINDOW_COMPACT_WIDTH,
+        PILL_WINDOW_COMPACT_HEIGHT,
+    ))) {
+        eprintln!("voicewave: failed to restore listening pill size: {err}");
+    }
+    if let Err(err) = position_pill_window(
+        app,
+        &pill,
+        PILL_WINDOW_COMPACT_WIDTH,
+        PILL_WINDOW_COMPACT_HEIGHT,
+        PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
+    ) {
+        eprintln!("voicewave: failed to re-anchor listening pill: {err}");
+    }
+    pill.show()
+        .map_err(|err| format!("failed to show listening pill: {err}"))
+}
+
+#[cfg(feature = "desktop")]
+fn state_payload_is_listening(payload: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|state| state == "listening")
 }
 
 #[cfg(feature = "desktop")]
 fn sync_pill_visibility(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
-    let pill = ensure_pill_window(app)?;
-    // Keep the floating pill purely visual so it never steals pointer focus from the main window.
-    let _ = pill.set_ignore_cursor_events(true);
     if visible {
-        let _ = pill.set_size(Size::Logical(LogicalSize::new(
-            PILL_WINDOW_COMPACT_WIDTH,
-            PILL_WINDOW_COMPACT_HEIGHT,
-        )));
-        position_pill_window(
-            app,
-            &pill,
-            PILL_WINDOW_COMPACT_WIDTH,
-            PILL_WINDOW_COMPACT_HEIGHT,
-            PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-        );
-        pill.show()
-            .map_err(|err| format!("failed to show floating pill: {err}"))?;
+        show_pill_for_listening(app)?;
     } else {
+        let pill = ensure_pill_window(app)?;
         pill.hide()
             .map_err(|err| format!("failed to hide floating pill: {err}"))?;
     }
@@ -494,7 +524,7 @@ async fn set_pill_review_mode(app: tauri::AppHandle, review_mode: bool) -> Resul
             PILL_WINDOW_REVIEW_WIDTH,
             PILL_WINDOW_REVIEW_HEIGHT,
             PILL_WINDOW_REVIEW_BOTTOM_MARGIN,
-        );
+        )?;
     } else {
         let _ = pill.set_ignore_cursor_events(true);
         pill.set_size(Size::Logical(LogicalSize::new(
@@ -508,7 +538,7 @@ async fn set_pill_review_mode(app: tauri::AppHandle, review_mode: bool) -> Resul
             PILL_WINDOW_COMPACT_WIDTH,
             PILL_WINDOW_COMPACT_HEIGHT,
             PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-        );
+        )?;
     }
     Ok(())
 }
@@ -540,7 +570,7 @@ async fn set_pill_notice_mode(
     };
     pill.set_size(Size::Logical(LogicalSize::new(width, height)))
         .map_err(|err| format!("failed to resize floating pill for notice: {err}"))?;
-    position_pill_window(&app, &pill, width, height, margin);
+    position_pill_window(&app, &pill, width, height, margin)?;
     // A notice must be visible even when the pill was hidden (e.g. idle with
     // HUD hidden between dictations).
     if notice_mode {
@@ -1203,10 +1233,10 @@ async fn download_polish_model(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(feature = "desktop")]
 pub fn run() {
     tauri::Builder::default()
-        // Single instance: the push-to-talk monitor polls GetAsyncKeyState,
-        // so two running processes would BOTH capture and insert every
-        // dictation (text lands twice). A second launch must focus the
-        // existing window instead. Must be the first plugin registered.
+        // Single instance: two event-driven keyboard hooks would BOTH capture
+        // and insert every dictation (text lands twice). A second launch must
+        // focus the existing window instead. Must be the first plugin
+        // registered.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -1245,6 +1275,7 @@ pub fn run() {
                 controller_for_prewarm.prewarm_active_model().await;
             });
 
+            let controller_for_pill_state = controller.clone();
             app.manage(RuntimeContext { controller });
 
             let app_handle = app.handle().clone();
@@ -1262,25 +1293,29 @@ pub fn run() {
                 })?;
             // Open the cue output stream now so the first hotkey press
             // doesn't pay the audio-device-open latency.
-            cue::prewarm();
-            // Re-anchor the pill to the active monitor at the start of every
-            // dictation. The cursor can move between displays at any time, so
-            // a position chosen at app launch goes stale on multi-monitor
-            // setups.
+            tauri::async_runtime::spawn_blocking(cue::prewarm);
+            // Reassert the complete visible-pill invariant at the start of
+            // every accepted dictation. The window can have been recreated
+            // hidden after a WebView failure, collapsed from review mode, or
+            // left on a stale monitor; positioning alone was not enough.
             {
-                let reposition_handle = app.handle().clone();
+                let listening_handle = app.handle().clone();
                 app.handle().listen("voicewave://state", move |event| {
-                    if event.payload().contains("\"listening\"") {
-                        if let Ok(pill) = ensure_pill_window(&reposition_handle) {
-                            position_pill_window(
-                                &reposition_handle,
-                                &pill,
-                                PILL_WINDOW_COMPACT_WIDTH,
-                                PILL_WINDOW_COMPACT_HEIGHT,
-                                PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-                            );
-                        }
+                    if !state_payload_is_listening(event.payload()) {
+                        return;
                     }
+                    let handle = listening_handle.clone();
+                    let controller = controller_for_pill_state.clone();
+                    tauri::async_runtime::spawn(async move {
+                        // Preserve the explicit user preference to disable
+                        // the HUD; otherwise every Listening transition must
+                        // end with a visible compact pill.
+                        if controller.load_settings().await.show_floating_hud {
+                            if let Err(err) = show_pill_for_listening(&handle) {
+                                eprintln!("voicewave: listening pill recovery failed: {err}");
+                            }
+                        }
+                    });
                 });
             }
             Ok(())
@@ -1362,4 +1397,20 @@ pub fn run() {
 #[cfg(not(feature = "desktop"))]
 pub fn run() {
     panic!("desktop runtime requested without the 'desktop' feature enabled")
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod desktop_tests {
+    use super::state_payload_is_listening;
+
+    #[test]
+    fn pill_recovery_only_runs_for_exact_listening_state() {
+        assert!(state_payload_is_listening(
+            r#"{"state":"listening","message":"Listening for speech..."}"#
+        ));
+        assert!(!state_payload_is_listening(
+            r#"{"state":"processing","message":"listening back"}"#
+        ));
+        assert!(!state_payload_is_listening("not json"));
+    }
 }
