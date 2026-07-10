@@ -299,7 +299,6 @@ export function Onboarding({
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
-  const _downloading = !modelReady && (status?.state === "downloading" || downloadStarted);
   const downloadFailed = !modelReady && status?.state === "failed";
   const progress = modelReady ? 100 : Math.max(0, Math.min(100, status?.progress ?? 0));
   const catalogRow = catalog.find((row) => row.modelId === modelChoice);
