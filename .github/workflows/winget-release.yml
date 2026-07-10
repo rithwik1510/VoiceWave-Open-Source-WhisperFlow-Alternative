@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag to publish (e.g. v0.2.0)"
+        description: "Release tag to publish (e.g. v0.5.1)"
         required: true
         type: string
 
@@ -16,11 +16,54 @@ jobs:
   publish:
     runs-on: windows-latest
     steps:
+      - name: Derive winget version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          # winget package versions carry NO "v" prefix (the published
+          # VoiceWave.LocalCore manifests are versioned 0.3.1, not v0.3.1).
+          # The GitHub release tag DOES carry the "v" (v0.5.1). Strip it here
+          # so the manifest version is well-formed; passing the raw tag would
+          # publish a malformed "v0.5.1" version that winget clients reject.
+          $tag = "${{ inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "No release tag provided." }
+          $version = $tag -replace '^v', ''
+          "version=$version"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Publishing winget version '$version' from tag '$tag'"
+
+      - name: Preflight — validate WINGET PAT (fail loudly)
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET }}
+        run: |
+          # A missing/expired/under-scoped WINGET PAT is exactly how winget
+          # publishing rotted silently for several releases. Catch it here with
+          # a hard, actionable failure BEFORE the submit step, so the run turns
+          # red (and emails on failure) instead of appearing to succeed.
+          $token = $env:WINGET_TOKEN
+          if ([string]::IsNullOrWhiteSpace($token)) {
+            throw "The 'WINGET' repository secret is empty or unset. Create a CLASSIC PAT with the 'public_repo' scope and save it as the 'WINGET' Actions secret (repo Settings > Secrets and variables > Actions)."
+          }
+          $headers = @{ Authorization = "token $token"; "User-Agent" = "voicewave-release"; Accept = "application/vnd.github+json" }
+          try {
+            $resp = Invoke-WebRequest -Uri "https://api.github.com/user" -Headers $headers -Method Get -UseBasicParsing
+          } catch {
+            throw "The 'WINGET' PAT failed to authenticate against the GitHub API (likely expired or invalid). Regenerate a CLASSIC PAT with 'public_repo' and update the 'WINGET' secret. Details: $($_.Exception.Message)"
+          }
+          $login  = ($resp.Content | ConvertFrom-Json).login
+          $scopes = ($resp.Headers["X-OAuth-Scopes"] -join ', ')
+          Write-Host "WINGET PAT authenticated as '$login'. Scopes: '$scopes'"
+          if ($scopes -notmatch '(?:^|,\s*)(?:public_repo|repo)(?:\s*,|$)') {
+            throw "The 'WINGET' PAT is missing the 'public_repo' (or 'repo') scope required to fork microsoft/winget-pkgs and open a PR. Current scopes: '$scopes'. Regenerate a CLASSIC PAT with 'public_repo' and update the 'WINGET' secret."
+          }
+          Write-Host "WINGET PAT preflight OK."
+
       - name: Submit manifest to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: VoiceWave.LocalCore
           installers-regex: 'VoiceWave\.Local\.Core_.*_x64-setup\.exe$'
-          version: ${{ inputs.version || github.event.release.tag_name }}
-          release-tag: ${{ inputs.version || github.event.release.tag_name }}
+          version: ${{ steps.ver.outputs.version }}
+          release-tag: ${{ steps.ver.outputs.tag }}
           token: ${{ secrets.WINGET }}
