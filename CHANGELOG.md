@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.2] – 2026-07-10
+
+### Fixed
+
+- **Event-driven global hotkeys.** Replaced the polling `GetAsyncKeyState` monitor with a Windows low-level keyboard hook. Push-to-talk release is now instant — no debounce delay — and auto-repeat/bounce no longer produce duplicate edges.
+- **Resilient cue audio.** Rewrote the cue system with worker health tracking and device fingerprinting, so it survives output device switches mid-session and recovers gracefully from transient audio failures.
+- **Pill appears instantly on Listening.** The floating pill is now fully re-established (size, position, click-through, visibility) before mic device setup begins, so users see feedback immediately on hotkey press.
+- **Dictation session race eliminated.** The capture/decode flow runs in its own task, letting the event-driven hotkey dispatcher process a rapid push-to-talk release without the old start/release task race.
+
+---
+
 ## [0.5.1] – 2026-07-05
 
 ### Added
