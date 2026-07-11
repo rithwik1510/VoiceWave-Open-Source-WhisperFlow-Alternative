@@ -49,6 +49,48 @@ pub struct SessionHistoryRecord {
     pub tags: Vec<String>,
     #[serde(default)]
     pub starred: bool,
+    /// Plan 010 polish-profile fields. All optional with serde defaults so
+    /// records persisted before profiles existed parse unchanged, and
+    /// `skip_serializing_if` so old-shaped records stay old-shaped on disk
+    /// and the frontend sees `undefined` (not `null`) when absent.
+    ///
+    /// Profile active for this dictation: "standard" | "coding" | "writing"
+    /// | "casual" | "literal".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_profile: Option<String>,
+    /// Exactly what landed in the target app (polished text on `accepted`,
+    /// the deterministic floor otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inserted_text: Option<String>,
+    /// The validated LLM candidate, when one was produced (may arrive after
+    /// insertion via an async update keyed to `record_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polished_text: Option<String>,
+    /// "accepted" | "fallbackTimeout" | "fallbackRejected" | "literal" |
+    /// "disabled".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_outcome: Option<String>,
+    /// Real polish wait on the wait-validated path (or async polish duration
+    /// on the offer path), in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_latency_ms: Option<u64>,
+    /// Whether a retry pass ran for this record. Always `Some(false)` today:
+    /// the async retry-with-correction pass is not implemented yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_retried: Option<bool>,
+}
+
+/// Polish-profile metadata attached to a history record at insertion time or
+/// merged in later (async updates through the stable `record_id`). `None`
+/// fields are left untouched on merge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolishHistoryMeta {
+    pub selected_profile: Option<String>,
+    pub inserted_text: Option<String>,
+    pub polished_text: Option<String>,
+    pub polish_outcome: Option<String>,
+    pub polish_latency_ms: Option<u64>,
+    pub polish_retried: Option<bool>,
 }
 
 impl SessionHistoryRecord {
@@ -230,16 +272,19 @@ impl HistoryManager {
             .collect()
     }
 
+    /// Record an insertion. Returns the new record's id (for later async
+    /// polish-meta updates), or `None` when retention is Off.
     pub fn record_insertion(
         &mut self,
         result: &InsertResult,
         text: &str,
-    ) -> Result<(), HistoryError> {
+        polish: Option<&PolishHistoryMeta>,
+    ) -> Result<Option<String>, HistoryError> {
         if self.store.retention_policy == RetentionPolicy::Off {
-            return Ok(());
+            return Ok(None);
         }
 
-        let record = SessionHistoryRecord {
+        let mut record = SessionHistoryRecord {
             record_id: self.next_record_id(),
             timestamp_utc_ms: now_utc_ms(),
             preview: text.chars().take(140).collect(),
@@ -250,16 +295,37 @@ impl HistoryManager {
             message: result.message.clone(),
             tags: Vec::new(),
             starred: false,
+            selected_profile: None,
+            inserted_text: None,
+            polished_text: None,
+            polish_outcome: None,
+            polish_latency_ms: None,
+            polish_retried: None,
         };
-        self.append_record(record)
+        if let Some(meta) = polish {
+            apply_polish_meta(&mut record, meta);
+        }
+        let record_id = record.record_id.clone();
+        self.append_record(record)?;
+        Ok(Some(record_id))
     }
 
-    pub fn record_transcript(&mut self, transcript: &str) -> Result<(), HistoryError> {
+    pub fn record_transcript(&mut self, transcript: &str) -> Result<Option<String>, HistoryError> {
+        self.record_transcript_with_polish(transcript, None)
+    }
+
+    /// Rescue-path transcript record (insertion errored before persisting).
+    /// Returns the new record's id, or `None` when retention is Off.
+    pub fn record_transcript_with_polish(
+        &mut self,
+        transcript: &str,
+        polish: Option<&PolishHistoryMeta>,
+    ) -> Result<Option<String>, HistoryError> {
         if self.store.retention_policy == RetentionPolicy::Off {
-            return Ok(());
+            return Ok(None);
         }
 
-        let record = SessionHistoryRecord {
+        let mut record = SessionHistoryRecord {
             record_id: self.next_record_id(),
             timestamp_utc_ms: now_utc_ms(),
             preview: transcript.chars().take(140).collect(),
@@ -270,8 +336,40 @@ impl HistoryManager {
             message: None,
             tags: Vec::new(),
             starred: false,
+            selected_profile: None,
+            inserted_text: None,
+            polished_text: None,
+            polish_outcome: None,
+            polish_latency_ms: None,
+            polish_retried: None,
         };
-        self.append_record(record)
+        if let Some(meta) = polish {
+            apply_polish_meta(&mut record, meta);
+        }
+        let record_id = record.record_id.clone();
+        self.append_record(record)?;
+        Ok(Some(record_id))
+    }
+
+    /// Merge polish metadata into an existing record (async updates through
+    /// the stable `record_id`, e.g. a polish result that finished after the
+    /// wait budget expired). `None` fields in `meta` leave the record's
+    /// values untouched.
+    pub fn update_polish_meta(
+        &mut self,
+        record_id: &str,
+        meta: &PolishHistoryMeta,
+    ) -> Result<SessionHistoryRecord, HistoryError> {
+        let row = self
+            .store
+            .records
+            .iter_mut()
+            .find(|row| row.record_id == record_id)
+            .ok_or_else(|| HistoryError::RecordNotFound(record_id.to_string()))?;
+        apply_polish_meta(row, meta);
+        let updated = row.clone();
+        self.persist()?;
+        Ok(updated)
     }
 
     /// Push a new record, enforce the count cap, prune expired records, then persist.
@@ -487,6 +585,28 @@ impl HistoryManager {
     }
 }
 
+/// Merge non-`None` polish meta fields onto a record.
+fn apply_polish_meta(record: &mut SessionHistoryRecord, meta: &PolishHistoryMeta) {
+    if meta.selected_profile.is_some() {
+        record.selected_profile = meta.selected_profile.clone();
+    }
+    if meta.inserted_text.is_some() {
+        record.inserted_text = meta.inserted_text.clone();
+    }
+    if meta.polished_text.is_some() {
+        record.polished_text = meta.polished_text.clone();
+    }
+    if meta.polish_outcome.is_some() {
+        record.polish_outcome = meta.polish_outcome.clone();
+    }
+    if meta.polish_latency_ms.is_some() {
+        record.polish_latency_ms = meta.polish_latency_ms;
+    }
+    if meta.polish_retried.is_some() {
+        record.polish_retried = meta.polish_retried;
+    }
+}
+
 fn now_utc_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -597,6 +717,12 @@ mod tests {
             message: None,
             tags: vec![],
             starred: false,
+            selected_profile: None,
+            inserted_text: None,
+            polished_text: None,
+            polish_outcome: None,
+            polish_latency_ms: None,
+            polish_retried: None,
         });
 
         let _ = manager.set_retention_policy(RetentionPolicy::Off);
@@ -702,5 +828,106 @@ mod tests {
             serde_json::from_str(json).expect("legacy record without text should parse");
         assert_eq!(record.text, "");
         assert_eq!(record.preview, "hello world");
+        // Plan-010 fields default to None on legacy records...
+        assert_eq!(record.selected_profile, None);
+        assert_eq!(record.polish_outcome, None);
+        assert_eq!(record.polish_retried, None);
+        // ...and stay absent when re-serialized (no nulls to the frontend).
+        let reserialized = serde_json::to_string(&record).expect("serialize");
+        assert!(!reserialized.contains("selectedProfile"));
+        assert!(!reserialized.contains("polishOutcome"));
+    }
+
+    #[test]
+    fn record_insertion_attaches_polish_meta_and_returns_record_id() {
+        let ts = now_utc_ms();
+        let key_path = std::env::temp_dir().join(format!("voicewave-history-meta-{ts}.key"));
+        let key = load_or_create_key(&key_path).expect("key");
+        let mut manager = HistoryManager {
+            path: std::env::temp_dir().join(format!("voicewave-history-meta-{ts}.json")),
+            _key_path: key_path,
+            key,
+            store: HistoryStore::default(),
+        };
+        manager.store.retention_policy = RetentionPolicy::Forever;
+
+        let result = InsertResult {
+            success: true,
+            method: InsertionMethod::Direct,
+            message: None,
+            target_app: None,
+            transaction_id: "txn-1".to_string(),
+            undo_available: false,
+        };
+        let meta = PolishHistoryMeta {
+            selected_profile: Some("coding".to_string()),
+            inserted_text: Some("Refactor getUserById.".to_string()),
+            polished_text: Some("Refactor getUserById.".to_string()),
+            polish_outcome: Some("accepted".to_string()),
+            polish_latency_ms: Some(1_874),
+            polish_retried: Some(false),
+        };
+        let record_id = manager
+            .record_insertion(&result, "Refactor getUserById.", Some(&meta))
+            .expect("record")
+            .expect("record id");
+
+        let stored = manager.store.records.last().expect("record present");
+        assert_eq!(stored.record_id, record_id);
+        assert_eq!(stored.selected_profile.as_deref(), Some("coding"));
+        assert_eq!(stored.polish_outcome.as_deref(), Some("accepted"));
+        assert_eq!(stored.polish_latency_ms, Some(1_874));
+        assert_eq!(stored.polish_retried, Some(false));
+
+        // Async merge through the stable record id: fill polishedText later
+        // without clobbering the fields written at insert time.
+        let update = PolishHistoryMeta {
+            polished_text: Some("Late validated candidate.".to_string()),
+            ..PolishHistoryMeta::default()
+        };
+        let updated = manager
+            .update_polish_meta(&record_id, &update)
+            .expect("update");
+        assert_eq!(
+            updated.polished_text.as_deref(),
+            Some("Late validated candidate.")
+        );
+        assert_eq!(updated.polish_outcome.as_deref(), Some("accepted"));
+        assert_eq!(updated.selected_profile.as_deref(), Some("coding"));
+    }
+
+    #[test]
+    fn update_polish_meta_unknown_record_errors() {
+        let ts = now_utc_ms();
+        let key_path = std::env::temp_dir().join(format!("voicewave-history-meta404-{ts}.key"));
+        let key = load_or_create_key(&key_path).expect("key");
+        let mut manager = HistoryManager {
+            path: std::env::temp_dir().join(format!("voicewave-history-meta404-{ts}.json")),
+            _key_path: key_path,
+            key,
+            store: HistoryStore::default(),
+        };
+        let err = manager
+            .update_polish_meta("hist-999", &PolishHistoryMeta::default())
+            .expect_err("missing record must error");
+        assert!(matches!(err, HistoryError::RecordNotFound(_)));
+    }
+
+    #[test]
+    fn retention_off_returns_no_record_id() {
+        let ts = now_utc_ms();
+        let key_path = std::env::temp_dir().join(format!("voicewave-history-off-{ts}.key"));
+        let key = load_or_create_key(&key_path).expect("key");
+        let mut manager = HistoryManager {
+            path: std::env::temp_dir().join(format!("voicewave-history-off-{ts}.json")),
+            _key_path: key_path,
+            key,
+            store: HistoryStore::default(),
+        };
+        manager.store.retention_policy = RetentionPolicy::Off;
+        let id = manager
+            .record_transcript_with_polish("hello", None)
+            .expect("record");
+        assert_eq!(id, None);
     }
 }

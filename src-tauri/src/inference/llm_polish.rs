@@ -88,6 +88,10 @@ struct WorkerRequest {
     id: u64,
     command: String,
     text: String,
+    /// Polish profile prompt id (plan 010): "standard" | "coding" |
+    /// "writing" | "casual" | "literal". Workers predating profiles ignore
+    /// unknown JSON fields, so this is back-compatible.
+    profile: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,18 +117,29 @@ static POLISH_WORKER: OnceLock<Mutex<Option<PolishWorkerProcess>>> = OnceLock::n
 /// SEPARATE from `WORKER_REQUEST_GATE`. Serializes polish requests only.
 static POLISH_GATE: Mutex<()> = Mutex::new(());
 
-/// Best-effort polish of a raw transcript. Returns:
+/// Best-effort polish of a raw transcript with the default (Standard)
+/// profile prompt. See [`polish_text_for_profile`].
+pub async fn polish_text(raw: String) -> Result<Option<String>, InferenceError> {
+    polish_text_for_profile(raw, "standard".to_string()).await
+}
+
+/// Best-effort polish of a raw transcript under a specific profile prompt
+/// (plan 010). Returns:
 /// - `Ok(Some(polished))` when the worker returned a rewrite,
 /// - `Ok(None)` on ANY failure (missing model, worker error, timeout, empty),
+///
 /// so the caller can always fall back to the deterministic text.
-pub async fn polish_text(raw: String) -> Result<Option<String>, InferenceError> {
-    let result = tokio::task::spawn_blocking(move || polish_text_blocking(raw))
+pub async fn polish_text_for_profile(
+    raw: String,
+    profile: String,
+) -> Result<Option<String>, InferenceError> {
+    let result = tokio::task::spawn_blocking(move || polish_text_blocking(raw, profile))
         .await
         .map_err(|err| InferenceError::RuntimeJoin(format!("polish worker join failure: {err}")))?;
     Ok(result)
 }
 
-fn polish_text_blocking(raw: String) -> Option<String> {
+fn polish_text_blocking(raw: String, profile: String) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -135,6 +150,7 @@ fn polish_text_blocking(raw: String) -> Option<String> {
         id: next_request_id(),
         command: "polish".to_string(),
         text: raw.clone(),
+        profile,
     };
     match send_polish_request_inner(request) {
         Ok(response) if response.ok => response

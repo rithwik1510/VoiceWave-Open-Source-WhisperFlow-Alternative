@@ -20,8 +20,8 @@ use crate::{
         DictionaryQueueItem, DictionaryTerm,
     },
     history::{
-        HistoryError, HistoryExportPreset, HistoryExportResult, HistoryManager, RetentionPolicy,
-        SessionHistoryQuery, SessionHistoryRecord,
+        HistoryError, HistoryExportPreset, HistoryExportResult, HistoryManager, PolishHistoryMeta,
+        RetentionPolicy, SessionHistoryQuery, SessionHistoryRecord,
     },
     hotkey::{
         HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager, HotkeyPhase, HotkeyRuntime,
@@ -31,8 +31,9 @@ use crate::{
         cpu_runtime_pool_enabled, ensure_faster_whisper_ready, faster_whisper_cache_hint,
         faster_whisper_runtime_model_id, is_faster_whisper_model,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
-        prefetch_faster_whisper_model, prewarm_runtime, warmup_faster_whisper_model,
-        warmup_plan_for_model, InferenceError, InferenceWorker, RuntimeDecodePolicy, WarmupPlan,
+        polish_gate::gate_polish_candidate, prefetch_faster_whisper_model, prewarm_runtime,
+        warmup_faster_whisper_model, warmup_plan_for_model, InferenceError, InferenceWorker,
+        RuntimeDecodePolicy, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
@@ -45,14 +46,15 @@ use crate::{
     permissions::{MicrophonePermission, PermissionManager, PermissionSnapshot},
     phase1,
     settings::{
-        normalize_hotkey_bindings, normalize_pro_settings, AppProfileBehavior, AppProfileOverrides,
-        AppTargetClass, CodeModeSettings, DecodeMode, DomainPackId, FormatProfile, SettingsError,
-        SettingsStore, VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
+        apply_profile_defaults, normalize_hotkey_bindings, normalize_pro_settings, resolve_profile,
+        AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
+        DomainPackId, FormatProfile, InsertPath, PolishProfile, SettingsError, SettingsStore,
+        VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
     },
     stats::{StatsManager, StatsSummary},
     transcript::{
-        finalize_pro_transcript, merge_incremental_transcript, sanitize_user_transcript,
-        stabilize_custom_terms, ProTranscriptOptions,
+        finalize_literal_transcript, finalize_pro_transcript, merge_incremental_transcript,
+        sanitize_user_transcript, ProTranscriptOptions,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -235,6 +237,21 @@ const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
 /// occasionally as a quiet reminder that on-device polishing is working; the
 /// polished text is always available via history regardless.
 const POLISH_PILL_ANNOUNCE_EVERY: u64 = 50;
+
+/// Hard release-to-insert budget for the wait-validated profiles
+/// (Coding/Writing/Casual, plan 010): measured from key release — the same
+/// zero point as the existing `release_to_inserted_ms` metric. If a single
+/// polish attempt has not produced an accepted result by this deadline, the
+/// deterministic floor text inserts and the outcome is recorded as
+/// `fallbackTimeout`. No blocking retry, ever.
+const WAIT_VALIDATED_RELEASE_BUDGET_MS: u64 = 3_500;
+
+/// History `polishOutcome` wire values (plan 010 interface contract).
+const POLISH_OUTCOME_ACCEPTED: &str = "accepted";
+const POLISH_OUTCOME_FALLBACK_TIMEOUT: &str = "fallbackTimeout";
+const POLISH_OUTCOME_FALLBACK_REJECTED: &str = "fallbackRejected";
+const POLISH_OUTCOME_LITERAL: &str = "literal";
+const POLISH_OUTCOME_DISABLED: &str = "disabled";
 
 /// Claims a warn slot if its cooldown has elapsed; the caller only emits a
 /// notice when this returns true. Each recurring warning owns its own slot.
@@ -685,185 +702,6 @@ fn asr_integrity_metrics(raw_transcript: &str, final_transcript: &str) -> (f32, 
     (integrity.clamp(0.0, 100.0), raw_count, final_count)
 }
 
-/// Fidelity validator for the off-by-default on-device LLM polish path
-/// (plan 005). Decides whether an LLM rewrite is SAFE to offer using ONLY the
-/// raw transcript and the rewrite — exactly what the app has at runtime.
-///
-/// This is a manual-string-scanning port of `scripts/llm-polish/validator.py`
-/// (NO regex crate, by design: an over-broad "protected token" detector yields
-/// more SAFE false rejects, never false accepts). When any check fails, the
-/// caller silently keeps the deterministic text.
-mod polish_validator {
-    /// Minimum token overlap (0..=1) between raw and polished. Below this the
-    /// rewrite has drifted too far and is rejected.
-    const MIN_TOKEN_OVERLAP: f32 = 0.55;
-    /// Punctuation trimmed from the ends of a whitespace token before
-    /// classification / comparison.
-    const TRIM_PUNCT: &str = ".,;:!?()\"'";
-
-    fn trim_token(token: &str) -> &str {
-        token.trim_matches(|c: char| TRIM_PUNCT.contains(c))
-    }
-
-    fn contains_ascii_digit(token: &str) -> bool {
-        token.chars().any(|c| c.is_ascii_digit())
-    }
-
-    /// True if the token has an internal capital (camelCase): some index i>0
-    /// where char[i] is uppercase and char[i-1] is lowercase.
-    fn has_internal_capital(token: &str) -> bool {
-        let chars: Vec<char> = token.chars().collect();
-        for i in 1..chars.len() {
-            if chars[i].is_uppercase() && chars[i - 1].is_lowercase() {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// True if the token contains an internal `.` with alphanumerics on both
-    /// sides (URLs, filenames, `voicewave.dev`, `diagnostics.json`, `2.0`).
-    fn has_internal_dot(token: &str) -> bool {
-        let chars: Vec<char> = token.chars().collect();
-        for i in 1..chars.len().saturating_sub(1) {
-            if chars[i] == '.' && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric() {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// A raw token is "protected" (must survive verbatim) when, after trimming
-    /// surrounding punctuation, it looks like a name/number/code/URL/path/email
-    /// rather than an ordinary word. Mirrors the entity families of validator.py
-    /// via cheap character scans.
-    fn is_protected(token: &str) -> bool {
-        if token.is_empty() {
-            return false;
-        }
-        contains_ascii_digit(token)
-            || token.contains('_')
-            || token.contains('/')
-            || token.contains('\\')
-            || token.contains('@')
-            || token.contains("::")
-            || token.contains("()")
-            || has_internal_capital(token)
-            || has_internal_dot(token)
-    }
-
-    /// Core negation markers (after contraction expansion). Every `n't`
-    /// contraction becomes " not", so it collapses to `not` here.
-    const NEGATION_WORDS: &[&str] = &[
-        "not", "no", "never", "none", "nobody", "nothing", "nowhere", "neither", "nor",
-        "without", "cannot",
-    ];
-
-    /// Count negation markers in `text`, robust to contraction form:
-    /// `don't` == `do not` (both count 1) via the `n't` -> ` not` expansion.
-    fn negation_count(text: &str) -> usize {
-        let expanded = text
-            .to_lowercase()
-            .replace('\u{2019}', "'") // curly apostrophe -> straight
-            .replace("n't", " not");
-        expanded
-            .split(|c: char| !c.is_alphabetic())
-            .filter(|word| NEGATION_WORDS.contains(word))
-            .count()
-    }
-
-    /// Validate an LLM rewrite against the raw transcript. Returns `true` only
-    /// when ALL checks pass; any failure -> `false` (keep deterministic text).
-    pub(super) fn validate_polish(raw: &str, polished: &str) -> bool {
-        let polished_trimmed = polished.trim();
-        if polished_trimmed.is_empty() {
-            return false;
-        }
-
-        // 1. Token overlap floor (guards wholesale rewrite / topic drift).
-        // asr_integrity_metrics returns a 0..=100 percent; compare on 0..=1.
-        let (integrity_percent, _, _) = super::asr_integrity_metrics(raw, polished_trimmed);
-        if integrity_percent / 100.0 < MIN_TOKEN_OVERLAP {
-            return false;
-        }
-
-        let polished_lower = polished_trimmed.to_lowercase();
-
-        // 2. Entity preservation: every protected raw token must survive
-        // verbatim (case-insensitive substring) in the rewrite.
-        for token in raw.split_whitespace() {
-            let trimmed = trim_token(token);
-            if is_protected(trimmed) && !polished_lower.contains(&trimmed.to_lowercase()) {
-                return false;
-            }
-        }
-
-        // 3. No invented numbers: any digit-bearing token in the rewrite must
-        // appear (case-insensitive substring) in the raw transcript.
-        let raw_lower = raw.to_lowercase();
-        for token in polished_trimmed.split_whitespace() {
-            let trimmed = trim_token(token);
-            if contains_ascii_digit(trimmed) && !raw_lower.contains(&trimmed.to_lowercase()) {
-                return false;
-            }
-        }
-
-        // 4. Polarity preservation: the rewrite must not add or drop a negation
-        // (e.g. "I don't think we should ship" -> "I think we should ship"). This
-        // is the highest-severity meaning drift and the one the token-overlap
-        // floor cannot catch, since a one-word negation flip keeps overlap high.
-        if negation_count(raw) != negation_count(polished_trimmed) {
-            return false;
-        }
-
-        true
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::validate_polish;
-
-        #[test]
-        fn validate_polish_rejects_dropped_or_changed_number() {
-            // "5" is a protected token (contains a digit); the rewrite spells it
-            // as "five", so the digit is gone -> must reject.
-            assert!(!validate_polish(
-                "set the limit to 5",
-                "set the limit to five"
-            ));
-        }
-
-        #[test]
-        fn validate_polish_accepts_clean_filler_removal() {
-            // Pure grammar/filler cleanup with no entities touched -> accept.
-            assert!(validate_polish(
-                "um so we should ship on monday",
-                "We should ship on Monday."
-            ));
-        }
-
-        #[test]
-        fn validate_polish_rejects_negation_flip() {
-            // Dropping "don't" flips the meaning while keeping overlap high and
-            // touching no entities -> only the polarity guard catches this.
-            assert!(!validate_polish(
-                "i don't think we should ship this on friday",
-                "I think we should ship this on Friday."
-            ));
-        }
-
-        #[test]
-        fn validate_polish_accepts_contraction_expansion() {
-            // "don't" -> "do not" is the SAME polarity; must NOT be a false reject.
-            assert!(validate_polish(
-                "we don't need to refactor everything right now",
-                "We do not need to refactor everything right now."
-            ));
-        }
-    }
-}
-
-use polish_validator::validate_polish;
 
 fn should_reject_low_confidence_transcript_as_no_speech(
     use_faster_whisper: bool,
@@ -1223,7 +1061,9 @@ pub struct VoiceWaveController {
     cancel_token: Mutex<Option<CancellationToken>>,
     stop_flag: Mutex<Option<Arc<AtomicBool>>>,
     active_session: Mutex<Option<DictationSession>>,
-    session_counter: AtomicU64,
+    // Arc so fire-and-forget polish tasks can check "did a newer dictation
+    // start since mine?" (stale results are dropped) without borrowing self.
+    session_counter: Arc<AtomicU64>,
     watchdog_recovery_count: AtomicU64,
     // Counts validated LLM-polish results across the app session. The polish
     // pill is a background OFFER, not an action the user needs — surfacing it
@@ -1354,7 +1194,7 @@ impl VoiceWaveController {
             cancel_token: Mutex::new(None),
             stop_flag: Mutex::new(None),
             active_session: Mutex::new(None),
-            session_counter: AtomicU64::new(0),
+            session_counter: Arc::new(AtomicU64::new(0)),
             watchdog_recovery_count: AtomicU64::new(0),
             polish_success_count: Arc::new(AtomicU64::new(0)),
             hotkey_runtime: Mutex::new(None),
@@ -1563,6 +1403,50 @@ impl VoiceWaveController {
         let mut settings = self.settings.lock().await.clone();
         settings.pro_post_processing_enabled = enabled;
         self.update_settings(settings).await
+    }
+
+    /// Select a polish profile (plan 010): validates the wire string, stamps
+    /// the profile plus its deterministic defaults (resetting any advanced
+    /// overrides — reselecting a profile is the documented reset gesture),
+    /// and persists everything in ONE atomic settings write, fixing the old
+    /// five-sequential-writes torn-config risk. Deliberately NOT Pro-gated:
+    /// profiles are included for everyone in v1 (plan 010 principle 5).
+    pub async fn set_dictation_profile(
+        &self,
+        profile: String,
+    ) -> Result<VoiceWaveSettings, ControllerError> {
+        let parsed = PolishProfile::parse(&profile).ok_or_else(|| {
+            ControllerError::Runtime(format!(
+                "Unknown dictation profile '{profile}'. Expected one of: standard, coding, writing, casual, literal."
+            ))
+        })?;
+        let mut settings = self.settings.lock().await.clone();
+        apply_profile_defaults(parsed, &mut settings);
+        let updated = self.update_settings(settings).await?;
+
+        // Pre-warm the polish worker for wait-validated profiles: the first
+        // real dictation would otherwise burn its whole 3.5s release-to-insert
+        // budget on the cold GGUF load + the profile prompt's first prefill
+        // (measured ~7-12s combined at 4 CPU threads) and always fall back.
+        // Detached and best-effort; a dictation issued immediately after
+        // queues behind this warm-up in the serialized worker, which is
+        // never worse than hitting the cold path itself.
+        if updated.llm_polish_enabled
+            && matches!(
+                parsed,
+                PolishProfile::Coding | PolishProfile::Writing | PolishProfile::Casual
+            )
+        {
+            let profile_str = parsed.as_str().to_string();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::inference::llm_polish::polish_text_for_profile(
+                    "warm up".to_string(),
+                    profile_str,
+                )
+                .await;
+            });
+        }
+        Ok(updated)
     }
 
     pub async fn start_dictation(
@@ -2084,8 +1968,22 @@ impl VoiceWaveController {
     pub async fn insert_text(
         &self,
         app: AppHandle,
-        mut payload: InsertTextRequest,
+        payload: InsertTextRequest,
     ) -> Result<InsertResult, ControllerError> {
+        let (result, _record_id) = self.insert_text_with_polish_meta(app, payload, None).await?;
+        Ok(result)
+    }
+
+    /// Insert text and persist the history record in one pass, attaching
+    /// plan-010 polish metadata when the caller is the dictation flow.
+    /// Returns the history record id (None when retention is Off) so async
+    /// polish results can update the same record later.
+    pub(crate) async fn insert_text_with_polish_meta(
+        &self,
+        app: AppHandle,
+        mut payload: InsertTextRequest,
+        polish_meta: Option<&PolishHistoryMeta>,
+    ) -> Result<(InsertResult, Option<String>), ControllerError> {
         if !payload.prefer_clipboard {
             let settings = self.settings.lock().await.clone();
             payload.prefer_clipboard = settings.prefer_clipboard_fallback;
@@ -2096,10 +1994,11 @@ impl VoiceWaveController {
             .lock()
             .await
             .insert_text(payload.clone())?;
-        self.history_manager
+        let record_id = self
+            .history_manager
             .lock()
             .await
-            .record_insertion(&result, &payload.text)?;
+            .record_insertion(&result, &payload.text, polish_meta)?;
         if let Err(err) = app.emit_to(MAIN_WINDOW_LABEL, "voicewave://history-updated", ()) {
             eprintln!("history-updated emit failed: {err}");
         }
@@ -2119,7 +2018,7 @@ impl VoiceWaveController {
         }
         let _ = app.emit("voicewave://insertion", result.clone());
 
-        Ok(result)
+        Ok((result, record_id))
     }
 
     pub async fn undo_last_insertion(&self, app: AppHandle) -> UndoResult {
@@ -3772,19 +3671,38 @@ impl VoiceWaveController {
             finalize_text.clone()
         };
         let baseline_transcript = sanitize_user_transcript(&merged_transcript);
-        let mut final_transcript = baseline_transcript.clone();
+        // Plan 010: the persisted polish profile is the single delivery
+        // authority for this dictation. Resolve it once against the settings
+        // snapshot taken at flow start so a mid-flight profile switch cannot
+        // produce a hybrid.
+        let polish_profile = settings.effective_polish_profile();
+        let profile_policy = resolve_profile(polish_profile, &settings);
+        // Dictionary terms feed every branch below (Literal stabilization,
+        // the pro deterministic stack, and the polish gate) — fetch once.
+        let custom_terms = self
+            .dictionary_manager
+            .lock()
+            .await
+            .get_terms(None)
+            .into_iter()
+            .map(|row| row.term)
+            .collect::<Vec<_>>();
         let entitlement = self.billing_manager.lock().await.snapshot();
-        if entitlement.is_pro {
-            let custom_terms = self
-                .dictionary_manager
-                .lock()
-                .await
-                .get_terms(None)
-                .into_iter()
-                .map(|row| row.term)
-                .collect::<Vec<_>>();
+        let final_transcript = if profile_policy.insert_path == InsertPath::LiteralImmediate {
+            // Literal branches BEFORE finalize_pro_transcript, from the
+            // sanitized ASR baseline: by the end of the deterministic stack
+            // the original word sequence (fillers, repeats) is already gone.
+            // Only spoken structural commands, dictionary stabilization, and
+            // punctuation/capitalization apply — never filler removal, domain
+            // corrections, format profiles, or code mode.
+            finalize_literal_transcript(
+                &baseline_transcript,
+                settings.spoken_edit_commands,
+                &custom_terms,
+            )
+        } else if entitlement.is_pro {
             let app_profile_behavior = Self::active_profile_behavior(&settings);
-            final_transcript = finalize_pro_transcript(
+            finalize_pro_transcript(
                 &merged_transcript,
                 &ProTranscriptOptions {
                     format_profile: settings.format_profile,
@@ -3795,8 +3713,10 @@ impl VoiceWaveController {
                     app_profile_behavior: &app_profile_behavior,
                     custom_terms: &custom_terms,
                 },
-            );
-        }
+            )
+        } else {
+            baseline_transcript.clone()
+        };
         let (asr_integrity_percent, asr_raw_word_count, asr_final_word_count) =
             asr_integrity_metrics(&finalize_text, &final_transcript);
 
@@ -3844,11 +3764,120 @@ impl VoiceWaveController {
             return Ok(());
         }
 
+        // ---- Plan 010 delivery policy -----------------------------------
+        // Standard keeps today's contract byte-for-byte (deterministic text
+        // inserts immediately; polish runs async as a Copy-offer after
+        // insertion). Coding/Writing/Casual opted in to "the profile IS the
+        // text": ONE blocking LLM attempt through the polish gate, bounded by
+        // a hard release-to-insert budget; on accept the polished text
+        // inserts, on reject/timeout/worker-error the deterministic floor
+        // inserts. Literal never calls the model.
+        let mut inserted_text = final_transcript.clone();
+        let mut polish_meta = PolishHistoryMeta {
+            selected_profile: Some(polish_profile.as_str().to_string()),
+            ..PolishHistoryMeta::default()
+        };
+        let mut polish_wait_ms: u64 = 0;
+        // A wait-path attempt that misses the budget keeps running in the
+        // background; its (gated) result may still enrich History later —
+        // never the target app.
+        let mut late_polish_handle: Option<JoinHandle<Option<String>>> = None;
+        match profile_policy.insert_path {
+            InsertPath::LiteralImmediate => {
+                polish_meta.polish_outcome = Some(POLISH_OUTCOME_LITERAL.to_string());
+            }
+            InsertPath::Immediate => {
+                // Standard: outcome intentionally stays None — the async
+                // polish pass is an offer, not an insertion outcome.
+            }
+            InsertPath::WaitValidated => {
+                // No retry pass exists yet (worker support pending); record
+                // that explicitly so History never has to guess.
+                polish_meta.polish_retried = Some(false);
+                if !settings.llm_polish_enabled {
+                    polish_meta.polish_outcome = Some(POLISH_OUTCOME_DISABLED.to_string());
+                } else {
+                    // Budget zero point == key release, the same point the
+                    // existing release_to_inserted_ms metric measures from.
+                    let elapsed_since_release_ms = release_to_transcribing_ms
+                        .saturating_add(transcribing_started.elapsed().as_millis() as u64);
+                    let remaining_budget_ms =
+                        WAIT_VALIDATED_RELEASE_BUDGET_MS.saturating_sub(elapsed_since_release_ms);
+                    if remaining_budget_ms == 0 {
+                        // Decode alone consumed the budget (long dictation):
+                        // insert the floor immediately, no attempt.
+                        polish_meta.polish_outcome =
+                            Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
+                    } else {
+                        let raw_for_polish = final_transcript.clone();
+                        let prompt_id = profile_policy.prompt_id.to_string();
+                        let wait_started = Instant::now();
+                        let mut polish_handle = tokio::spawn(async move {
+                            crate::inference::llm_polish::polish_text_for_profile(
+                                raw_for_polish,
+                                prompt_id,
+                            )
+                            .await
+                            .ok()
+                            .flatten()
+                        });
+                        match timeout(
+                            Duration::from_millis(remaining_budget_ms),
+                            &mut polish_handle,
+                        )
+                        .await
+                        {
+                            Ok(Ok(Some(candidate))) => {
+                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                match gate_polish_candidate(
+                                    &final_transcript,
+                                    &candidate,
+                                    &custom_terms,
+                                    polish_profile,
+                                ) {
+                                    Ok(stabilized) => {
+                                        polish_meta.polish_outcome =
+                                            Some(POLISH_OUTCOME_ACCEPTED.to_string());
+                                        polish_meta.polished_text = Some(stabilized.clone());
+                                        inserted_text = stabilized;
+                                    }
+                                    Err(reasons) => {
+                                        eprintln!(
+                                            "voicewave: {} polish rejected ({reasons:?}); inserting deterministic floor",
+                                            polish_profile.as_str()
+                                        );
+                                        polish_meta.polish_outcome =
+                                            Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
+                                    }
+                                }
+                            }
+                            Ok(Ok(None)) | Ok(Err(_)) => {
+                                // Worker error / missing model / empty output.
+                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                polish_meta.polish_outcome =
+                                    Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
+                            }
+                            Err(_elapsed) => {
+                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                polish_meta.polish_outcome =
+                                    Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
+                                late_polish_handle = Some(polish_handle);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        polish_meta.inserted_text = Some(inserted_text.clone());
+
         let post_started = Instant::now();
         let _ = app.emit(
             "voicewave://transcript",
             TranscriptEvent {
-                text: final_transcript.clone(),
+                text: inserted_text.clone(),
                 is_final: true,
                 elapsed_ms: 0,
             },
@@ -3857,41 +3886,50 @@ impl VoiceWaveController {
         {
             let mut snapshot = self.snapshot.lock().await;
             snapshot.last_partial = None;
-            snapshot.last_final = Some(final_transcript.clone());
+            snapshot.last_final = Some(inserted_text.clone());
             snapshot.active_model = settings.active_model.clone();
         }
         let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
 
         let insert_payload = InsertTextRequest {
-            text: final_transcript.clone(),
+            text: inserted_text.clone(),
             target_app: None,
             prefer_clipboard: settings.prefer_clipboard_fallback,
             force_clipboard_only: false,
         };
         let insert_started = Instant::now();
-        let (insertion_success, insertion_method, insertion_target_class, insertion_history_recorded) =
-            match self.insert_text(app.clone(), insert_payload).await {
-                Ok(result) => (
-                    result.success,
-                    insertion_method_key(&result.method).to_string(),
-                    classify_insertion_target(result.target_app.as_deref()).to_string(),
-                    // insert_text persisted a history record (with method and
-                    // success) before returning, so the transcript-side write
-                    // below must not duplicate it.
-                    true,
-                ),
-                Err(err) => {
-                    self.update_state(
-                        &app,
-                        VoiceWaveHudState::Error,
-                        Some(format!("Insertion failed: {err}")),
-                    )
+        let (
+            insertion_success,
+            insertion_method,
+            insertion_target_class,
+            insertion_history_recorded,
+            insertion_record_id,
+        ) = match self
+            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(&polish_meta))
+            .await
+        {
+            Ok((result, record_id)) => (
+                result.success,
+                insertion_method_key(&result.method).to_string(),
+                classify_insertion_target(result.target_app.as_deref()).to_string(),
+                // insert_text persisted a history record (with method and
+                // success) before returning, so the transcript-side write
+                // below must not duplicate it.
+                true,
+                record_id,
+            ),
+            Err(err) => {
+                self.update_state(
+                    &app,
+                    VoiceWaveHudState::Error,
+                    Some(format!("Insertion failed: {err}")),
+                )
+                .await;
+                self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
-                    self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
-                        .await;
-                    (false, "error".to_string(), "unknown".to_string(), false)
-                }
-            };
+                (false, "error".to_string(), "unknown".to_string(), false, None)
+            }
+        };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
         let inserted_at_utc_ms = now_utc_ms();
         let previous_correction_session = { self.correction_session.lock().await.clone() };
@@ -3900,7 +3938,7 @@ impl VoiceWaveController {
                 if inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
                     <= CORRECTION_SESSION_WINDOW_MS
                 {
-                    derive_correction_candidates(&previous.inserted_text, &final_transcript)
+                    derive_correction_candidates(&previous.inserted_text, &inserted_text)
                 } else {
                     Vec::new()
                 }
@@ -3914,7 +3952,7 @@ impl VoiceWaveController {
             let mut correction_session = self.correction_session.lock().await;
             if insertion_success {
                 *correction_session = Some(CorrectionSession {
-                    inserted_text: final_transcript.clone(),
+                    inserted_text: inserted_text.clone(),
                     inserted_at_utc_ms,
                 });
             } else {
@@ -3922,7 +3960,9 @@ impl VoiceWaveController {
             }
         }
 
-        // Off-by-default on-device LLM polish (plan 005, Phase 3). Only when the
+        // Off-by-default on-device LLM polish (plan 005, Phase 3) — Standard
+        // profile only (wait-validated profiles already made their single
+        // attempt inline, and Literal never calls the model). Only when the
         // experimental flag is ON and the deterministic text actually landed.
         // This runs in a background task spawned AFTER insertion, so it adds
         // ZERO release-to-text latency and never touches the ASR worker/gate. It
@@ -3930,43 +3970,119 @@ impl VoiceWaveController {
         // overwrites the inserted text, and a rewrite is surfaced only if the
         // fidelity validator passes. With the flag off (default) nothing spawns
         // and behavior is byte-identical to before.
-        if insertion_success && settings.llm_polish_enabled {
+        if insertion_success
+            && settings.llm_polish_enabled
+            && profile_policy.insert_path == InsertPath::Immediate
+        {
             let app_handle = app.clone();
             let raw = final_transcript.clone();
             let polish_count = Arc::clone(&self.polish_success_count);
-            let custom_terms = self
-                .dictionary_manager
-                .lock()
-                .await
-                .get_terms(None)
-                .into_iter()
-                .map(|row| row.term)
-                .collect::<Vec<_>>();
+            let custom_terms_for_polish = custom_terms.clone();
+            let session_counter = Arc::clone(&self.session_counter);
+            let history_manager = Arc::clone(&self.history_manager);
+            let record_id_for_polish = insertion_record_id.clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(Some(polished)) =
-                    crate::inference::llm_polish::polish_text(raw.clone()).await
+                let polish_started = Instant::now();
+                if let Ok(Some(polished)) = crate::inference::llm_polish::polish_text_for_profile(
+                    raw.clone(),
+                    PolishProfile::Standard.as_str().to_string(),
+                )
+                .await
                 {
                     // Re-apply the dictionary-term stabilizer to the LLM output,
                     // then gate strictly on the fidelity validator.
-                    let stabilized = stabilize_custom_terms(&polished, &custom_terms);
-                    if validate_polish(&raw, &stabilized) && stabilized.trim() != raw.trim() {
-                        // Polish succeeds on nearly every dictation, so we do NOT
-                        // pop the pill each time — that would bury the pill's
-                        // important fallback/error messages in noise. Announce
-                        // only once every POLISH_PILL_ANNOUNCE_EVERY validated
-                        // polishes as a quiet "on-device polishing is working"
-                        // signal. `fetch_add` returns the pre-increment value, so
-                        // the first success (0) announces immediately, then every
-                        // 50th thereafter.
-                        let nth = polish_count.fetch_add(1, Ordering::Relaxed);
-                        if nth % POLISH_PILL_ANNOUNCE_EVERY == 0 {
-                            emit_pill_rescue(
-                                &app_handle,
-                                "info",
-                                "Polished version ready",
-                                None,
-                                stabilized,
-                                Some("copyTranscript"),
+                    let Ok(stabilized) = gate_polish_candidate(
+                        &raw,
+                        &polished,
+                        &custom_terms_for_polish,
+                        PolishProfile::Standard,
+                    ) else {
+                        return;
+                    };
+                    if stabilized.trim() == raw.trim() {
+                        return;
+                    }
+                    let polish_latency_ms = polish_started.elapsed().as_millis() as u64;
+                    // Enrich this dictation's History record (keyed by its
+                    // stable record id, so this is never stale) with the
+                    // validated candidate.
+                    if let Some(record_id) = record_id_for_polish {
+                        let update = PolishHistoryMeta {
+                            polished_text: Some(stabilized.clone()),
+                            polish_latency_ms: Some(polish_latency_ms),
+                            ..PolishHistoryMeta::default()
+                        };
+                        if history_manager
+                            .lock()
+                            .await
+                            .update_polish_meta(&record_id, &update)
+                            .is_ok()
+                        {
+                            let _ = app_handle.emit_to(
+                                MAIN_WINDOW_LABEL,
+                                "voicewave://history-updated",
+                                (),
+                            );
+                        }
+                    }
+                    // Session-aware offer: if a newer dictation started while
+                    // this polish ran, the offer is obsolete — drop it
+                    // silently (no stale pill offers).
+                    if session_counter.load(Ordering::Relaxed) != session_id {
+                        return;
+                    }
+                    // Polish succeeds on nearly every dictation, so we do NOT
+                    // pop the pill each time — that would bury the pill's
+                    // important fallback/error messages in noise. Announce
+                    // only once every POLISH_PILL_ANNOUNCE_EVERY validated
+                    // polishes as a quiet "on-device polishing is working"
+                    // signal. `fetch_add` returns the pre-increment value, so
+                    // the first success (0) announces immediately, then every
+                    // 50th thereafter.
+                    let nth = polish_count.fetch_add(1, Ordering::Relaxed);
+                    if nth % POLISH_PILL_ANNOUNCE_EVERY == 0 {
+                        emit_pill_rescue(
+                            &app_handle,
+                            "info",
+                            "Polished version ready",
+                            None,
+                            stabilized,
+                            Some("copyTranscript"),
+                        );
+                    }
+                }
+            });
+        }
+
+        // Wait-path attempt that missed the release budget: let it finish in
+        // the background and, if the gate accepts it, record the candidate on
+        // this dictation's History record (`polishedText` only — the outcome
+        // stays `fallbackTimeout` and the target app is never touched).
+        if let (Some(handle), Some(record_id)) = (late_polish_handle, insertion_record_id.clone())
+        {
+            let history_manager = Arc::clone(&self.history_manager);
+            let app_for_late = app.clone();
+            let raw = final_transcript.clone();
+            let custom_terms_late = custom_terms.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(Some(candidate)) = handle.await {
+                    if let Ok(stabilized) =
+                        gate_polish_candidate(&raw, &candidate, &custom_terms_late, polish_profile)
+                    {
+                        let update = PolishHistoryMeta {
+                            polished_text: Some(stabilized),
+                            ..PolishHistoryMeta::default()
+                        };
+                        if history_manager
+                            .lock()
+                            .await
+                            .update_polish_meta(&record_id, &update)
+                            .is_ok()
+                        {
+                            let _ = app_for_late.emit_to(
+                                MAIN_WINDOW_LABEL,
+                                "voicewave://history-updated",
+                                (),
                             );
                         }
                     }
@@ -3984,7 +4100,7 @@ impl VoiceWaveController {
                     "warning",
                     "Couldn't insert — your text is safe",
                     Some("Click Copy, then paste it where you need it.".to_string()),
-                    final_transcript.clone(),
+                    inserted_text.clone(),
                     Some("copyTranscript"),
                 );
             } else if insertion_method == "clipboardOnly" {
@@ -3993,7 +4109,7 @@ impl VoiceWaveController {
                     "info",
                     "Copied to clipboard",
                     Some("Press Ctrl+V to paste it here.".to_string()),
-                    final_transcript.clone(),
+                    inserted_text.clone(),
                     None,
                 );
             } else if asr_final_word_count >= 30 {
@@ -4045,7 +4161,14 @@ impl VoiceWaveController {
         let release_to_final_ms = release_to_transcribing_ms
             .saturating_add(decode_ms)
             .saturating_add(post_ms);
-        let release_to_inserted_ms = release_to_final_ms.saturating_add(insert_ms);
+        // The wait-validated polish pause (plan 010) counts toward the
+        // user-perceived release-to-insert number, but deliberately NOT
+        // toward release_to_final_ms: the decode policy learns from the
+        // deterministic pipeline's speed and must not be punished for an
+        // opt-in LLM wait.
+        let release_to_inserted_ms = release_to_final_ms
+            .saturating_add(polish_wait_ms)
+            .saturating_add(insert_ms);
         if mode == DictationMode::Microphone {
             self.decode_policy
                 .lock()
@@ -4216,10 +4339,16 @@ impl VoiceWaveController {
         // Keep non-critical persistence off the hot path so release->final latency stays low.
         let history_manager = Arc::clone(&self.history_manager);
         let dictionary_manager = Arc::clone(&self.dictionary_manager);
-        let transcript_for_history = final_transcript.clone();
-        let transcript_for_dictionary_preview = final_transcript;
+        let transcript_for_history = inserted_text.clone();
+        let transcript_for_dictionary_preview = inserted_text;
         let correction_candidates_for_dictionary = correction_candidates;
         let app_for_history = app.clone();
+        // Rescue records still carry the profile fields, minus insertedText
+        // (nothing landed in the target app).
+        let rescue_polish_meta = PolishHistoryMeta {
+            inserted_text: None,
+            ..polish_meta.clone()
+        };
         tauri::async_runtime::spawn(async move {
             // Rescue write only: when insert_text errored before persisting,
             // keep the transcript anyway so a failed insertion never loses the
@@ -4229,9 +4358,11 @@ impl VoiceWaveController {
                 match history_manager
                     .lock()
                     .await
-                    .record_transcript(&transcript_for_history)
-                {
-                    Ok(()) => {
+                    .record_transcript_with_polish(
+                        &transcript_for_history,
+                        Some(&rescue_polish_meta),
+                    ) {
+                    Ok(_record_id) => {
                         if let Err(err) = app_for_history.emit_to(
                             MAIN_WINDOW_LABEL,
                             "voicewave://history-updated",

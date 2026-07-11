@@ -46,6 +46,21 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Building version $version from tag $env:TAG"
 
+      - name: Verify source versions match release tag
+        shell: pwsh
+        run: |
+          $expected = "${{ steps.ver.outputs.version }}"
+          $tauri = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          $package = (Get-Content "package.json" -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path "src-tauri/Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $versions = @{ "tauri.conf.json" = $tauri; "package.json" = $package; "Cargo.toml" = $cargo }
+          $mismatches = @($versions.GetEnumerator() | Where-Object { $_.Value -ne $expected })
+          if ($mismatches.Count -gt 0) {
+            $actual = ($mismatches | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
+            throw "Release tag v$expected does not match source versions: $actual"
+          }
+          Write-Host "Release source versions match v$expected."
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

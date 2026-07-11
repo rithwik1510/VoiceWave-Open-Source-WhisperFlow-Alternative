@@ -5,6 +5,7 @@ import {
   canUseTauri,
   copyTextToClipboard,
   getDictionaryQueue,
+  loadSettings,
   loadSnapshot,
   rejectDictionaryEntry,
   listenVoicewaveMicLevel,
@@ -17,10 +18,30 @@ import {
 import type {
   DictionaryQueueItem,
   PillNoticePayload,
+  PolishProfile,
   VoiceWaveHudState
 } from "../types/voicewave";
 
 type VisualState = "idle" | "listening" | "transcribing" | "inserted" | "error";
+
+/** Tiny persistent abbreviation of the active polish profile shown in the
+ * listening capsule (plan 010). Two letters — anything longer fights the
+ * waveform for space. */
+const PROFILE_ABBREV: Record<PolishProfile, string> = {
+  standard: "ST",
+  coding: "CO",
+  writing: "WR",
+  casual: "CA",
+  literal: "LI"
+};
+
+const PROFILE_TITLES: Record<PolishProfile, string> = {
+  standard: "Standard profile",
+  coding: "Coding profile",
+  writing: "Writing profile",
+  casual: "Casual profile",
+  literal: "Literal profile"
+};
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -37,6 +58,10 @@ export function FloatingPill() {
   // Dynamic Island notice: any runtime condition the core wants the user to
   // see (mic guard warnings, failures) expands the pill for a few seconds.
   const [notice, setNotice] = useState<PillNoticePayload | null>(null);
+  // Active polish profile for the listening glyph. Settings are read at mount
+  // and re-read on each listening transition (a profile can't change mid-
+  // dictation, so once per dictation is enough — no polling, no new events).
+  const [activeProfile, setActiveProfile] = useState<PolishProfile>("standard");
   // Actionable notices carry a one-tap button; this tracks its local
   // post-action confirmation state ("Copied ✓" / "Added ✓") shared across
   // action kinds.
@@ -86,6 +111,19 @@ export function FloatingPill() {
     },
     [clearNoticeDismiss]
   );
+
+  const refreshActiveProfile = useCallback(async () => {
+    if (!canUseTauri()) {
+      return;
+    }
+    try {
+      const settings = await loadSettings();
+      // Absent on backends older than plan 010 — glyph falls back to Standard.
+      setActiveProfile(settings.polishProfile ?? "standard");
+    } catch {
+      // Keep the last known profile; the glyph is informational only.
+    }
+  }, []);
 
   const loadReviewQueue = useCallback(async () => {
     if (!canUseTauri()) {
@@ -186,11 +224,19 @@ export function FloatingPill() {
     return undefined;
   }, [rawState]);
 
+  // Initial profile fetch so the glyph is correct on the very first dictation.
+  useEffect(() => {
+    void refreshActiveProfile();
+  }, [refreshActiveProfile]);
+
   useEffect(() => {
     const previous = previousRawStateRef.current;
     previousRawStateRef.current = rawState;
 
     if (rawState === "listening" || rawState === "transcribing") {
+      if (rawState === "listening" && previous !== "listening") {
+        void refreshActiveProfile();
+      }
       resetReview();
       return;
     }
@@ -209,7 +255,7 @@ export function FloatingPill() {
         window.clearTimeout(lateTimer);
       };
     }
-  }, [loadReviewQueue, rawState, resetReview]);
+  }, [loadReviewQueue, rawState, refreshActiveProfile, resetReview]);
 
   useEffect(() => {
     if (!canUseTauri()) {
@@ -409,6 +455,9 @@ export function FloatingPill() {
         <div className="vw-pill-glow" />
 
         <div className="vw-pill-core">
+          <span className="vw-pill-profile" title={PROFILE_TITLES[activeProfile]}>
+            {PROFILE_ABBREV[activeProfile]}
+          </span>
           <div className="vw-pill-wave">
             {bars.map((bar) => (
               <span

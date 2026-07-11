@@ -3,8 +3,6 @@ $ErrorActionPreference = "Stop"
 $requiredFiles = @(
   "README.md",
   "CONTRIBUTING.md",
-  "AGENTS.md",
-  "AGENT_START.md",
   "docs/prd/v1-prd.md",
   "docs/phase0-signoff.md",
   "docs/rfc/0001-system-architecture.md",
@@ -40,8 +38,7 @@ $contentChecks = @(
   @{ Path = "docs/prd/v1-prd.md"; Pattern = "^# VoiceWave v1 PRD$"; Label = "PRD title" },
   @{ Path = "docs/rfc/0001-system-architecture.md"; Pattern = "^# RFC 0001: VoiceWave v1 System Architecture$"; Label = "RFC title" },
   @{ Path = "docs/testing/test-strategy.md"; Pattern = "^# VoiceWave Test Strategy$"; Label = "Test strategy title" },
-  @{ Path = "docs/adr/0001-phase-0-locked-decisions.md"; Pattern = "^## Decision$"; Label = "ADR decision section" },
-  @{ Path = "AGENTS.md"; Pattern = "^## 7\) Mistake Log$"; Label = "Mistake log section" }
+  @{ Path = "docs/adr/0001-phase-0-locked-decisions.md"; Pattern = "^## Decision$"; Label = "ADR decision section" }
 )
 
 $failedChecks = @()

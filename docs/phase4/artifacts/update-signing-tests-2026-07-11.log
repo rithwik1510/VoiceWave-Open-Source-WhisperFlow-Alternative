@@ -1,0 +1,13 @@
+VoiceWave update/signing verification smoke
+Date: 2026-07-11
+
+Command: cargo test --manifest-path src-tauri/Cargo.toml model_manager::tests::invalid_manifest_signature_rejects_and_quarantines_partial -- --exact
+test model_manager::tests::invalid_manifest_signature_rejects_and_quarantines_partial ... ok
+result: ok. 1 passed; 0 failed
+
+Command: cargo test --manifest-path src-tauri/Cargo.toml model_manager::tests::tampered_model_is_rejected_and_quarantined -- --exact
+test model_manager::tests::tampered_model_is_rejected_and_quarantined ... ok
+result: ok. 1 passed; 0 failed
+
+Evidence: malformed signed manifests and tampered model artifacts fail closed
+and are quarantined before runtime use.

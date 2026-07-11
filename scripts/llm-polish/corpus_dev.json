@@ -1,0 +1,432 @@
+{
+  "note": "Plan 010 Phase 4 DEVELOPMENT corpus (60 cases). Prompt iteration may use this file freely. The holdout file (corpus_holdout.json) must NOT be inspected during iteration.",
+  "cases": [
+    {
+      "id": "t1",
+      "bucket": "technical",
+      "raw": "so um the parseConfig function is throwing when the yaml file has tabs in it we should uh probably normalize whitespace before we call it",
+      "must_keep": ["yaml", "tabs", "whitespace"],
+      "must_keep_exact": ["parseConfig"]
+    },
+    {
+      "id": "t2",
+      "bucket": "technical",
+      "raw": "yeah the memory leak is in the websocket handler we never call removeListener when the socket closes so the handlers just uh pile up",
+      "must_keep": ["websocket", "socket"],
+      "must_keep_exact": ["removeListener"]
+    },
+    {
+      "id": "t3",
+      "bucket": "technical",
+      "raw": "okay so to repro you run npm run build with NODE_ENV set to production and then the css purge step strips the dark mode classes",
+      "must_keep": ["npm run build", "css", "production", "dark mode"],
+      "must_keep_exact": ["NODE_ENV"]
+    },
+    {
+      "id": "t4",
+      "bucket": "technical",
+      "raw": "i think the race is between saveSettings and loadSettings because uh both touch settings_cache without holding the lock",
+      "must_keep": ["lock"],
+      "must_keep_exact": ["saveSettings", "loadSettings", "settings_cache"]
+    },
+    {
+      "id": "t5",
+      "bucket": "technical",
+      "raw": "the endpoint is slash api slash v2 slash transcripts and it returns a 404 when the user id is missing from the uh query string",
+      "must_keep": ["api", "v2", "404", "query string"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "t6",
+      "bucket": "technical",
+      "raw": "um can you bump the timeout in fetchWithRetry from 30 seconds to 45 the uh staging server is just slow right now",
+      "must_keep": ["30", "45", "staging"],
+      "must_keep_exact": ["fetchWithRetry"]
+    },
+    {
+      "id": "t7",
+      "bucket": "technical",
+      "raw": "so basically the migration renames user_id to account_id in the sessions table and we need a backfill script before we deploy",
+      "must_keep": ["sessions", "backfill"],
+      "must_keep_exact": ["user_id", "account_id"]
+    },
+    {
+      "id": "t8",
+      "bucket": "technical",
+      "raw": "the crash is a null pointer in AudioCapture dot cpp line 212 when the device list is empty on startup",
+      "must_keep": ["212", "cpp", "null pointer"],
+      "must_keep_exact": ["AudioCapture"]
+    },
+    {
+      "id": "t9",
+      "bucket": "technical",
+      "raw": "uh remember that git rebase rewrote the commit hashes so the changelog links to abc123 are all dead now we should regenerate them",
+      "must_keep": ["abc123", "changelog", "rebase"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e1",
+      "bucket": "email",
+      "raw": "hi sarah um just following up on the contract can you send the signed copy to legal@acmecorp.com by friday thanks",
+      "must_keep": ["sarah", "friday"],
+      "must_keep_exact": ["legal@acmecorp.com"]
+    },
+    {
+      "id": "e2",
+      "bucket": "email",
+      "raw": "dear mr patel i am writing to confirm our meeting on june 12th at 2 pm at your office um please let me know if that still works",
+      "must_keep": ["patel", "june", "12th"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e3",
+      "bucket": "email",
+      "raw": "hey team quick update the uh launch is moving from the 14th to the 21st because qa found two blockers nothing scary",
+      "must_keep": ["14th", "21st", "qa", "blockers"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e4",
+      "bucket": "email",
+      "raw": "thanks for the intro maya i would love to chat about the partnership are you free sometime next week maybe tuesday or wednesday",
+      "must_keep": ["maya", "tuesday", "wednesday", "maybe"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e5",
+      "bucket": "email",
+      "raw": "um hi support my order number 88214 arrived damaged the box was crushed and uh the screen has a crack i would like a replacement",
+      "must_keep": ["88214", "crack", "replacement"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e6",
+      "bucket": "email",
+      "raw": "just a reminder that the invoice for 2400 dollars is due on the 30th and uh you can pay through the portal at billing.northwind.io",
+      "must_keep": ["2400", "30th"],
+      "must_keep_exact": ["billing.northwind.io"]
+    },
+    {
+      "id": "e7",
+      "bucket": "email",
+      "raw": "hello professor kim i wanted to ask if i could get an extension on the assignment my uh laptop died and i lost the draft",
+      "must_keep": ["kim", "extension", "laptop"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "e8",
+      "bucket": "email",
+      "raw": "hi everyone um the offsite is confirmed for october 3rd through 5th in denver please book flights by end of month",
+      "must_keep": ["october", "3rd", "5th", "denver"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c1",
+      "bucket": "chat",
+      "raw": "lol yeah i saw that um lets just hop on a call after standup and figure it out",
+      "must_keep": ["standup", "call"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c2",
+      "bucket": "chat",
+      "raw": "nah dont worry about it i already pushed the fix uh should be live in like ten minutes",
+      "must_keep": ["ten", "fix"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c3",
+      "bucket": "chat",
+      "raw": "omg the demo went so well um the client literally clapped when the export finished",
+      "must_keep": ["demo", "export", "clapped"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c4",
+      "bucket": "chat",
+      "raw": "hey uh you still up for lunch tomorrow the thai place or should we just do the usual",
+      "must_keep": ["thai", "tomorrow", "lunch"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c5",
+      "bucket": "chat",
+      "raw": "yeah i mean i can review it tonight but honestly it might slip to tomorrow morning is that ok",
+      "must_keep": ["might", "tonight", "tomorrow"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c6",
+      "bucket": "chat",
+      "raw": "dude the new keyboard is amazing um the switches are so quiet i can actually record now",
+      "must_keep": ["keyboard", "switches", "record"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c7",
+      "bucket": "chat",
+      "raw": "sorry i missed your message uh yes the tickets are booked we land at 6:40 pm on saturday",
+      "must_keep": ["6:40", "saturday", "tickets"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "c8",
+      "bucket": "chat",
+      "raw": "haha no the cat walked on my keyboard thats why the commit message says uh asdfgh just ignore it",
+      "must_keep": ["asdfgh", "cat", "commit"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r1",
+      "bucket": "rambling",
+      "raw": "so um basically what i was thinking is that we you know we spend so much time in these planning meetings and like maybe half of it is just status updates that could honestly be a doc that people read before they show up",
+      "must_keep": ["planning", "status updates", "doc"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r2",
+      "bucket": "rambling",
+      "raw": "okay so the thing about the onboarding is that like people get to the second screen and they see the permissions request and you know a bunch of them just bail so um maybe we move that later in the flow",
+      "must_keep": ["second", "permissions", "maybe"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r3",
+      "bucket": "rambling",
+      "raw": "i was talking to jen yesterday and she was saying that um the sales team keeps getting asked about offline mode and like we have it it just isnt on the website anywhere which is kind of crazy",
+      "must_keep": ["jen", "offline", "website"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r4",
+      "bucket": "rambling",
+      "raw": "so like the gym thing is not really working for me in the mornings um because of the school run so i am thinking i switch to evenings maybe tuesday and thursday and see how that goes",
+      "must_keep": ["gym", "tuesday", "thursday", "maybe"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r5",
+      "bucket": "rambling",
+      "raw": "you know what i realized um our biggest churn month was february and that was right when we changed the pricing page so like maybe those two things are connected we should look at the funnel",
+      "must_keep": ["february", "churn", "pricing", "maybe"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r6",
+      "bucket": "rambling",
+      "raw": "um so for the trip i was thinking we do two days in kyoto and then uh three in tokyo and if theres time like a day trip to nara for the deer thing",
+      "must_keep": ["kyoto", "tokyo", "nara", "two", "three"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r7",
+      "bucket": "rambling",
+      "raw": "the thing is um the contractor said the kitchen would be done by may and its july now and like every week theres a new reason so i think we need to get a second quote honestly",
+      "must_keep": ["may", "july", "quote", "kitchen"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "r8",
+      "bucket": "rambling",
+      "raw": "so i have been using the standing desk for like a month now and um honestly my back feels better but my feet hurt so i guess i need a mat or something",
+      "must_keep": ["standing desk", "back", "feet", "mat"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f1",
+      "bucket": "false_starts",
+      "raw": "we should ship on i mean we should ship the fix on monday not tuesday",
+      "must_keep": ["monday", "tuesday", "not"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f2",
+      "bucket": "false_starts",
+      "raw": "can you send the no wait can you cc the whole team on the report when you send it",
+      "must_keep": ["cc", "team", "report"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f3",
+      "bucket": "false_starts",
+      "raw": "the budget is 40 no sorry the budget is 45 thousand for q3",
+      "must_keep": ["45", "thousand", "q3"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f4",
+      "bucket": "false_starts",
+      "raw": "i think we i think we should probably talk to the vendor before we um before we sign anything",
+      "must_keep": ["vendor", "sign", "probably"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f5",
+      "bucket": "false_starts",
+      "raw": "the meeting is at 3 no wait its at 3:30 in the small conference room",
+      "must_keep": ["3:30", "conference"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f6",
+      "bucket": "false_starts",
+      "raw": "lets use the blue one actually no the green one for the header it matches the logo better",
+      "must_keep": ["green", "header", "logo"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "f7",
+      "bucket": "false_starts",
+      "raw": "tell dana that the that the shipment is stuck in customs and might slip a week",
+      "must_keep": ["dana", "customs", "might"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "d1",
+      "bucket": "entity_dense",
+      "raw": "forward the deck to priya.sharma@vertex-labs.io and cc marcus before the 4 pm review on thursday",
+      "must_keep": ["marcus", "4", "thursday"],
+      "must_keep_exact": ["priya.sharma@vertex-labs.io"]
+    },
+    {
+      "id": "d2",
+      "bucket": "entity_dense",
+      "raw": "the config lives at C:\\ProgramData\\voicewave\\settings.json and the log is at C:\\Users\\rith\\AppData\\voicewave\\session.log",
+      "must_keep": [],
+      "must_keep_exact": [
+        "C:\\ProgramData\\voicewave\\settings.json",
+        "C:\\Users\\rith\\AppData\\voicewave\\session.log"
+      ]
+    },
+    {
+      "id": "d3",
+      "bucket": "entity_dense",
+      "raw": "we are on version 0.5.1 and the fix lands in 0.6.0 which ships on august 8th",
+      "must_keep": ["0.5.1", "0.6.0", "august", "8th"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "d4",
+      "bucket": "entity_dense",
+      "raw": "the api key starts with sk dash test and the webhook url is https://api.stripe.com/v1/webhooks check both in the dashboard",
+      "must_keep": ["dashboard"],
+      "must_keep_exact": ["https://api.stripe.com/v1/webhooks"]
+    },
+    {
+      "id": "d5",
+      "bucket": "entity_dense",
+      "raw": "call the clinic at 206 555 0182 and reschedule from the 9th to the 16th preferably morning",
+      "must_keep": ["206", "555", "0182", "9th", "16th", "morning"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "d6",
+      "bucket": "entity_dense",
+      "raw": "the renderTranscript function calls formatTimestamp and then get_speaker_label for every segment in segments dot json",
+      "must_keep": ["segment"],
+      "must_keep_exact": [
+        "renderTranscript",
+        "formatTimestamp",
+        "get_speaker_label"
+      ]
+    },
+    {
+      "id": "d7",
+      "bucket": "entity_dense",
+      "raw": "book the flight for liam obrien on delta 1142 leaving portland at 7:15 am on the 22nd",
+      "must_keep": ["liam", "brien", "1142", "7:15", "22nd", "portland"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "d8",
+      "bucket": "entity_dense",
+      "raw": "the repo is github.com/voicewave/desktop and the branch is fix slash hotkey dash race merge it after ci passes",
+      "must_keep": ["ci"],
+      "must_keep_exact": ["github.com/voicewave/desktop"]
+    },
+    {
+      "id": "n1",
+      "bucket": "negation",
+      "raw": "i dont think we should enable auto update by default um maybe make it opt in for the beta",
+      "must_keep": ["not", "maybe", "auto", "opt", "beta"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "n2",
+      "bucket": "negation",
+      "raw": "we are definitely not renaming the product before launch that decision is final",
+      "must_keep": ["not", "renaming", "launch", "final"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "n3",
+      "bucket": "negation",
+      "raw": "maybe we should hold off on the redesign until after the conference i am not sure the timing is right",
+      "must_keep": ["maybe", "not", "redesign", "conference"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "n4",
+      "bucket": "negation",
+      "raw": "the tests are probably fine but i havent run the full suite locally so dont merge yet",
+      "must_keep": ["probably", "not", "merge"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "n5",
+      "bucket": "negation",
+      "raw": "i might be wrong about this but i think the discount only applies to annual plans not monthly",
+      "must_keep": ["might", "annual", "monthly", "not"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "n6",
+      "bucket": "negation",
+      "raw": "do not delete the staging database its not backed up yet",
+      "must_keep": ["not", "staging", "database"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s1",
+      "bucket": "short",
+      "raw": "send it tomorrow",
+      "must_keep": ["send", "tomorrow"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s2",
+      "bucket": "short",
+      "raw": "um call me back",
+      "must_keep": ["call"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s3",
+      "bucket": "short",
+      "raw": "meeting moved to 4",
+      "must_keep": ["meeting", "4"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s4",
+      "bucket": "short",
+      "raw": "yes lets do friday",
+      "must_keep": ["friday"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s5",
+      "bucket": "short",
+      "raw": "dont push yet",
+      "must_keep": ["push", "not"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "s6",
+      "bucket": "short",
+      "raw": "ship it",
+      "must_keep": ["ship"],
+      "must_keep_exact": []
+    }
+  ]
+}

@@ -40,6 +40,7 @@ npx @tauri-apps/cli signer generate -w src-tauri/.tauri/voicewave-updater.key
   `pubkey` value in `tauri.conf.json`.
 
 > ⚠️ **Security**
+>
 > - The committed `pubkey` is safe to share. The private key is **not**.
 > - Whoever holds the private key can sign updates that auto-install on every
 >   user. Treat it like a release-signing secret.
@@ -52,11 +53,11 @@ npx @tauri-apps/cli signer generate -w src-tauri/.tauri/voicewave-updater.key
 
 ### Required GitHub Actions secrets
 
-| Secret | Value |
-| --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `src-tauri/.tauri/voicewave-updater.key` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key password (`""` if generated with `--ci`) |
-| `WINGET` | Classic PAT with `public_repo` (for the winget PR) |
+| Secret                               | Value                                                |
+| ------------------------------------ | ---------------------------------------------------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Contents of `src-tauri/.tauri/voicewave-updater.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key password (`""` if generated with `--ci`)     |
+| `WINGET`                             | Classic PAT with `public_repo` (for the winget PR)   |
 
 ## Release process
 
@@ -90,12 +91,12 @@ local builds also emit a signed installer + `<installer>.exe.sig`. To produce
 
 ## Files
 
-| File | Role |
-| --- | --- |
-| `src-tauri/tauri.conf.json` | `plugins.updater` config + `bundle.createUpdaterArtifacts` |
-| `src-tauri/src/lib.rs` | Registers `updater` + `process` plugins |
-| `src-tauri/capabilities/default.json` | `updater:default`, `process:default` permissions |
-| `src/lib/updater.ts` | check / download+install / relaunch wrapper |
-| `src/components/UpdatePrompt.tsx` | The launch-time prompt UI |
-| `scripts/release/generate-latest-json.ps1` | Builds the update manifest |
-| `.github/workflows/release.yml` | Build → sign → latest.json → winget |
+| File                                       | Role                                                       |
+| ------------------------------------------ | ---------------------------------------------------------- |
+| `src-tauri/tauri.conf.json`                | `plugins.updater` config + `bundle.createUpdaterArtifacts` |
+| `src-tauri/src/lib.rs`                     | Registers `updater` + `process` plugins                    |
+| `src-tauri/capabilities/default.json`      | `updater:default`, `process:default` permissions           |
+| `src/lib/updater.ts`                       | check / download+install / relaunch wrapper                |
+| `src/components/UpdatePrompt.tsx`          | The launch-time prompt UI                                  |
+| `scripts/release/generate-latest-json.ps1` | Builds the update manifest                                 |
+| `.github/workflows/release.yml`            | Build → sign → latest.json → winget                        |

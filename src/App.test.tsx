@@ -86,6 +86,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     sessionHistory: [],
     setAppProfiles: vi.fn(),
     setCodeModeSettings: vi.fn(),
+    setDictationProfile: vi.fn(),
     setDiagnosticsOptIn: vi.fn(),
     setDomainPacks: vi.fn(),
     setFormatProfile: vi.fn(),
@@ -165,12 +166,9 @@ describe("App navigation and phase three panels", () => {
     expect(screen.getByRole("button", { name: "Pro Tools" })).toBeInTheDocument();
   });
 
-  it("shows Pro Tools for pro users and applies Coding mode", async () => {
+  it("shows Polish Profiles for pro users and selects Coding with one atomic call", async () => {
+    const setDictationProfile = vi.fn().mockResolvedValue(undefined);
     const setFormatProfile = vi.fn();
-    const setDomainPacks = vi.fn();
-    const setCodeModeSettings = vi.fn();
-    const setAppProfiles = vi.fn();
-    const setProPostProcessingEnabled = vi.fn();
     const useVoiceWaveSpy = vi
       .spyOn(hookModule, "useVoiceWave")
       .mockReturnValue(
@@ -194,6 +192,52 @@ describe("App navigation and phase three panels", () => {
             },
             message: null
           },
+          setDictationProfile,
+          setFormatProfile
+        }) as any
+      );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Pro Tools" }));
+    expect(screen.getByText("Polish Profiles")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Standard/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Coding/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Writing/ })).toBeInTheDocument();
+    // Casual is cut from the v1 lineup (plan 010 Rev 3: failed the
+    // distinctness gate against Writing) — it must NOT render as a card.
+    expect(screen.queryByRole("button", { name: /^Casual/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Literal/ })).toBeInTheDocument();
+    // The wait-validated profiles disclose the latency trade up front.
+    expect(screen.getAllByText("Adds ~2s for AI shaping.").length).toBe(2);
+    expect(
+      screen.getByText("No AI rewriting — your words as recognized, punctuation only.")
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Coding/ }));
+    await waitFor(() => {
+      // ONE atomic profile write — never the old five sequential writes.
+      expect(setDictationProfile).toHaveBeenCalledWith("coding");
+      expect(setFormatProfile).not.toHaveBeenCalled();
+    });
+
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("falls back to the deprecated multi-write path when the backend lacks set_dictation_profile", async () => {
+    const setDictationProfile = vi
+      .fn()
+      .mockRejectedValue(new Error("Command set_dictation_profile not found"));
+    const setFormatProfile = vi.fn();
+    const setDomainPacks = vi.fn();
+    const setCodeModeSettings = vi.fn();
+    const setAppProfiles = vi.fn();
+    const setProPostProcessingEnabled = vi.fn();
+    const useVoiceWaveSpy = vi
+      .spyOn(hookModule, "useVoiceWave")
+      .mockReturnValue(
+        buildHookMock({
+          isPro: true,
+          setDictationProfile,
           setFormatProfile,
           setDomainPacks,
           setCodeModeSettings,
@@ -204,27 +248,17 @@ describe("App navigation and phase three panels", () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Pro Tools" }));
-    expect(screen.getByText("Pro Tools Modes")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Default/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Coding/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Writing/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Study/i })).toBeInTheDocument();
-    expect(screen.queryByText("Fine Tuning")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Coding/ }));
 
-    fireEvent.click(screen.getByRole("button", { name: /Coding/i }));
     await waitFor(() => {
+      expect(setDictationProfile).toHaveBeenCalledWith("coding");
       expect(setFormatProfile).toHaveBeenCalledWith("code-doc");
       expect(setDomainPacks).toHaveBeenCalledWith(["coding"]);
       expect(setCodeModeSettings).toHaveBeenCalledWith(
-        expect.objectContaining({
-          enabled: true,
-          preferredCasing: "camelCase"
-        })
+        expect.objectContaining({ enabled: true, preferredCasing: "camelCase" })
       );
       expect(setAppProfiles).toHaveBeenCalledWith(
-        expect.objectContaining({
-          activeTarget: "editor"
-        })
+        expect.objectContaining({ activeTarget: "editor" })
       );
       expect(setProPostProcessingEnabled).toHaveBeenCalledWith(true);
     });

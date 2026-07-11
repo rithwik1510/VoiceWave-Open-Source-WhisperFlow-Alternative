@@ -1,0 +1,11 @@
+VoiceWave Windows global hotkey runtime smoke
+Date: 2026-07-11
+Command: cargo test --manifest-path src-tauri/Cargo.toml hotkey::tests::windows_event_runtime_installs_and_shuts_down_cleanly -- --exact
+
+running 1 test
+test hotkey::tests::windows_event_runtime_installs_and_shuts_down_cleanly ... ok
+
+result: ok. 1 passed; 0 failed
+
+Evidence: the event-driven Windows low-level keyboard hook installed and its
+message-loop thread shut down cleanly in this workspace.

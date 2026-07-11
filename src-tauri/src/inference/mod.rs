@@ -3,6 +3,7 @@ mod backend;
 mod executor;
 mod faster_whisper;
 pub mod llm_polish;
+pub mod polish_gate;
 mod policy;
 
 pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};

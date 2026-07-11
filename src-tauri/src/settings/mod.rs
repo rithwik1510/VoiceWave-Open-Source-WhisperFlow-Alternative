@@ -1,5 +1,12 @@
+pub mod profile;
+
 use crate::audio::input_volume::MicVolumeGuardMode;
 use directories::ProjectDirs;
+pub use profile::{
+    apply_profile_defaults, is_customized as is_polish_profile_customized,
+    migrate_and_sync_polish_profile, profile_defaults, resolve_profile, EffectivePolicy,
+    InsertPath, PolishProfile, ProfileBundle,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -173,6 +180,29 @@ pub struct VoiceWaveSettings {
     /// see it exactly once.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Persisted polish profile (plan 010) — the single authority for how a
+    /// dictation is shaped. FIELD-level `serde(default)` on purpose: it makes
+    /// a missing `polishProfile` deserialize to `None` (legacy config marker
+    /// for migration) instead of inheriting `Some(Standard)` from the
+    /// container default. `normalize_pro_settings` fills it on every load, so
+    /// it is always `Some(..)` after loading.
+    #[serde(default)]
+    pub polish_profile: Option<PolishProfile>,
+    /// True when any profile-derived field (format profile, domain packs,
+    /// code mode, post-processing) differs from the selected profile's
+    /// defaults ("Writing - Customized"). Recomputed on every settings
+    /// load/update; persisted only so the frontend payload carries it.
+    #[serde(default)]
+    pub polish_profile_customized: bool,
+}
+
+impl VoiceWaveSettings {
+    /// The active polish profile. `polish_profile` is only `None` for a
+    /// legacy settings JSON before normalization runs; treat that as
+    /// Standard.
+    pub fn effective_polish_profile(&self) -> PolishProfile {
+        self.polish_profile.unwrap_or_default()
+    }
 }
 
 impl Default for VoiceWaveSettings {
@@ -200,6 +230,8 @@ impl Default for VoiceWaveSettings {
             pill_action_suggestions: false,
             llm_polish_enabled: false,
             onboarding_completed: false,
+            polish_profile: Some(PolishProfile::Standard),
+            polish_profile_customized: false,
         }
     }
 }
@@ -291,6 +323,10 @@ pub fn normalize_pro_settings(settings: &mut VoiceWaveSettings) {
     settings
         .active_domain_packs
         .retain(|pack| seen.insert(*pack));
+
+    // Plan 010: fill the polish profile for legacy configs (keeping their
+    // field values as overrides) and keep the `customized` flag honest.
+    migrate_and_sync_polish_profile(settings);
 }
 
 pub const LOCKED_TOGGLE_HOTKEY: &str = "Ctrl+Alt+X";

@@ -52,6 +52,7 @@ wingetcreate update VoiceWave.LocalCore `
 ```
 
 Notes:
+
 - `gh auth token` must carry `repo`/`public_repo` scope (a normal `gh auth login` does). If the
   submit is rejected for auth, run `gh auth refresh -s public_repo` first, or paste a classic PAT.
 - This opens a PR on microsoft/winget-pkgs. It does **not** touch your repo or need CI.
@@ -62,7 +63,7 @@ Notes:
 
 So future releases auto-publish (and the new preflight stays green):
 
-1. Create a **classic** PAT: https://github.com/settings/tokens → *Generate new token (classic)*.
+1. Create a **classic** PAT: https://github.com/settings/tokens → _Generate new token (classic)_.
    Scope: check **`public_repo`** (under the `repo` group). Fine-grained PATs are not reliable
    with winget-releaser — use classic. Set a sane expiry and calendar a renewal.
 2. Repo → **Settings → Secrets and variables → Actions → New repository secret**

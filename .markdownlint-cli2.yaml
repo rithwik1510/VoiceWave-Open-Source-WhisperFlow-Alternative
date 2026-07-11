@@ -1,7 +1,31 @@
 config:
   default: true
   MD013: false
+  MD024:
+    siblings_only: true
+  MD029: false
+  MD031: false
+  MD033: false
+  MD034: false
+  MD036: false
+  MD040: false
+  MD041: false
 ignores:
   - node_modules
+  - "**/node_modules"
   - dist
+  - .venv-faster-whisper
+  - DemoVideo
+  - "Marketing plans"
+  - scripts/llm-polish/results
+  - src-tauri/windows/faster-whisper/python
+  - vendor
+  - src-tauri/gen
+  - voicewave-prototype
+  - voicewave-website
+  - voicewave-website2
+  - plans
+  - manifests
+  - winget
+  - winget-manifest
   - Idea.md

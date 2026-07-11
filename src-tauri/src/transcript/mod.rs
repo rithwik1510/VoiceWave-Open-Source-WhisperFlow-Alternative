@@ -64,6 +64,40 @@ pub fn finalize_pro_transcript(input: &str, options: &ProTranscriptOptions<'_>) 
     normalize_output_whitespace(&text)
 }
 
+/// Literal profile finalization (plan 010): branches from the sanitized ASR
+/// baseline BEFORE the deterministic transform stack, because by the end of
+/// `finalize_pro_transcript` the original word sequence (fillers, repeated
+/// tokens) is already gone.
+///
+/// Applies ONLY:
+/// - explicit spoken punctuation/structural commands (user commands, not AI
+///   rewriting) when `spoken_edit_commands` is on,
+/// - user-dictionary stabilization (corrects recognition toward what was
+///   actually said),
+/// - punctuation/capitalization (sentence casing, pronoun "I", terminal
+///   punctuation).
+///
+/// Deliberately skipped: filler pruning, stutter collapse, domain
+/// corrections, format profiles, app-profile behavior, code mode, and the
+/// heuristic spoken-numbered-list formatter (a formatting transform, not an
+/// explicit command).
+pub fn finalize_literal_transcript(
+    input: &str,
+    spoken_edit_commands: bool,
+    custom_terms: &[String],
+) -> String {
+    let sanitized = sanitize_user_transcript(input);
+    if sanitized.is_empty() {
+        return sanitized;
+    }
+    let mut text = format_sentence_fragment(&sanitized);
+    if spoken_edit_commands {
+        text = apply_structural_commands(&text);
+    }
+    text = stabilize_custom_terms(&text, custom_terms);
+    normalize_output_whitespace(&text)
+}
+
 pub fn merge_incremental_transcript(
     committed: &str,
     incoming: &str,
@@ -1249,6 +1283,50 @@ mod tests {
         let output = finalize_pro_transcript("buy milk bullet point buy eggs", &options);
         assert_eq!(output, "Buy milk bullet point buy eggs.");
         assert!(!output.contains('\n'));
+    }
+
+    #[test]
+    fn literal_keeps_fillers_and_stutters_verbatim() {
+        use super::finalize_literal_transcript;
+        // No filler pruning, no stutter collapse, no domain corrections —
+        // just capitalization + terminal punctuation.
+        assert_eq!(
+            finalize_literal_transcript("um, i i think the the api works now", true, &[]),
+            // (Pronoun "i" capitalization is part of the always-on
+            // punctuation/capitalization tier, so both "i"s become "I".)
+            "Um, I I think the the api works now."
+        );
+    }
+
+    #[test]
+    fn literal_applies_structural_commands_and_dictionary() {
+        use super::finalize_literal_transcript;
+        let custom_terms = vec!["VoiceWave".to_string()];
+        assert_eq!(
+            finalize_literal_transcript(
+                "voicewave is ready new line ship it",
+                true,
+                &custom_terms
+            ),
+            "VoiceWave is ready\nship it."
+        );
+        // Structural commands off -> spoken phrase stays literal words.
+        assert_eq!(
+            finalize_literal_transcript("first line new line second line", false, &[]),
+            "First line new line second line."
+        );
+    }
+
+    #[test]
+    fn literal_does_not_format_spoken_numbered_lists() {
+        use super::finalize_literal_transcript;
+        let output = finalize_literal_transcript(
+            "one fix microphone settings two check model install three run dictation test",
+            true,
+            &[],
+        );
+        assert!(!output.contains('\n'));
+        assert!(output.starts_with("One fix microphone settings"));
     }
 
     #[test]

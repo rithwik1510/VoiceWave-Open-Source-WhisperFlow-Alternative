@@ -35,6 +35,24 @@ export interface CodeModeSettings {
 
 export type MicVolumeGuardMode = "off" | "warn" | "autoRestore";
 
+/** Persisted dictation polish profile (plan 010). The single authority for
+ * how a dictation is shaped; the four deterministic fields become derived
+ * defaults with tracked user overrides. */
+export type PolishProfile = "standard" | "coding" | "writing" | "casual" | "literal";
+
+/** How the AI-polish tier resolved for one dictation (plan 010).
+ * - `accepted`: validated LLM output landed in the target app.
+ * - `fallbackTimeout` / `fallbackRejected`: the deterministic floor landed
+ *   because polish missed the release-to-insert budget or failed validation.
+ * - `literal`: Literal profile — the model was never called.
+ * - `disabled`: AI polish is off. */
+export type PolishOutcome =
+  | "accepted"
+  | "fallbackTimeout"
+  | "fallbackRejected"
+  | "literal"
+  | "disabled";
+
 export interface VoiceWaveSettings {
   inputDevice: string | null;
   activeModel: string;
@@ -64,6 +82,15 @@ export interface VoiceWaveSettings {
   llmPolishEnabled?: boolean;
   /** True once the first-run onboarding flow finished (or was skipped). */
   onboardingCompleted?: boolean;
+  /** Active polish profile (plan 010). Optional here because backends older
+   * than the DictationProfile module never send it — absence marks a legacy
+   * config, and the UI falls back to inferring a profile from the old
+   * deterministic fields. New backends always send it (default "standard"). */
+  polishProfile?: PolishProfile;
+  /** True when advanced fields have been edited away from the selected
+   * profile's defaults ("Writing · Customized"). Optional for the same
+   * legacy-backend reason as `polishProfile`. */
+  polishProfileCustomized?: boolean;
 }
 
 export interface VoiceWaveSnapshot {
@@ -398,6 +425,19 @@ export interface SessionHistoryRecord {
   message?: string | null;
   tags: string[];
   starred: boolean;
+  /** Profile that was active for this dictation (plan 010). All six polish
+   * fields below are absent on records persisted before profiles shipped —
+   * such records render exactly as they always have. */
+  selectedProfile?: PolishProfile;
+  /** Exactly what landed in the target app (may be the deterministic
+   * fallback, not the polished candidate). */
+  insertedText?: string;
+  /** The validated LLM candidate, when one was produced. May arrive via the
+   * async retry pass after insertion (history-updated event). */
+  polishedText?: string;
+  polishOutcome?: PolishOutcome;
+  polishLatencyMs?: number;
+  polishRetried?: boolean;
 }
 
 export type HistoryExportPreset = "plain" | "markdownNotes" | "studySummary";

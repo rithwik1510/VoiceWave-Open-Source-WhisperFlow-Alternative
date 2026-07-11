@@ -49,11 +49,17 @@ import type {
   DictionaryTerm,
   FormatProfile,
   MicVolumeGuardMode,
+  PolishOutcome,
+  PolishProfile,
   RetentionPolicy,
+  SessionHistoryRecord,
   VoiceWaveSettings
 } from "./types/voicewave";
 
 type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
+/** @deprecated Pre-plan-010 mode identity, kept only so the legacy multi-write
+ * fallback can address `buildProToolsPreset` on backends without
+ * `set_dictation_profile`. New code speaks `PolishProfile`. */
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
 type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
@@ -109,37 +115,105 @@ interface ProToolsPreset {
   postProcessingEnabled: boolean;
 }
 
-const PRO_TOOLS_MODE_CARDS: Array<{
-  id: ProToolsMode;
+/** The one raw dictation every profile card rewrites — showing the SAME
+ * sentence under each profile makes the differences visible at selection
+ * time (plan 010 north star). */
+const POLISH_PROFILE_RAW_EXAMPLE =
+  "so um i think we should refactor getUserById to not throw when the user doesnt exist and instead return null";
+
+interface PolishProfileCard {
+  id: PolishProfile;
   title: string;
   description: string;
-  highlight: string;
-}> = [
+  /** Canned reference output for POLISH_PROFILE_RAW_EXAMPLE (plan 010). */
+  example: string;
+  /** Delivery small print: latency disclosure or insert-path note. */
+  note: string;
+}
+
+const POLISH_PROFILE_CARDS: PolishProfileCard[] = [
   {
-    id: "default",
-    title: "Default",
-    description: "Closest to classic dictation with light cleanup.",
-    highlight: "Best for everyday typing without aggressive transforms."
+    id: "standard",
+    title: "Standard",
+    description: "Light cleanup — grammar and fillers fixed, nothing rephrased.",
+    example:
+      "So I think we should refactor getUserById to not throw when the user doesn't exist and instead return null.",
+    note: "Inserts instantly. AI suggestions stay in the pill."
   },
   {
     id: "coding",
     title: "Coding",
-    description: "Voice-to-code setup with symbol handling and coding vocabulary.",
-    highlight: "Enables Code Mode + coding domain dictionary."
+    description:
+      "Terse engineering phrasing. Identifiers, paths, and casing preserved character-for-character.",
+    example: "Refactor getUserById to return null instead of throwing when the user doesn't exist.",
+    note: "Adds ~2s for AI shaping."
   },
   {
     id: "writing",
     title: "Writing",
-    description: "Cleaner prose output for docs, posts, and polished text.",
-    highlight: "Uses formal formatting + productivity wording."
+    description: "Grammatical professional prose. Your hedges and uncertainty stay yours.",
+    example:
+      "I think we should refactor getUserById so that it returns null rather than throwing an exception when the user does not exist.",
+    note: "Adds ~2s for AI shaping."
   },
+  // Casual is CUT from the v1 selectable lineup (plan 010 gate): on the
+  // dev/holdout corpus its output was near-identical to Writing on 50-59%
+  // of realistic input — an indistinguishable mode teaches users the
+  // feature is fake. The backend still accepts "casual" (old settings
+  // stay valid) and History still labels it; re-add the card here if a
+  // future prompt iteration passes the distinctness gate.
   {
-    id: "study",
-    title: "Study",
-    description: "Note-friendly flow for lectures, revision, and summaries.",
-    highlight: "Uses concise formatting + student-focused dictionary."
+    id: "literal",
+    title: "Literal",
+    description: "No AI rewriting — your words as recognized, punctuation only.",
+    example:
+      "So, um, I think we should refactor getUserById to not throw when the user doesn't exist and instead return null.",
+    note: "Inserts instantly. Fillers and repeats are kept."
   }
 ];
+
+const POLISH_PROFILE_LABELS: Record<PolishProfile, string> = {
+  standard: "Standard",
+  coding: "Coding",
+  writing: "Writing",
+  casual: "Casual",
+  literal: "Literal"
+};
+
+/** Short human badge for a record's polish outcome; null means "no badge"
+ * (polish disabled adds nothing the method column doesn't already say). */
+function polishOutcomeLabel(outcome: PolishOutcome): string | null {
+  switch (outcome) {
+    case "accepted":
+      return "accepted";
+    case "fallbackTimeout":
+    case "fallbackRejected":
+      return "fallback";
+    case "literal":
+      return "literal";
+    case "disabled":
+      return null;
+  }
+}
+
+/** A record offers the compare view only when both texts exist and actually
+ * differ; old records (fields absent) render exactly as before. */
+function canCompareRecord(record: SessionHistoryRecord): boolean {
+  return Boolean(
+    record.insertedText && record.polishedText && record.insertedText !== record.polishedText
+  );
+}
+
+/** @deprecated Maps a polish profile onto the closest pre-plan-010 preset for
+ * the legacy multi-write fallback. Literal has no legacy equivalent and maps
+ * to the default preset. */
+const LEGACY_PROFILE_TO_MODE: Record<PolishProfile, ProToolsMode> = {
+  standard: "default",
+  coding: "coding",
+  writing: "writing",
+  casual: "study",
+  literal: "default"
+};
 
 const PRO_HIGHLIGHT_CARDS: Array<{
   id: string;
@@ -167,6 +241,9 @@ const PRO_HIGHLIGHT_CARDS: Array<{
   }
 ];
 
+/** @deprecated Pre-plan-010 inference: derives a mode from four independently
+ * editable settings. Only consulted (via `detectLegacyPolishProfile`) when the
+ * backend never sent `polishProfile`. */
 function detectProToolsMode(settings: VoiceWaveSettings): ProToolsMode {
   if (
     settings.codeMode.enabled ||
@@ -191,6 +268,38 @@ function detectProToolsMode(settings: VoiceWaveSettings): ProToolsMode {
   return "default";
 }
 
+/** @deprecated Display-only heuristic for backends that predate the persisted
+ * `polishProfile`: maps the old inferred mode onto the closest profile so the
+ * cards still show a sane selection. Old "study" (concise + student) lands on
+ * Writing — matching the Rust migration, which retargeted study away from the
+ * cut Casual profile so no user lands on an unselectable card. */
+function detectLegacyPolishProfile(settings: VoiceWaveSettings): PolishProfile {
+  switch (detectProToolsMode(settings)) {
+    case "coding":
+      return "coding";
+    case "writing":
+      return "writing";
+    case "study":
+      return "writing";
+    default:
+      return "standard";
+  }
+}
+
+/** Whether a `set_dictation_profile` rejection means the backend simply does
+ * not know the command yet (older core), as opposed to a real failure. */
+function isUnknownProfileCommandError(err: unknown): boolean {
+  const message =
+    err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return (
+    /set_dictation_profile/i.test(message) &&
+    /unknown|not found|not allowed/i.test(message)
+  );
+}
+
+/** @deprecated Only feeds the legacy multi-write fallback for backends
+ * without `set_dictation_profile`. Profile policy now lives in Rust
+ * (`resolve_profile`); the frontend must not grow this table. */
 function buildProToolsPreset(mode: ProToolsMode, settings: VoiceWaveSettings): ProToolsPreset {
   switch (mode) {
     case "coding":
@@ -335,7 +444,9 @@ function App() {
   const [dictionaryPendingOpen, setDictionaryPendingOpen] = useState(false);
   const [ownerTapCount, setOwnerTapCount] = useState(0);
   const [ownerPassphrase, setOwnerPassphrase] = useState("");
-  const [modeApplyPending, setModeApplyPending] = useState<ProToolsMode | null>(null);
+  const [profileApplyPending, setProfileApplyPending] = useState<PolishProfile | null>(null);
+  const [profileResetConfirming, setProfileResetConfirming] = useState(false);
+  const [expandedCompareId, setExpandedCompareId] = useState<string | null>(null);
   const [benchmarkPanelOpen, setBenchmarkPanelOpen] = useState(false);
   const [demoProfile, setDemoProfile] = useState<DemoProfile | null>(null);
   const [cloudUserId, setCloudUserId] = useState<string | null>(null);
@@ -403,6 +514,7 @@ function App() {
     sessionHistory,
     setAppProfiles,
     setCodeModeSettings,
+    setDictationProfile,
     setDiagnosticsOptIn,
     setDomainPacks,
     setFormatProfile,
@@ -452,10 +564,18 @@ function App() {
   );
   const showOwnerUnlock = ownerTapCount >= 5;
   const pressActiveRef = useRef(false);
-  const modeApplyInFlightRef = useRef(false);
+  const profileApplyInFlightRef = useRef(false);
   const lastCloudSentenceRef = useRef<string | null>(null);
-  const activeProToolsMode = useMemo(() => detectProToolsMode(settings), [settings]);
-  const displayedProToolsMode = modeApplyPending ?? activeProToolsMode;
+  // The persisted profile is the authority; absence means a legacy backend
+  // and we fall back to the deprecated inference so the cards stay honest.
+  const activePolishProfile = useMemo<PolishProfile>(
+    () => settings.polishProfile ?? detectLegacyPolishProfile(settings),
+    [settings]
+  );
+  const displayedPolishProfile = profileApplyPending ?? activePolishProfile;
+  // "Customized" only exists on profile-aware backends.
+  const profileCustomized =
+    settings.polishProfile != null && (settings.polishProfileCustomized ?? false);
   const proStatusLabel = isOwnerOverride ? "Owner Pro (Device Override)" : "Release Offer Active";
   const releaseOfferHeadline = "Pro is unlocked for every workspace during this initial release.";
   const releaseOfferLine = entitlement.plan.offerCopy || "Initial release offer: Pro is included for everyone.";
@@ -789,32 +909,72 @@ function App() {
     }
   };
 
-  const applyProToolsMode = async (mode: ProToolsMode) => {
+  /** @deprecated Reconstructs a profile with the old five sequential writes.
+   * Torn-config risk retained by design — this runs ONLY when the backend
+   * rejects `set_dictation_profile` as unknown (older core). */
+  const applyLegacyProfileWrites = async (profile: PolishProfile) => {
+    const preset = buildProToolsPreset(LEGACY_PROFILE_TO_MODE[profile], settings);
+    await setFormatProfile(preset.formatProfile);
+    await setDomainPacks(preset.domainPacks);
+    await setCodeModeSettings(preset.codeMode);
+    await setAppProfiles(preset.appProfiles);
+    await setProPostProcessingEnabled(preset.postProcessingEnabled);
+  };
+
+  const applyPolishProfile = async (profile: PolishProfile) => {
     if (!isPro) {
       setActiveNav("pro");
       return;
     }
-    if (modeApplyInFlightRef.current || modeApplyPending) {
+    if (profileApplyInFlightRef.current || profileApplyPending) {
       return;
     }
-    if (mode === activeProToolsMode) {
+    if (profile === activePolishProfile) {
+      // Reselecting the active card is the reset gesture when customized;
+      // otherwise it's a no-op.
+      if (profileCustomized) {
+        setProfileResetConfirming(true);
+      }
       return;
     }
 
-    const preset = buildProToolsPreset(mode, settings);
-    modeApplyInFlightRef.current = true;
-    setModeApplyPending(mode);
+    profileApplyInFlightRef.current = true;
+    setProfileApplyPending(profile);
+    setProfileResetConfirming(false);
     try {
-      await setFormatProfile(preset.formatProfile);
-      await setDomainPacks(preset.domainPacks);
-      await setCodeModeSettings(preset.codeMode);
-      await setAppProfiles(preset.appProfiles);
-      await setProPostProcessingEnabled(preset.postProcessingEnabled);
+      await setDictationProfile(profile);
     } catch (err) {
-      console.error("Failed to apply Pro Tools mode:", err);
+      if (isUnknownProfileCommandError(err)) {
+        try {
+          await applyLegacyProfileWrites(profile);
+        } catch (legacyErr) {
+          console.error("Failed to apply polish profile (legacy fallback):", legacyErr);
+        }
+      } else {
+        console.error("Failed to set dictation profile:", err);
+      }
     } finally {
-      modeApplyInFlightRef.current = false;
-      setModeApplyPending(null);
+      profileApplyInFlightRef.current = false;
+      setProfileApplyPending(null);
+    }
+  };
+
+  /** Confirmed "Reset to profile defaults": re-issuing the atomic profile
+   * command clears the tracked overrides on the backend. */
+  const confirmProfileReset = async () => {
+    setProfileResetConfirming(false);
+    if (profileApplyInFlightRef.current || profileApplyPending) {
+      return;
+    }
+    profileApplyInFlightRef.current = true;
+    setProfileApplyPending(activePolishProfile);
+    try {
+      await setDictationProfile(activePolishProfile);
+    } catch (err) {
+      console.error("Failed to reset profile defaults:", err);
+    } finally {
+      profileApplyInFlightRef.current = false;
+      setProfileApplyPending(null);
     }
   };
 
@@ -1449,7 +1609,13 @@ function App() {
                 </div>
               ) : (
                 <div className="vw-row-list vw-list-stagger mt-5">
-                  {sessionHistory.map((record) => (
+                  {sessionHistory.map((record) => {
+                    const outcomeLabel = record.polishOutcome
+                      ? polishOutcomeLabel(record.polishOutcome)
+                      : null;
+                    const compareAvailable = canCompareRecord(record);
+                    const compareOpen = compareAvailable && expandedCompareId === record.recordId;
+                    return (
                     <div key={record.recordId} className="vw-interactive-row px-5 py-3.5">
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
@@ -1463,6 +1629,19 @@ function App() {
                                 <span className="text-[#E4E4E7]">·</span>
                                 <span>{record.method}</span>
                               </>
+                            )}
+                            {record.selectedProfile && (
+                              <>
+                                <span className="text-[#E4E4E7]">·</span>
+                                <span>{POLISH_PROFILE_LABELS[record.selectedProfile]}</span>
+                              </>
+                            )}
+                            {outcomeLabel && (
+                              <span
+                                className={`vw-chip ${outcomeLabel === "accepted" ? "vw-chip-accent" : ""}`}
+                              >
+                                {outcomeLabel}
+                              </span>
                             )}
                             {!record.success && (
                               <>
@@ -1478,6 +1657,25 @@ function App() {
                           </p>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
+                          {compareAvailable && (
+                            <button
+                              type="button"
+                              className="vw-btn-secondary vw-btn-sm"
+                              aria-expanded={compareOpen}
+                              title="Compare what was inserted with the AI polish"
+                              onClick={() =>
+                                setExpandedCompareId((prev) =>
+                                  prev === record.recordId ? null : record.recordId
+                                )
+                              }
+                            >
+                              Compare
+                              <ChevronDown
+                                size={13}
+                                className={`ml-1 inline transition-transform ${compareOpen ? "rotate-180" : ""}`}
+                              />
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="vw-icon-btn"
@@ -1549,8 +1747,35 @@ function App() {
                           </button>
                         </div>
                       </div>
+                      {compareOpen && (
+                        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                          <div className="rounded-xl border border-[#F1F1F3] bg-[#FAFAFA] px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-[#A1A1AA]">
+                              Inserted
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-[#3F3F46]">
+                              {record.insertedText}
+                            </p>
+                          </div>
+                          <div className="rounded-xl border border-[#BFDBFE] bg-[#F5FAFF] px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-[#1B8EFF]">
+                              AI polish
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-[#3F3F46]">
+                              {record.polishedText}
+                            </p>
+                            {typeof record.polishLatencyMs === "number" && (
+                              <p className="mt-1.5 text-[10px] text-[#A1A1AA]">
+                                {(record.polishLatencyMs / 1000).toFixed(1)}s
+                                {record.polishRetried ? " · retried" : ""}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </section>
@@ -1750,75 +1975,105 @@ function App() {
               <section className="vw-panel vw-panel-soft">
                 <div className="flex flex-wrap items-end justify-between gap-2">
                   <div>
-                    <p className="vw-kicker">Workflows</p>
-                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Pro Tools Modes</h3>
+                    <p className="vw-kicker">Dictation Style</p>
+                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Polish Profiles</h3>
                     <p className="mt-1 text-sm text-[#71717A]">
-                      Pick one mode and VoiceWave reconfigures output behavior for that workflow.
+                      One dictation, five shapes. Every card below rewrites the same sentence.
                     </p>
                   </div>
                   <span className="vw-chip vw-chip-ink">Pro Active</span>
                 </div>
 
-                <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
-                  {PRO_TOOLS_MODE_CARDS.map((mode) => {
-                    const isActiveMode = displayedProToolsMode === mode.id;
-                    const isApplying = modeApplyPending === mode.id;
+                <div className="mt-5 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-[#A1A1AA]">You say</p>
+                  <p className="mt-1 text-sm italic text-[#52525B]">"{POLISH_PROFILE_RAW_EXAMPLE}"</p>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {POLISH_PROFILE_CARDS.map((card) => {
+                    const isActiveCard = displayedPolishProfile === card.id;
+                    const isApplying = profileApplyPending === card.id;
                     return (
                       <button
-                        key={mode.id}
+                        key={card.id}
                         type="button"
                         className={`vw-mode-card rounded-2xl border px-4 py-4 text-left ${
-                          isActiveMode ? "vw-pro-mode-card-active" : ""
+                          isActiveCard ? "vw-pro-mode-card-active" : ""
                         }`}
-                        onClick={() => void applyProToolsMode(mode.id)}
-                        aria-disabled={modeApplyPending ? "true" : "false"}
+                        onClick={() => void applyPolishProfile(card.id)}
+                        aria-pressed={isActiveCard}
+                        aria-disabled={profileApplyPending ? "true" : "false"}
                         aria-busy={isApplying ? "true" : "false"}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-base font-semibold text-[#09090B]">{mode.title}</p>
-                          <span className={`vw-chip vw-mode-status-chip ${isActiveMode ? "vw-mode-status-chip-active" : ""}`}>
-                            {isActiveMode ? "Active" : "Apply"}
+                          <p className="text-base font-semibold text-[#09090B]">
+                            {card.title}
+                            {isActiveCard && profileCustomized && (
+                              <span className="font-normal text-[#71717A]"> · Customized</span>
+                            )}
+                          </p>
+                          <span className={`vw-chip vw-mode-status-chip ${isActiveCard ? "vw-mode-status-chip-active" : ""}`}>
+                            {isApplying ? "Applying…" : isActiveCard ? "Active" : "Select"}
                           </span>
                         </div>
-                        <p className="mt-2 text-sm text-[#3F3F46]">{mode.description}</p>
-                        <p className="mt-2 text-xs text-[#71717A]">{mode.highlight}</p>
+                        <p className="mt-2 text-sm text-[#3F3F46]">{card.description}</p>
+                        <p className="mt-3 border-l-2 border-[#1B8EFF]/45 pl-3 text-sm leading-relaxed text-[#09090B]">
+                          {card.example}
+                        </p>
+                        <p className="mt-2 text-xs text-[#71717A]">{card.note}</p>
                       </button>
                     );
                   })}
                 </div>
 
-                {displayedProToolsMode === "coding" && (
+                {profileCustomized && (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#09090B]">
+                        {POLISH_PROFILE_LABELS[activePolishProfile]} · Customized
+                      </p>
+                      <p className="mt-0.5 text-xs text-[#71717A]">
+                        Advanced settings differ from this profile's defaults. Resetting discards those edits.
+                      </p>
+                    </div>
+                    {profileResetConfirming ? (
+                      <div className="flex shrink-0 gap-2">
+                        <button
+                          type="button"
+                          className="vw-btn-primary vw-btn-sm"
+                          onClick={() => void confirmProfileReset()}
+                        >
+                          Confirm reset
+                        </button>
+                        <button
+                          type="button"
+                          className="vw-btn-secondary vw-btn-sm"
+                          onClick={() => setProfileResetConfirming(false)}
+                        >
+                          Keep changes
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="vw-btn-secondary vw-btn-sm"
+                        onClick={() => setProfileResetConfirming(true)}
+                      >
+                        Reset to profile defaults
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {displayedPolishProfile === "coding" && (
                   <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                    <p className="text-sm font-semibold text-[#09090B]">How To Speak In Coding Mode</p>
+                    <p className="text-sm font-semibold text-[#09090B]">How To Speak In Coding Profile</p>
                     <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-[#52525B] md:grid-cols-2">
                       <p><span className="font-semibold">Symbols:</span> open paren, open parenthesis, close paren, underscore, arrow, equals.</p>
                       <p><span className="font-semibold">Casing:</span> say plain words, then choose camelCase or snake_case in mode settings.</p>
                       <p><span className="font-semibold">Example speech:</span> open paren user id close paren arrow result</p>
                       <p><span className="font-semibold">Expected output:</span> (user id)-&gt;result</p>
                     </div>
-                  </div>
-                )}
-
-                {displayedProToolsMode === "writing" && (
-                  <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                    <p className="text-sm font-semibold text-[#09090B]">Writing Mode Focus</p>
-                    <p className="mt-2 text-xs text-[#52525B]">
-                      List intent is detected more strongly. Example: "there are two process one hi two real" becomes:
-                      <br />
-                      1. Hi
-                      <br />
-                      2. Real
-                    </p>
-                  </div>
-                )}
-
-                {displayedProToolsMode === "study" && (
-                  <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                    <p className="text-sm font-semibold text-[#09090B]">Study Mode Focus</p>
-                    <p className="mt-2 text-xs text-[#52525B]">
-                      Designed for voice notes you can revise later. Speak with markers like:
-                      <span className="font-semibold"> topic</span>, <span className="font-semibold">definition</span>, <span className="font-semibold">example</span>, and <span className="font-semibold">summary</span>.
-                    </p>
                   </div>
                 )}
               </section>

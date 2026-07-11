@@ -45,17 +45,17 @@ Or grab the [latest installer directly](https://github.com/rithwik1510/VoiceWave
 
 ## Why VoiceWave?
 
-| | **VoiceWave** | Wispr Flow Pro | Dragon Professional | Windows Speech |
-|---|:---:|:---:|:---:|:---:|
-| **Price** | **Free** | $15/mo | ~$500 one-time | Free |
-| **Works Offline** | ✅ Always | ❌ Cloud-only | ✅ Yes | ✅ Yes |
-| **Audio stays on device** | ✅ Never leaves | ❌ Sent to servers | ✅ Local | ✅ Local |
-| **Accuracy engine** | Whisper (local) | Whisper (cloud) | Proprietary | Proprietary |
-| **Open Source** | ✅ | ❌ | ❌ | ❌ |
-| **Windows** | ✅ | ✅ | ✅ | ✅ |
-| **Free tier** | ✅ (open source) | 2,000 words/week | ❌ | ✅ (limited) |
-| **Latency** | < 500 ms | Network-dependent | < 1 s | Varies |
-| **Customizable** | ✅ Rust/React | ❌ | ❌ | ❌ |
+|                           |  **VoiceWave**   |   Wispr Flow Pro   | Dragon Professional | Windows Speech |
+| ------------------------- | :--------------: | :----------------: | :-----------------: | :------------: |
+| **Price**                 |     **Free**     |       $15/mo       |   ~$500 one-time    |      Free      |
+| **Works Offline**         |    ✅ Always     |   ❌ Cloud-only    |       ✅ Yes        |     ✅ Yes     |
+| **Audio stays on device** | ✅ Never leaves  | ❌ Sent to servers |      ✅ Local       |    ✅ Local    |
+| **Accuracy engine**       | Whisper (local)  |  Whisper (cloud)   |     Proprietary     |  Proprietary   |
+| **Open Source**           |        ✅        |         ❌         |         ❌          |       ❌       |
+| **Windows**               |        ✅        |         ✅         |         ✅          |       ✅       |
+| **Free tier**             | ✅ (open source) |  2,000 words/week  |         ❌          |  ✅ (limited)  |
+| **Latency**               |     < 500 ms     | Network-dependent  |        < 1 s        |     Varies     |
+| **Customizable**          |  ✅ Rust/React   |         ❌         |         ❌          |       ❌       |
 
 Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/pricing) (April 2026 — $15/mo, $12/mo billed annually).
 
@@ -114,24 +114,24 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ## ![Overview](docs/assets/readme/section-overview.svg) Product At A Glance
 
-| Area | Summary |
-| --- | --- |
-| Runtime | `Tauri 2` shell + `Rust` core + `React/Tailwind` frontend |
-| ASR (default) | `faster-whisper` via a bundled CPU Python runtime (`fw-small.en` / `fw-large-v3`), CUDA auto-detected when present — works offline out of the box |
-| ASR (opt-in) | `whisper.cpp` via `whisper-rs` (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan feature flag |
-| Privacy Path | No outbound audio transport, no cloud transcription path in v1 |
-| UX Contract | Explicit state model: `idle -> listening -> transcribing -> inserted/error` |
-| Insertion Reliability | Direct insert -> clipboard fallback -> history fallback (blocked on Windows security dialogs) |
-| Platform Scope | Windows implementation/validation active since `2026-02-10` |
+| Area                  | Summary                                                                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime               | `Tauri 2` shell + `Rust` core + `React/Tailwind` frontend                                                                                         |
+| ASR (default)         | `faster-whisper` via a bundled CPU Python runtime (`fw-small.en` / `fw-large-v3`), CUDA auto-detected when present — works offline out of the box |
+| ASR (opt-in)          | `whisper.cpp` via `whisper-rs` (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan feature flag                                                     |
+| Privacy Path          | No outbound audio transport, no cloud transcription path in v1                                                                                    |
+| UX Contract           | Explicit state model: `idle -> listening -> transcribing -> inserted/error`                                                                       |
+| Insertion Reliability | Direct insert -> clipboard fallback -> history fallback (blocked on Windows security dialogs)                                                     |
+| Platform Scope        | Windows implementation/validation active since `2026-02-10`                                                                                       |
 
 ## ![Capabilities](docs/assets/readme/section-capabilities.svg) Core Capabilities
 
-| Icon | Capability | Technical Detail |
-| --- | --- | --- |
-| ![Local-only](docs/assets/readme/icon-local-only.svg) | Local-Only Privacy | Production path has no outbound audio transport and no cloud transcription rewrite path for v1. |
-| ![Runtime](docs/assets/readme/icon-runtime.svg) | Deterministic Runtime Flow | Audio capture, inference orchestration, insertion, and persistence are handled in Rust services behind Tauri commands/events. |
-| ![Insertion](docs/assets/readme/icon-insertion.svg) | Fallback-Safe Insertion | Insertion engine prioritizes direct insertion and degrades to clipboard/history fallback to preserve user text. |
-| ![Models](docs/assets/readme/icon-models.svg) | Verified Model Lifecycle | Model install/switch includes cataloging, checksum verification, and recommendation logic. |
+| Icon                                                  | Capability                 | Technical Detail                                                                                                              |
+| ----------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| ![Local-only](docs/assets/readme/icon-local-only.svg) | Local-Only Privacy         | Production path has no outbound audio transport and no cloud transcription rewrite path for v1.                               |
+| ![Runtime](docs/assets/readme/icon-runtime.svg)       | Deterministic Runtime Flow | Audio capture, inference orchestration, insertion, and persistence are handled in Rust services behind Tauri commands/events. |
+| ![Insertion](docs/assets/readme/icon-insertion.svg)   | Fallback-Safe Insertion    | Insertion engine prioritizes direct insertion and degrades to clipboard/history fallback to preserve user text.               |
+| ![Models](docs/assets/readme/icon-models.svg)         | Verified Model Lifecycle   | Model install/switch includes cataloging, checksum verification, and recommendation logic.                                    |
 
 ## ![Architecture](docs/assets/readme/section-architecture.svg) Runtime Architecture
 
@@ -239,29 +239,29 @@ npm run tauri:dev
 
 ## ![Validation](docs/assets/readme/section-validation.svg) Validation and Gates
 
-| Command | Purpose |
-| --- | --- |
-| `npm run phase1:validate` | Phase I validation suite |
-| `npm run phase1:battery` | Phase I battery/thermal run |
-| `npm run phase2:validate` | Phase II validation suite |
-| `npm run phase3:validate` | Phase III validation suite |
-| `npm run phase4:prep` | Phase IV readiness report |
-| `npm run phase4:gate` | Phase IV blocking gate |
-| `npm run phase5:prep` | Phase V readiness report |
-| `npm run phase5:gate` | Phase V blocking readiness gate |
-| `npm run phase5:reliability` | Phase V reliability evidence report |
-| `npm run phase5:reliability:gate` | Phase V blocking reliability gate |
-| `npm run release:gate` | End-to-end release blocking gate (phase4 + phase5 + risk/compliance) |
-| `npm run test:coverage` | Frontend test + coverage thresholds gate |
-| `npm run security:secrets -- -Enforce` | Enforced secret leakage scan |
-| `npm run security:deps -- -Enforce` | Enforced dependency vulnerability gate |
-| `npm run security:firestore-rules -- -Enforce` | Firestore rules schema/policy contract gate |
-| `npm run quality:frontend:gate` | Frontend quality gate (coverage + build) |
-| `npm run quality:backend:gate` | Backend quality gate (tests + inventory threshold) |
-| `npm run phaseA:cpu` | CPU latency sweep |
-| `npm run phaseB:gpu:check` | GPU readiness check |
-| `npm run phaseB:gpu` | GPU latency sweep |
-| `npm run phaseB:fw` | Faster-whisper latency sweep |
+| Command                                        | Purpose                                                              |
+| ---------------------------------------------- | -------------------------------------------------------------------- |
+| `npm run phase1:validate`                      | Phase I validation suite                                             |
+| `npm run phase1:battery`                       | Phase I battery/thermal run                                          |
+| `npm run phase2:validate`                      | Phase II validation suite                                            |
+| `npm run phase3:validate`                      | Phase III validation suite                                           |
+| `npm run phase4:prep`                          | Phase IV readiness report                                            |
+| `npm run phase4:gate`                          | Phase IV blocking gate                                               |
+| `npm run phase5:prep`                          | Phase V readiness report                                             |
+| `npm run phase5:gate`                          | Phase V blocking readiness gate                                      |
+| `npm run phase5:reliability`                   | Phase V reliability evidence report                                  |
+| `npm run phase5:reliability:gate`              | Phase V blocking reliability gate                                    |
+| `npm run release:gate`                         | End-to-end release blocking gate (phase4 + phase5 + risk/compliance) |
+| `npm run test:coverage`                        | Frontend test + coverage thresholds gate                             |
+| `npm run security:secrets -- -Enforce`         | Enforced secret leakage scan                                         |
+| `npm run security:deps -- -Enforce`            | Enforced dependency vulnerability gate                               |
+| `npm run security:firestore-rules -- -Enforce` | Firestore rules schema/policy contract gate                          |
+| `npm run quality:frontend:gate`                | Frontend quality gate (coverage + build)                             |
+| `npm run quality:backend:gate`                 | Backend quality gate (tests + inventory threshold)                   |
+| `npm run phaseA:cpu`                           | CPU latency sweep                                                    |
+| `npm run phaseB:gpu:check`                     | GPU readiness check                                                  |
+| `npm run phaseB:gpu`                           | GPU latency sweep                                                    |
+| `npm run phaseB:fw`                            | Faster-whisper latency sweep                                         |
 
 ## ![Contract](docs/assets/readme/section-contract.svg) Runtime Contract Surface (High-Level)
 

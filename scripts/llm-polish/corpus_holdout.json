@@ -1,0 +1,110 @@
+{
+  "note": "Plan 010 Phase 4 HOLDOUT corpus (15 cases). DO NOT read or iterate against this file while tuning prompts. Run exactly once, at the end, via profile_gate.py --holdout.",
+  "cases": [
+    {
+      "id": "h1",
+      "bucket": "technical",
+      "raw": "so the uh getSessionToken helper caches the token but never checks expiry so after an hour every request 401s",
+      "must_keep": ["401", "expiry", "hour"],
+      "must_keep_exact": ["getSessionToken"]
+    },
+    {
+      "id": "h2",
+      "bucket": "technical",
+      "raw": "we should probably pin numpy to 1.26 because the 2.0 release breaks the build on windows",
+      "must_keep": ["numpy", "1.26", "2.0", "windows", "probably"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h3",
+      "bucket": "email",
+      "raw": "hi carlos um attached is the revised proposal the total comes to 18500 dollars let me know if the scope looks right",
+      "must_keep": ["carlos", "18500", "proposal"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h4",
+      "bucket": "email",
+      "raw": "hey um quick heads up i will be out next monday and tuesday the dentist thing so uh can we move our one on one to wednesday",
+      "must_keep": ["monday", "tuesday", "wednesday", "dentist"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h5",
+      "bucket": "chat",
+      "raw": "yeah im down um lets do 7 at the usual spot",
+      "must_keep": ["7"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h6",
+      "bucket": "chat",
+      "raw": "no worries at all uh take your time the deadline moved anyway",
+      "must_keep": ["deadline"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h7",
+      "bucket": "rambling",
+      "raw": "so i have been thinking about the newsletter and like we send it every week but the open rate is you know slowly dropping so maybe we go every two weeks but make it actually good",
+      "must_keep": ["newsletter", "open rate", "two weeks", "maybe"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h8",
+      "bucket": "rambling",
+      "raw": "um okay so the plumber came and he said the leak is not the pipe its the seal around the tub which is like good news i guess because its cheaper but he cant come back until the 19th",
+      "must_keep": ["plumber", "seal", "19th", "not"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h9",
+      "bucket": "false_starts",
+      "raw": "push it to prod no wait push it to staging first and let it soak overnight",
+      "must_keep": ["staging", "overnight"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h10",
+      "bucket": "false_starts",
+      "raw": "the password is uh no actually ill just send the password over signal dont put it in email",
+      "must_keep": ["signal", "password", "not"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h11",
+      "bucket": "entity_dense",
+      "raw": "email the w9 to finance@brightpath.co and put invoice 20447 in the subject line",
+      "must_keep": ["w9", "20447", "invoice"],
+      "must_keep_exact": ["finance@brightpath.co"]
+    },
+    {
+      "id": "h12",
+      "bucket": "entity_dense",
+      "raw": "the fix is in commit 9f3ae21 on the release slash 0.6 branch tag it v0.6.0-rc1 after the tests pass",
+      "must_keep": ["9f3ae21", "0.6"],
+      "must_keep_exact": ["v0.6.0-rc1"]
+    },
+    {
+      "id": "h13",
+      "bucket": "negation",
+      "raw": "i am not convinced the cache is the problem it might just be the cold start dont spend more than a day on it",
+      "must_keep": ["not", "might", "cache", "cold start"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h14",
+      "bucket": "negation",
+      "raw": "lets not promise the client a date yet maybe say early september and confirm next week",
+      "must_keep": ["not", "maybe", "september"],
+      "must_keep_exact": []
+    },
+    {
+      "id": "h15",
+      "bucket": "short",
+      "raw": "uh cancel the 9 am",
+      "must_keep": ["cancel", "9"],
+      "must_keep_exact": []
+    }
+  ]
+}

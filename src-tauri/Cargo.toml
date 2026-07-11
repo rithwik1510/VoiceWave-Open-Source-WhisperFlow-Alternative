@@ -1,6 +1,6 @@
 [package]
 name = "voicewave_core"
-version = "0.5.2"
+version = "0.5.5"
 edition = "2021"
 description = "VoiceWave Phase I local core"
 default-run = "voicewave_core"

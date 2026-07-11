@@ -1,5 +1,16 @@
 Idea.md
 Frontend .png
 node_modules
+**/node_modules
 dist
 src-tauri/target
+.venv-faster-whisper
+vendor
+src-tauri/gen
+voicewave-prototype
+voicewave-website
+voicewave-website2
+plans
+manifests
+winget
+winget-manifest

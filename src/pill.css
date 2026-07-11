@@ -145,6 +145,33 @@ body,
   transition: transform 50ms ease-out;
 }
 
+/* Active-profile glyph (plan 010): a tiny two-letter abbreviation pinned to
+   the left edge of the listening capsule. Persistent while listening, hidden
+   in every other state so the resting line stays clean. Brand cyan keeps it
+   in the pill's blue family without competing with the waveform. */
+.vw-pill-profile {
+  grid-area: 1 / 1;
+  justify-self: start;
+  align-self: center;
+  margin-left: 11px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  line-height: 1;
+  color: var(--vw-brand-cyan-soft);
+  opacity: 0;
+  transform: scale(0.9);
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 200ms ease;
+}
+
+.vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-profile {
+  opacity: 0.92;
+  transform: scale(1);
+}
+
 .vw-pill-spinner {
   grid-area: 1 / 1;
   width: 0;
@@ -301,7 +328,9 @@ body,
 }
 
 .vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface {
-  width: 76px;
+  /* 96px = 48px centered waveform + symmetric margins wide enough for the
+     profile glyph on the left (glyph ends ~24px in, wave starts at 24px). */
+  width: 96px;
   height: 26px;
   transform: translateY(-12px);
   box-shadow:
@@ -562,6 +591,7 @@ body,
 @media (prefers-reduced-motion: reduce) {
   .vw-pill-surface,
   .vw-pill-core,
+  .vw-pill-profile,
   .vw-pill-review-panel,
   .vw-pill-notice-panel,
   .vw-pill-action {

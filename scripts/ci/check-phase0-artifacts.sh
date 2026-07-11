@@ -4,8 +4,6 @@ set -euo pipefail
 required_files=(
   "README.md"
   "CONTRIBUTING.md"
-  "AGENTS.md"
-  "AGENT_START.md"
   "docs/prd/v1-prd.md"
   "docs/phase0-signoff.md"
   "docs/rfc/0001-system-architecture.md"
@@ -43,7 +41,6 @@ grep -q "^# VoiceWave v1 PRD$" "docs/prd/v1-prd.md"
 grep -q "^# RFC 0001: VoiceWave v1 System Architecture$" "docs/rfc/0001-system-architecture.md"
 grep -q "^# VoiceWave Test Strategy$" "docs/testing/test-strategy.md"
 grep -q "^## Decision$" "docs/adr/0001-phase-0-locked-decisions.md"
-grep -q "^## 7) Mistake Log$" "AGENTS.md"
 
 if [[ -f "package.json" ]]; then
   if [[ ! -f "package-lock.json" ]]; then

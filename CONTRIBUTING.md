@@ -6,13 +6,13 @@ Thanks for your interest. This guide covers how to get the project running local
 
 ## Prerequisites
 
-| Tool | Version | Purpose |
-|---|---|---|
-| Node.js | 20+ | Frontend build / scripts |
-| Rust | stable (1.76+) | Core runtime |
-| Python | 3.10–3.12 | faster-whisper worker |
-| Tauri CLI | v2 | Desktop shell |
-| Visual Studio Build Tools | 2022 | Windows C++ toolchain |
+| Tool                      | Version        | Purpose                  |
+| ------------------------- | -------------- | ------------------------ |
+| Node.js                   | 20+            | Frontend build / scripts |
+| Rust                      | stable (1.76+) | Core runtime             |
+| Python                    | 3.10–3.12      | faster-whisper worker    |
+| Tauri CLI                 | v2             | Desktop shell            |
+| Visual Studio Build Tools | 2022           | Windows C++ toolchain    |
 
 Install Tauri CLI:
 

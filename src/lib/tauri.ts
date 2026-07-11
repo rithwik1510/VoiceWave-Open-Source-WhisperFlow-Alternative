@@ -32,6 +32,7 @@ import type {
   ModelStatus,
   MicLevelEvent,
   PillNoticePayload,
+  PolishProfile,
   PermissionSnapshot,
   RecentInsertion,
   RecommendationConstraints,
@@ -281,6 +282,14 @@ export async function setCodeModeSettings(
   settings: CodeModeSettings
 ): Promise<VoiceWaveSettings> {
   return invokeVoicewave<VoiceWaveSettings>("set_code_mode_settings", { settings });
+}
+
+/** Selects a polish profile via ONE atomic settings write (plan 010). This is
+ * the only sanctioned way to change profiles — the frontend must never
+ * reconstruct a profile through the individual field setters above (that path
+ * is a deprecated fallback for backends without this command). */
+export async function setDictationProfile(profile: PolishProfile): Promise<VoiceWaveSettings> {
+  return invokeVoicewave<VoiceWaveSettings>("set_dictation_profile", { profile });
 }
 
 export async function setProPostProcessingEnabled(

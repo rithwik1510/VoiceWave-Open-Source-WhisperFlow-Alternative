@@ -490,6 +490,24 @@ async fn set_pro_post_processing_enabled(
         .map_err(|err| AppError::Controller(err).into())
 }
 
+/// Select a polish profile (plan 010). Validates the wire string
+/// ("standard" | "coding" | "writing" | "casual" | "literal"), applies the
+/// profile's deterministic defaults (resetting advanced overrides), and
+/// persists in ONE atomic settings write. Returns the updated settings,
+/// including `polishProfile` and `polishProfileCustomized`.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_dictation_profile(
+    runtime: State<'_, RuntimeContext>,
+    profile: String,
+) -> Result<VoiceWaveSettings, String> {
+    runtime
+        .controller
+        .set_dictation_profile(profile)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -1335,6 +1353,7 @@ pub fn run() {
             set_app_profile_overrides,
             set_code_mode_settings,
             set_pro_post_processing_enabled,
+            set_dictation_profile,
             show_main_window,
             set_pill_review_mode,
             set_pill_notice_mode,

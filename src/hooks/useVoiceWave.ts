@@ -50,6 +50,7 @@ import {
   setDiagnosticsOptIn as setDiagnosticsOptInCommand,
   setAppProfileOverrides as setAppProfileOverridesCommand,
   setCodeModeSettings as setCodeModeSettingsCommand,
+  setDictationProfile as setDictationProfileCommand,
   setFormatProfile as setFormatProfileCommand,
   setProPostProcessingEnabled as setProPostProcessingEnabledCommand,
   runAudioQualityDiagnostic as runAudioQualityDiagnosticCommand,
@@ -99,6 +100,7 @@ import type {
   ModelStatus,
   MicVolumeGuardMode,
   PermissionSnapshot,
+  PolishProfile,
   ProFeatureId,
   RecentInsertion,
   RetentionPolicy,
@@ -161,7 +163,9 @@ const fallbackSettings: VoiceWaveSettings = {
   micVolumeGuard: "warn",
   // True in the pre-load fallback so the onboarding flow never flashes before
   // real settings arrive; the backend value replaces this immediately.
-  onboardingCompleted: true
+  onboardingCompleted: true,
+  polishProfile: "standard",
+  polishProfileCustomized: false
 };
 
 const fallbackSnapshot: VoiceWaveSnapshot = {
@@ -397,6 +401,9 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
     onboardingCompleted: settings.onboardingCompleted ?? false,
+    // polishProfile / polishProfileCustomized are deliberately NOT defaulted:
+    // their absence is the "legacy backend" signal the UI uses to fall back
+    // to inferring a profile from the old deterministic fields (plan 010).
     toggleHotkey: LOCKED_TOGGLE_HOTKEY,
     pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
   };
@@ -1025,6 +1032,21 @@ export function useVoiceWave() {
         }
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save code mode.");
       }
+    },
+    [tauriAvailable]
+  );
+
+  /** Selects a polish profile with ONE atomic backend write (plan 010).
+   * Errors are rethrown instead of swallowed so the caller can detect an
+   * older backend (unknown command) and run the deprecated multi-write
+   * fallback. Selecting a profile always clears the customized flag. */
+  const setDictationProfile = useCallback(
+    async (profile: PolishProfile) => {
+      setSettings((prev) => ({ ...prev, polishProfile: profile, polishProfileCustomized: false }));
+      if (!tauriAvailable) {
+        return;
+      }
+      setSettings(normalizeSettings(await setDictationProfileCommand(profile)));
     },
     [tauriAvailable]
   );
@@ -2191,6 +2213,7 @@ export function useVoiceWave() {
     setDomainPacks,
     setAppProfiles,
     setCodeModeSettings,
+    setDictationProfile,
     setProPostProcessingEnabled,
     setDiagnosticsOptIn,
     exportDiagnosticsBundle,
