@@ -205,6 +205,25 @@ _LLM = None
 POLISH_MIN_FREE_VRAM_MIB = int(os.getenv("VOICEWAVE_POLISH_MIN_FREE_VRAM_MIB", "1800"))
 
 
+def _resolve_cpu_threads() -> int:
+    """Bound polish compute so background rewriting cannot monopolize a PC.
+
+    The profile quality/latency gate is measured at four threads. Production
+    now uses the same ceiling while reserving one logical CPU on smaller
+    machines. An environment override is available for diagnostics, but is
+    deliberately clamped to a conservative range.
+    """
+    detected = os.cpu_count() or 4
+    default = max(1, min(4, detected - 1 if detected > 1 else 1))
+    raw = os.getenv("VOICEWAVE_POLISH_THREADS")
+    if raw:
+        try:
+            return max(1, min(8, int(raw)))
+        except ValueError:
+            pass
+    return default
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -288,10 +307,13 @@ def _load_model():
         return None
     from llama_cpp import Llama
 
+    threads = _resolve_cpu_threads()
     _LLM = Llama(
         model_path=str(model_path),
         n_ctx=2048,
         n_gpu_layers=_resolve_gpu_layers(),
+        n_threads=threads,
+        n_threads_batch=threads,
         verbose=False,
     )
     return _LLM

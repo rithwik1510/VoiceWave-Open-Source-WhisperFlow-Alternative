@@ -34,6 +34,10 @@ pub enum PolishRejection {
     /// path) does not appear byte-identical in the candidate — catches the
     /// small-model `maxRetries` -> `MaxRetries` class.
     IdentifierChanged,
+    /// A title-cased proper noun away from the start of the transcript was
+    /// altered or dropped. This protects recognized person/place/company
+    /// names that do not look like code identifiers.
+    ProperNounChanged,
     /// The candidate contains a digit-bearing token absent from the raw text.
     NumberInvented,
     /// Negation count changed (added or dropped) — the highest-severity
@@ -166,6 +170,20 @@ fn is_identifier_like(token: &str) -> bool {
         || token.contains("::")
         || token.contains("()")
         || (has_internal_dot(token) && has_alpha)
+}
+
+/// Conservative proper-noun signal. ASR often preserves casing for names even
+/// though they do not match identifier syntax (`Sarah`, `Denver`). We exclude
+/// the first token because ordinary sentence capitalization is not a name
+/// signal there.
+fn is_title_cased_word(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_uppercase()
+        && token.chars().count() > 1
+        && chars.all(|ch| ch.is_lowercase() || ch == '-' || ch == '\u{2019}' || ch == '\'')
 }
 
 /// Core negation markers (after contraction expansion). Every `n't`
@@ -395,7 +413,8 @@ pub fn validate_polish(
     // model's `maxRetries` -> `MaxRetries` class.
     let mut entity_missing = false;
     let mut identifier_changed = false;
-    for token in raw.split_whitespace() {
+    let mut proper_noun_changed = false;
+    for (index, token) in raw.split_whitespace().enumerate() {
         let trimmed = trim_token(token);
         if trimmed.is_empty() {
             continue;
@@ -403,12 +422,18 @@ pub fn validate_polish(
         if is_identifier_like(trimmed) && !polished_trimmed.contains(trimmed) {
             identifier_changed = true;
         }
+        if index > 0 && is_title_cased_word(trimmed) && !polished_trimmed.contains(trimmed) {
+            proper_noun_changed = true;
+        }
         if is_protected(trimmed) && !polished_lower.contains(&trimmed.to_lowercase()) {
             entity_missing = true;
         }
     }
     if identifier_changed {
         rejections.push(PolishRejection::IdentifierChanged);
+    }
+    if proper_noun_changed {
+        rejections.push(PolishRejection::ProperNounChanged);
     }
     if entity_missing {
         rejections.push(PolishRejection::EntityMissing);
@@ -647,6 +672,16 @@ mod tests {
         );
         assert!(reasons.contains(&PolishRejection::IdentifierChanged));
         assert!(reasons.contains(&PolishRejection::EntityMissing));
+    }
+
+    #[test]
+    fn recognized_proper_name_changes_reject() {
+        let reasons = rejected_with(
+            "please ask Sarah to send the Denver notes",
+            "Please ask Sara to send the Denver notes.",
+            PolishProfile::Writing,
+        );
+        assert!(reasons.contains(&PolishRejection::ProperNounChanged));
     }
 
     #[test]
