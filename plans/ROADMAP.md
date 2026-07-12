@@ -14,7 +14,7 @@ product-feature track; engineering fix-tier items stay in project memory
 | 2 | First-run onboarding | M | Not started | — |
 | 3 | Context-aware polish profiles | M | Not started | — |
 | 4 | Stats dashboard | S–M | Not started | — |
-| 5 | Voice snippets | M | Not started | plans/004 (written, executable) |
+| 5 | Protected voice snippets | L | Planned | plans/012 (replaces obsolete plan 004) |
 | 6 | GPU acceleration pack | L | Parked | — (verified 2026-07-06: bundled runtime is CPU-only for all users; maintainer's GPU speed comes from the dev-venv env-var override) |
 
 ### 1. Spoken edit commands (plan 002)
@@ -42,10 +42,11 @@ diagnostics store already records every utterance (up to 5000 records with
 latency + decode metadata), so this is mostly aggregate-and-render. High
 engagement value; screenshots are free marketing.
 
-### 5. Voice snippets (plan 004)
-Spoken trigger → text expansion, built on the dictionary infrastructure.
-Roadmap parity with commercial tools and the strongest future Pro-tier
-candidate — sequence when monetization timing matters.
+### 5. Protected voice snippets (plan 012)
+Spoken trigger → exact text expansion, with encrypted local-first storage,
+cross-device reconciliation, inline matching, and protection from deterministic
+formatting and AI polish. This is now the highest-priority product feature and
+should ship as a trustworthy personal workflow before team sharing or variables.
 
 ### 6. GPU acceleration pack (parked from Track 1)
 Settings detects an NVIDIA GPU → offers an on-demand download of the CUDA

@@ -13,19 +13,22 @@ tree, not the bare commit. Run each plan's drift check against the live files.
 
 ## Execution order & status
 
-These are five FEATURE plans (direction/roadmap), independent of the earlier
-audit's fix-tier findings (perf/tests/refactors) which are tracked separately in
-project memory, not here. Numbering is a suggested sequence, not a hard order —
-pick by value/appetite. Priority reflects product value; Effort reflects the fix.
+These began as FEATURE plans (direction/roadmap). Plan 011 added the required
+dictionary-integrity foundation; Plan 012 replaces the obsolete local-only
+snippet draft. Numbering is historical, not a hard execution order; follow the
+dependency column. Priority reflects product value, and Effort includes focused
+tests and migration work.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | Dictionary export/import | P2 | S | — | DONE |
 | 002 | Spoken edit commands (always-on new line / paragraph / bullet) | P2 | S | — | DONE (2026-07-06: always-on `apply_structural_commands` + `spokenEditCommands` toggle, default on; free tier untouched — Pro is forced on for everyone, so the Pro pipeline covers all users) |
 | 003 | Interactive pill actions (typed one-tap notice actions) | P2 | M | — | DONE |
-| 004 | Voice snippets (trigger → expansion) | P3 | M | — | TODO |
+| 004 | Voice snippets (old local-only draft) | P1 | M | 011 | REJECTED (superseded by Plan 012's protected local-first design) |
 | 005 | On-device LLM "polish" pass — feasibility SPIKE | P1 | L | — | DONE (spike GO; Phase 3 off-by-default app wiring landed, `llm_polish_enabled` defaults false) |
 | 006 | Live transcription history (dashboard + History page) | P1 | M | — | DONE (2026-07-06: full-text records, 200-cap, live refresh event, History page un-dead-ended, retention getter, record dedupe) |
+| 011 | Dictionary integrity + local-first cloud sync | P1 | L | — | DONE |
+| 012 | Protected, local-first voice snippets | P1 | L | 011 | IN PROGRESS (implementation complete; desktop smoke test pending) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
@@ -40,16 +43,20 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   GO/NO-GO, not a shipped feature. Do this when you want to answer "can we do
   AI formatting locally without breaking trust?" with data. If GO, a separate
   productionization plan gets written.
-- **Roadmap parity + monetization candidate:** 004 (snippets).
+- **Highest-priority product feature:** 012 (protected local-first snippets).
 
 Recommended if doing them in sequence: **001 → 002 → 003** (quick momentum, each
-independently shippable), then **005** as the flagship spike, with **004** slotted
-whenever snippets are prioritized.
+independently shippable), then **005** as the flagship spike. With those shipped,
+**012** is the next product feature.
 
 ## Dependency notes
 
-- No hard dependencies between plans. But 002, 004, and 005 all touch
-  `src-tauri/src/transcript/mod.rs` (the finalize pipeline) and 001, 004 both
+- 012 depends on completed Plan 011. Plan 004 must not be executed: it copies the
+  dictionary store, omits cloud reconciliation, and expands user-owned content
+  before formatting/polish. Plan 012 replaces it with protected literal expansion
+  and the proven local-first replication boundary.
+- No other hard dependencies between plans. But 002, 005, and 012 touch
+  `src-tauri/src/transcript/mod.rs` (the finalize pipeline) and 001, 012 both
   touch the dictionary/store pattern. If executing more than one, run the later
   plan's drift check — earlier plans may have added fields to `ProTranscriptOptions`
   or moved the dictionary module. The plans are written to coexist (each adds its
