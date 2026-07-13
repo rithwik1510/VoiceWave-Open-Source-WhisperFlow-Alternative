@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.5] – 2026-07-11
+
+### Added
+
+- **Mode-aware polish profiles.** Standard, Coding, Writing, and Literal now
+  have explicit delivery policies. Coding and Writing use profile-specific
+  on-device prompts and insert only Rust-validated output; Literal never calls
+  the language model.
+- **Profile provenance.** History records the selected profile, inserted text,
+  accepted polish, latency, and fallback outcome.
+
+### Changed
+
+- Selecting Coding or Writing automatically enables and prepares the local AI
+  polish engine. The persisted profile is warmed after launch and after the
+  one-time model download, while deterministic formatting remains available.
+- Local polish CPU use is bounded to the same four-thread ceiling used by the
+  profile benchmark.
+
+---
+
 ## [0.5.2] – 2026-07-10
 
 ### Fixed

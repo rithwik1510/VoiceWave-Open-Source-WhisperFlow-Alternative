@@ -61,6 +61,20 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.5.5
+
+**Mode-aware polish profiles**
+
+1. Coding and Writing use separate, compact on-device prompts tuned for the
+   bundled Qwen2.5-1.5B model. A Rust fidelity gate accepts the result or falls
+   back to deterministic formatting when the model is slow or uncertain.
+1. Literal never calls the language model and keeps fillers and repeated words;
+   Standard preserves immediate insertion and can offer an optional polished
+   version afterward.
+1. Selecting an AI-shaped profile prepares the local model automatically. The
+   active profile is warmed after launch, and production CPU use is capped to
+   match the four-thread benchmark.
+
 ## What's New in 0.5.0
 
 **Zero-setup offline transcription**
@@ -69,7 +83,7 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 **On-device AI polish (opt-in)**
 
-1. An optional local LLM pass cleans up filler, capitalization, and punctuation after dictation and offers the polished text on the pill. Runs entirely on-device, gated by a strict fidelity validator so it never changes your meaning, and is off by default.
+1. An optional local LLM pass cleans up filler, capitalization, and punctuation after dictation and offers the polished text on the pill. It runs entirely on-device and uses a fail-closed fidelity validator; rejected output falls back to deterministic text.
 
 **Productivity**
 
