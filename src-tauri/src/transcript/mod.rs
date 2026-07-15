@@ -24,6 +24,10 @@ pub struct ProTranscriptOptions<'a> {
     pub format_profile: FormatProfile,
     pub domain_packs: &'a [DomainPackId],
     pub code_mode: &'a CodeModeSettings,
+    /// A protected voice-snippet placeholder is present in this dictation.
+    /// Whole-input identifier casing cannot preserve opaque spans, so snippet
+    /// integrity takes precedence over code-mode rewriting for this one pass.
+    pub preserve_protected_content: bool,
     pub post_processing_enabled: bool,
     pub spoken_edit_commands: bool,
     pub app_profile_behavior: &'a AppProfileBehavior,
@@ -57,7 +61,7 @@ pub fn finalize_pro_transcript(input: &str, options: &ProTranscriptOptions<'_>) 
     text = apply_format_profile(&text, options.format_profile);
     text = apply_app_profile_behavior(&text, options.app_profile_behavior);
 
-    if options.code_mode.enabled {
+    if options.code_mode.enabled && !options.preserve_protected_content {
         text = apply_code_mode(&text, options.code_mode);
     }
 
@@ -1061,6 +1065,7 @@ mod tests {
                 format_profile: FormatProfile::Default,
                 domain_packs: &[],
                 code_mode: &code_mode,
+                preserve_protected_content: false,
                 post_processing_enabled: true,
                 spoken_edit_commands: true,
                 app_profile_behavior: &behavior,
@@ -1114,6 +1119,7 @@ mod tests {
                 preferred_casing: CodeCasingStyle::SnakeCase,
                 wrap_in_fenced_block: false,
             },
+            preserve_protected_content: false,
             post_processing_enabled: true,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1136,6 +1142,7 @@ mod tests {
                 preferred_casing: CodeCasingStyle::SnakeCase,
                 wrap_in_fenced_block: false,
             },
+            preserve_protected_content: false,
             post_processing_enabled: false,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1144,6 +1151,28 @@ mod tests {
 
         let output = finalize_pro_transcript("user profile id", &options);
         assert_eq!(output, "user_profile_id");
+    }
+
+    #[test]
+    fn snippet_protection_skips_whole_input_code_mode_rewrite() {
+        let options = ProTranscriptOptions {
+            format_profile: FormatProfile::Default,
+            domain_packs: &[],
+            code_mode: &CodeModeSettings {
+                enabled: true,
+                spoken_symbols: false,
+                preferred_casing: CodeCasingStyle::SnakeCase,
+                wrap_in_fenced_block: false,
+            },
+            preserve_protected_content: true,
+            post_processing_enabled: false,
+            spoken_edit_commands: true,
+            app_profile_behavior: &AppProfileBehavior::default(),
+            custom_terms: &[],
+        };
+
+        let output = finalize_pro_transcript("send VW_SNIPPET_42 now", &options);
+        assert_eq!(output, "Send VW_SNIPPET_42 now.");
     }
 
     #[test]
@@ -1157,6 +1186,7 @@ mod tests {
                 preferred_casing: CodeCasingStyle::Preserve,
                 wrap_in_fenced_block: false,
             },
+            preserve_protected_content: false,
             post_processing_enabled: false,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1179,6 +1209,7 @@ mod tests {
                 preferred_casing: CodeCasingStyle::Preserve,
                 wrap_in_fenced_block: false,
             },
+            preserve_protected_content: false,
             post_processing_enabled: false,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1196,6 +1227,7 @@ mod tests {
             format_profile: FormatProfile::Academic,
             domain_packs: &[],
             code_mode: &CodeModeSettings::default(),
+            preserve_protected_content: false,
             post_processing_enabled: true,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1212,6 +1244,7 @@ mod tests {
             format_profile: FormatProfile::Concise,
             domain_packs: &[],
             code_mode: &CodeModeSettings::default(),
+            preserve_protected_content: false,
             post_processing_enabled: true,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
@@ -1237,6 +1270,7 @@ mod tests {
             format_profile: FormatProfile::Default,
             domain_packs: &[],
             code_mode,
+            preserve_protected_content: false,
             post_processing_enabled: true,
             spoken_edit_commands,
             app_profile_behavior: behavior,
@@ -1335,6 +1369,7 @@ mod tests {
             format_profile: FormatProfile::Academic,
             domain_packs: &[],
             code_mode: &CodeModeSettings::default(),
+            preserve_protected_content: false,
             post_processing_enabled: true,
             spoken_edit_commands: true,
             app_profile_behavior: &AppProfileBehavior::default(),
