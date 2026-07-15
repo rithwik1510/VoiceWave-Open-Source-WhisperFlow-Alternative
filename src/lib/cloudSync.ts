@@ -1,7 +1,7 @@
 import type { Auth, User } from "firebase/auth";
 import type { Firestore } from "firebase/firestore";
 import { firebaseEnabled, getFirebase } from "./firebase";
-import type { DictionaryTerm } from "../types/voicewave";
+import type { DictionarySyncRecord, VoiceSnippetSyncRecord } from "../types/voicewave";
 
 // The Firebase SDK is loaded lazily so it stays out of the main bundle. These
 // thin loaders wrap the dynamic imports; `vi.mock` intercepts them in tests.
@@ -32,12 +32,14 @@ const MAX_NAME_LENGTH = 80;
 const MAX_EMAIL_LENGTH = 200;
 const MAX_WORKSPACE_ROLE_LENGTH = 80;
 const MAX_SENTENCE_LENGTH = 512;
-const MAX_TERM_LENGTH = 72;
 const MAX_SOURCE_LENGTH = 40;
 const MIN_SENTENCE_WRITE_INTERVAL_MS = 700;
 const MIN_DICTIONARY_WRITE_INTERVAL_MS = 500;
+const MIN_SNIPPET_WRITE_INTERVAL_MS = 500;
 const MAX_WRITE_BACKOFF_MS = 8_000;
 const MAX_WRITE_ATTEMPTS = 3;
+const MIN_SYNC_TIMESTAMP_MS = 1_609_459_200_000;
+const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1_000;
 
 type CloudGuardrailSeverity = "info" | "warn" | "error";
 
@@ -71,6 +73,7 @@ export class CloudSyncError extends Error implements CloudSyncErrorShape {
 
 const sentenceWriteState = new Map<string, WriteGuardrailState>();
 const dictionaryWriteState = new Map<string, WriteGuardrailState>();
+const snippetWriteState = new Map<string, WriteGuardrailState>();
 
 export interface CloudProfile {
   uid: string;
@@ -85,13 +88,159 @@ export interface CloudSentence {
   createdAtUtcMs: number;
 }
 
-function mapDictionaryTermRow(row: { id: string; data: () => Record<string, unknown> }): DictionaryTerm {
+export interface CloudDictionarySnapshot {
+  records: DictionarySyncRecord[];
+  legacyIds: string[];
+  /** Identities already stored under their deterministic document ID with the
+   * current schema — safe to skip rewriting when their content is unchanged. */
+  deterministicIdentities: string[];
+}
+
+export interface CloudVoiceSnippetSnapshot {
+  records: VoiceSnippetSyncRecord[];
+  /** Identities already stored under their deterministic document ID and safe
+   * to omit from a changed-only write. */
+  deterministicIdentities: string[];
+}
+
+export function normalizeDictionaryIdentity(value: string): string {
+  return value.trim().replace(/\s+/gu, " ").normalize("NFC").toLowerCase();
+}
+
+export function dictionaryDocumentId(normalizedTerm: string): string {
+  return `term-${encodeURIComponent(normalizedTerm)}`;
+}
+
+export function normalizeSnippetIdentity(value: string): string {
+  return value.trim().replace(/\s+/gu, " ").normalize("NFC").toLowerCase();
+}
+
+export function snippetDocumentId(normalizedTrigger: string): string {
+  return `snippet-${encodeURIComponent(normalizedTrigger)}`;
+}
+
+function mapDictionaryRecordRow(row: {
+  id: string;
+  data: () => Record<string, unknown>;
+}): { record: DictionarySyncRecord; legacy: boolean } {
   const data = row.data();
+  const term = typeof data.term === "string" ? data.term : "";
+  const schemaLegacy =
+    !("normalizedTerm" in data) ||
+    !("updatedAtUtcMs" in data) ||
+    !("deletedAtUtcMs" in data);
+  // Legacy rows normalized with trim+lowercase only. Recompute their identity
+  // under the current contract so Rust's fail-closed identity check cannot
+  // reject the entire sync over a stale stored `termNormalized` value.
+  const normalizedTerm =
+    !schemaLegacy && typeof data.normalizedTerm === "string"
+      ? data.normalizedTerm
+      : normalizeDictionaryIdentity(term);
+  const createdAtUtcMs =
+    typeof data.createdAtUtcMs === "number" ? data.createdAtUtcMs : Date.now();
   return {
-    termId: row.id,
-    term: typeof data.term === "string" ? data.term : "",
-    source: typeof data.source === "string" ? data.source : "cloud-sync",
-    createdAtUtcMs: typeof data.createdAtUtcMs === "number" ? data.createdAtUtcMs : Date.now()
+    record: {
+      term,
+      normalizedTerm,
+      source: typeof data.source === "string" ? data.source : "cloud-sync",
+      createdAtUtcMs,
+      updatedAtUtcMs:
+        typeof data.updatedAtUtcMs === "number" ? data.updatedAtUtcMs : createdAtUtcMs,
+      deletedAtUtcMs: typeof data.deletedAtUtcMs === "number" ? data.deletedAtUtcMs : null
+    },
+    legacy: schemaLegacy || row.id !== dictionaryDocumentId(normalizedTerm)
+  };
+}
+
+// Mirrors the Rust validation contract (`normalize_and_validate_term`) closely
+// enough to keep one malformed cloud document from aborting reconciliation.
+function isSyncableDictionaryTerm(term: string): boolean {
+  if (/\p{Cc}/u.test(term)) {
+    return false;
+  }
+  const display = term.trim().replace(/\s+/gu, " ").normalize("NFC");
+  return display.length > 0 && [...display].length <= 72;
+}
+
+const FORBIDDEN_EXPANSION_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000D-\u001F\u007F-\u009F\uE000\uE001]/u;
+const RESERVED_SNIPPET_TRIGGERS = new Set([
+  "new line",
+  "next line",
+  "new paragraph",
+  "bullet point",
+  "new bullet"
+]);
+
+function isSyncableSnippetTrigger(trigger: string): boolean {
+  if (/\p{Cc}/u.test(trigger)) {
+    return false;
+  }
+  const display = trigger.trim().normalize("NFC");
+  const identity = normalizeSnippetIdentity(display);
+  return display.length > 0 && [...display].length <= 60 && !RESERVED_SNIPPET_TRIGGERS.has(identity);
+}
+
+function isSyncableSnippetExpansion(expansion: string): boolean {
+  return (
+    expansion.trim().length > 0 &&
+    [...expansion].length <= 4_000 &&
+    !FORBIDDEN_EXPANSION_CHARACTERS.test(expansion)
+  );
+}
+
+function isSyncableTimestamp(value: unknown, nowUtcMs: number): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= MIN_SYNC_TIMESTAMP_MS &&
+    value <= nowUtcMs + MAX_FUTURE_TIMESTAMP_SKEW_MS
+  );
+}
+
+function mapVoiceSnippetRecordRow(row: {
+  id: string;
+  data: () => Record<string, unknown>;
+}): { record: VoiceSnippetSyncRecord; deterministic: boolean } | null {
+  const data = row.data();
+  const trigger = typeof data.trigger === "string" ? data.trigger : "";
+  const normalizedTrigger =
+    typeof data.normalizedTrigger === "string" ? data.normalizedTrigger : "";
+  const expansion = typeof data.expansion === "string" ? data.expansion : "";
+  const createdAtUtcMs = data.createdAtUtcMs;
+  const updatedAtUtcMs = data.updatedAtUtcMs;
+  const deletedAtUtcMs = data.deletedAtUtcMs;
+  const nowUtcMs = Date.now();
+
+  if (
+    !isSyncableSnippetTrigger(trigger) ||
+    // A row whose stored identity disagrees with its trigger would be
+    // rejected fail-closed by Rust reconciliation, permanently aborting every
+    // sync. Quarantine it here instead; reads never delete or rewrite it.
+    normalizedTrigger !== normalizeSnippetIdentity(trigger) ||
+    !isSyncableTimestamp(createdAtUtcMs, nowUtcMs) ||
+    !isSyncableTimestamp(updatedAtUtcMs, nowUtcMs) ||
+    updatedAtUtcMs < createdAtUtcMs ||
+    (deletedAtUtcMs !== null &&
+      (!isSyncableTimestamp(deletedAtUtcMs, nowUtcMs) ||
+        deletedAtUtcMs < updatedAtUtcMs)) ||
+    (deletedAtUtcMs === null
+      ? !isSyncableSnippetExpansion(expansion)
+      : expansion !== "")
+  ) {
+    return null;
+  }
+
+  const record = {
+    trigger,
+    normalizedTrigger,
+    expansion,
+    createdAtUtcMs,
+    updatedAtUtcMs,
+    deletedAtUtcMs
+  };
+  return {
+    record,
+    deterministic: row.id === snippetDocumentId(normalizedTrigger)
   };
 }
 
@@ -105,6 +254,17 @@ function clampTrimmed(value: string, max: number): string {
 
 function hashPayload(value: string): string {
   return value.toLowerCase();
+}
+
+function hashPrivatePayload(value: string): string {
+  // FNV-1a is enough for local duplicate-write suppression. It prevents
+  // private snippet identity from being retained in guardrail state.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `snippet-${(hash >>> 0).toString(16)}-${value.length}`;
 }
 
 function getWriteState(
@@ -560,97 +720,225 @@ export async function saveCloudSentence(uid: string, text: string): Promise<Clou
   }, context, state, contentHash);
 }
 
-export async function listCloudDictionaryTerms(uid: string): Promise<DictionaryTerm[]> {
+export async function listCloudDictionaryRecords(uid: string): Promise<CloudDictionarySnapshot> {
   const { db } = await getCloud();
-  const { collection, getDocs, orderBy, query } = await loadFirestoreSdk();
-  const rows = await getDocs(
-    query(collection(db, "users", uid, "dictionaryTerms"), orderBy("createdAtUtcMs", "desc"))
-  );
-  return rows.docs.map((row) => mapDictionaryTermRow({ id: row.id, data: () => row.data() }));
-}
-
-export async function addCloudDictionaryTerm(
-  uid: string,
-  term: string,
-  source = "manual-add"
-): Promise<DictionaryTerm[]> {
-  const { db } = await getCloud();
-  const { collection, doc, getDocs, limit, query, setDoc, where } = await loadFirestoreSdk();
-  const normalized = clampTrimmed(term, MAX_TERM_LENGTH);
-  if (!normalized) {
-    return listCloudDictionaryTerms(uid);
-  }
-  const normalizedSource = clampTrimmed(source, MAX_SOURCE_LENGTH) || "manual-add";
-
-  const normalizedKey = normalized.toLowerCase();
-  const state = getWriteState(dictionaryWriteState, uid);
-  const contentHash = hashPayload(`${normalizedKey}:${normalizedSource}`);
-  try {
-    enforceClientBackpressure(
-      state,
-      Date.now(),
-      contentHash,
-      MIN_DICTIONARY_WRITE_INTERVAL_MS,
-      "add-dictionary-term"
-    );
-  } catch (error) {
-    if (error instanceof CloudSyncError && (error.code === "client-dedup" || error.code === "client-backpressure")) {
-      emitCloudGuardrailEvent("cloud_write_skipped", "add-dictionary-term", "info", error.message);
-      return listCloudDictionaryTerms(uid);
-    }
-    throw error;
-  }
-
-  const context = "add-dictionary-term";
-  return withCloudRetry(async () => {
-    const existing = await getDocs(
-      query(
-        collection(db, "users", uid, "dictionaryTerms"),
-        where("termNormalized", "==", normalizedKey),
-        limit(1)
+  const { collection, getDocs } = await loadFirestoreSdk();
+  const rows = await getDocs(collection(db, "users", uid, "dictionaryTerms"));
+  const mapped = rows.docs
+    .map((row) => ({
+      id: row.id,
+      ...mapDictionaryRecordRow({ id: row.id, data: () => row.data() })
+    }))
+    // A row the local contract can never accept (empty, control characters,
+    // overlength) is skipped — never sent to Rust, never deleted — instead of
+    // poisoning every future sync with a validation error.
+    .filter(({ record }) => isSyncableDictionaryTerm(record.term));
+  return {
+    records: mapped.map(({ record }) => record),
+    legacyIds: mapped
+      .filter(({ id, legacy, record }) =>
+        legacy && id !== dictionaryDocumentId(record.normalizedTerm)
       )
-    );
-    if (!existing.empty) {
-      return listCloudDictionaryTerms(uid);
-    }
-
-    const termRef = doc(collection(db, "users", uid, "dictionaryTerms"));
-    await setDoc(termRef, {
-      term: normalized,
-      source: normalizedSource,
-      termNormalized: normalizedKey,
-      createdAtUtcMs: Date.now()
-    });
-
-    return listCloudDictionaryTerms(uid);
-  }, context, state, contentHash);
+      .map(({ id }) => id),
+    deterministicIdentities: mapped
+      .filter(({ legacy }) => !legacy)
+      .map(({ record }) => record.normalizedTerm)
+  };
 }
 
-export async function deleteCloudDictionaryTerm(uid: string, termId: string): Promise<DictionaryTerm[]> {
+export async function upsertCloudDictionaryRecords(
+  uid: string,
+  records: DictionarySyncRecord[]
+): Promise<void> {
   const { db } = await getCloud();
-  const { deleteDoc, doc } = await loadFirestoreSdk();
-  const normalizedTermId = clampTrimmed(termId, 80);
+  const { doc, writeBatch } = await loadFirestoreSdk();
+  const validated = records.map((record) => {
+    const normalizedTerm = normalizeDictionaryIdentity(record.term);
+    if (normalizedTerm !== record.normalizedTerm) {
+      throw new CloudSyncError({
+        code: "dictionary-identity-mismatch",
+        retryable: false,
+        context: "sync-dictionary",
+        message: "Dictionary identity mismatch between local storage and cloud sync."
+      });
+    }
+    return record;
+  });
+  if (validated.length === 0) {
+    return;
+  }
   const state = getWriteState(dictionaryWriteState, uid);
-  const contentHash = hashPayload(`delete:${normalizedTermId}`);
+  const contentHash = hashPayload(
+    validated
+      .map((record) => `${record.normalizedTerm}:${record.updatedAtUtcMs}:${record.deletedAtUtcMs ?? "active"}`)
+      .sort()
+      .join("|")
+  );
   try {
     enforceClientBackpressure(
       state,
       Date.now(),
       contentHash,
       MIN_DICTIONARY_WRITE_INTERVAL_MS,
-      "delete-dictionary-term"
+      "sync-dictionary"
     );
   } catch (error) {
-    if (error instanceof CloudSyncError && (error.code === "client-dedup" || error.code === "client-backpressure")) {
-      emitCloudGuardrailEvent("cloud_write_skipped", "delete-dictionary-term", "info", error.message);
-      return listCloudDictionaryTerms(uid);
+    if (error instanceof CloudSyncError && error.code === "client-dedup") {
+      emitCloudGuardrailEvent("cloud_write_skipped", "sync-dictionary", "info", error.message);
+      return;
     }
     throw error;
   }
 
-  const context = "delete-dictionary-term";
-  return withCloudRetry(async () => {
-    await deleteDoc(doc(db, "users", uid, "dictionaryTerms", normalizedTermId));
-    return listCloudDictionaryTerms(uid);
-  }, context, state, contentHash);
+  await withCloudRetry(async () => {
+    for (let start = 0; start < validated.length; start += 500) {
+      const batch = writeBatch(db);
+      for (const record of validated.slice(start, start + 500)) {
+        batch.set(doc(db, "users", uid, "dictionaryTerms", dictionaryDocumentId(record.normalizedTerm)), {
+          term: record.term,
+          normalizedTerm: record.normalizedTerm,
+          source: clampTrimmed(record.source, MAX_SOURCE_LENGTH) || "sync",
+          createdAtUtcMs: record.createdAtUtcMs,
+          updatedAtUtcMs: record.updatedAtUtcMs,
+          deletedAtUtcMs: record.deletedAtUtcMs
+        });
+      }
+      await batch.commit();
+    }
+  }, "sync-dictionary", state, contentHash);
+}
+
+export async function deleteLegacyCloudDictionaryRecords(
+  uid: string,
+  legacyIds: string[]
+): Promise<void> {
+  if (legacyIds.length === 0) return;
+  const { db } = await getCloud();
+  const { doc, writeBatch } = await loadFirestoreSdk();
+  for (let start = 0; start < legacyIds.length; start += 500) {
+    const batch = writeBatch(db);
+    for (const legacyId of legacyIds.slice(start, start + 500)) {
+      batch.delete(doc(db, "users", uid, "dictionaryTerms", legacyId));
+    }
+    await batch.commit();
+  }
+}
+
+export async function listCloudVoiceSnippetRecords(
+  uid: string
+): Promise<CloudVoiceSnippetSnapshot> {
+  const { db } = await getCloud();
+  const { collection, getDocs } = await loadFirestoreSdk();
+  const rows = await getDocs(collection(db, "users", uid, "voiceSnippets"));
+  const mapped = rows.docs
+    .map((row) => mapVoiceSnippetRecordRow({ id: row.id, data: () => row.data() }))
+    // Quarantine malformed rows in place. Reads never delete or rewrite them.
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+  return {
+    records: mapped.map(({ record }) => record),
+    deterministicIdentities: mapped
+      .filter(({ deterministic }) => deterministic)
+      .map(({ record }) => record.normalizedTrigger)
+  };
+}
+
+export async function upsertCloudVoiceSnippetRecords(
+  uid: string,
+  records: VoiceSnippetSyncRecord[]
+): Promise<void> {
+  const validated = records.map((record) => {
+    const normalizedTrigger = normalizeSnippetIdentity(record.trigger);
+    if (normalizedTrigger !== record.normalizedTrigger) {
+      throw new CloudSyncError({
+        code: "snippet-identity-mismatch",
+        retryable: false,
+        context: "sync-snippets",
+        message: "Snippet identity mismatch between local storage and cloud sync."
+      });
+    }
+    if (
+      !isSyncableSnippetTrigger(record.trigger) ||
+      !Number.isSafeInteger(record.createdAtUtcMs) ||
+      !Number.isSafeInteger(record.updatedAtUtcMs) ||
+      record.updatedAtUtcMs < record.createdAtUtcMs ||
+      (record.deletedAtUtcMs !== null &&
+        (!Number.isSafeInteger(record.deletedAtUtcMs) ||
+          record.deletedAtUtcMs < record.updatedAtUtcMs)) ||
+      (record.deletedAtUtcMs === null
+        ? !isSyncableSnippetExpansion(record.expansion)
+        : record.expansion !== "")
+    ) {
+      throw new CloudSyncError({
+        code: "snippet-validation",
+        retryable: false,
+        context: "sync-snippets",
+        message: "Snippet data does not satisfy the cloud sync contract."
+      });
+    }
+    return record;
+  });
+  if (validated.length === 0) {
+    return;
+  }
+
+  const { db } = await getCloud();
+  const { doc, writeBatch } = await loadFirestoreSdk();
+  const state = getWriteState(snippetWriteState, uid);
+  // Content is deliberately excluded: guardrail diagnostics and write-state
+  // keys must never retain private trigger or expansion text.
+  const contentHash = hashPrivatePayload(
+    JSON.stringify(
+      validated
+        .map((record) => ({
+          trigger: record.trigger,
+          normalizedTrigger: record.normalizedTrigger,
+          expansion: record.expansion,
+          createdAtUtcMs: record.createdAtUtcMs,
+          updatedAtUtcMs: record.updatedAtUtcMs,
+          deletedAtUtcMs: record.deletedAtUtcMs
+        }))
+        .sort((left, right) => left.normalizedTrigger.localeCompare(right.normalizedTrigger))
+    )
+  );
+  try {
+    enforceClientBackpressure(
+      state,
+      Date.now(),
+      contentHash,
+      MIN_SNIPPET_WRITE_INTERVAL_MS,
+      "sync-snippets"
+    );
+  } catch (error) {
+    if (error instanceof CloudSyncError && error.code === "client-dedup") {
+      emitCloudGuardrailEvent("cloud_write_skipped", "sync-snippets", "info", error.message);
+      return;
+    }
+    throw error;
+  }
+
+  await withCloudRetry(async () => {
+    for (let start = 0; start < validated.length; start += 500) {
+      const batch = writeBatch(db);
+      for (const record of validated.slice(start, start + 500)) {
+        batch.set(
+          doc(
+            db,
+            "users",
+            uid,
+            "voiceSnippets",
+            snippetDocumentId(record.normalizedTrigger)
+          ),
+          {
+            trigger: record.trigger,
+            normalizedTrigger: record.normalizedTrigger,
+            expansion: record.expansion,
+            createdAtUtcMs: record.createdAtUtcMs,
+            updatedAtUtcMs: record.updatedAtUtcMs,
+            deletedAtUtcMs: record.deletedAtUtcMs
+          }
+        );
+      }
+      await batch.commit();
+    }
+  }, "sync-snippets", state, contentHash);
 }
