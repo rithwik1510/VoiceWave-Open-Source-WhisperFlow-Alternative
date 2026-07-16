@@ -19,6 +19,8 @@ try {
     @{ Name = 'Root user schema validator'; Pattern = 'function\s+isValidUserProfile\s*\(' },
     @{ Name = 'Sentence schema validator'; Pattern = 'function\s+isValidRecentSentence\s*\(' },
     @{ Name = 'Dictionary schema validator'; Pattern = 'function\s+isValidDictionaryTerm\s*\(' },
+    @{ Name = 'Voice snippet schema validator'; Pattern = 'function\s+isValidVoiceSnippet\s*\(' },
+    @{ Name = 'Voice snippet owner collection'; Pattern = '(?s)match\s+/voiceSnippets/\{snippetId\}.*?allow\s+read\s*:\s*if\s+isSignedInOwner\(userId\).*?allow\s+create,\s*update\s*:\s*if\s+isSignedInOwner\(userId\)\s*&&\s*isValidVoiceSnippet\(\)' },
     @{ Name = 'Create/update split'; Pattern = 'allow\s+create\s*:' },
     @{ Name = 'Timestamp sanity'; Pattern = 'createdAtUtcMs' },
     @{ Name = 'Key allowlist'; Pattern = 'keys\(\)\.hasOnly' }

@@ -47,8 +47,10 @@ service cloud.firestore {
       return request.resource.data.keys().hasOnly([
           'term',
           'source',
-          'termNormalized',
-          'createdAtUtcMs'
+          'normalizedTerm',
+          'createdAtUtcMs',
+          'updatedAtUtcMs',
+          'deletedAtUtcMs'
         ])
         && request.resource.data.term is string
         && request.resource.data.term.size() >= 1
@@ -56,10 +58,42 @@ service cloud.firestore {
         && request.resource.data.source is string
         && request.resource.data.source.size() >= 1
         && request.resource.data.source.size() <= 40
-        && request.resource.data.termNormalized is string
-        && request.resource.data.termNormalized.size() >= 1
-        && request.resource.data.termNormalized.size() <= 72
-        && isReasonableTimestamp(request.resource.data.createdAtUtcMs);
+        && request.resource.data.normalizedTerm is string
+        && request.resource.data.normalizedTerm.size() >= 1
+        && request.resource.data.normalizedTerm.size() <= 72
+        && isReasonableTimestamp(request.resource.data.createdAtUtcMs)
+        && isReasonableTimestamp(request.resource.data.updatedAtUtcMs)
+        && request.resource.data.updatedAtUtcMs >= request.resource.data.createdAtUtcMs
+        && (request.resource.data.deletedAtUtcMs == null
+          || (isReasonableTimestamp(request.resource.data.deletedAtUtcMs)
+            && request.resource.data.deletedAtUtcMs >= request.resource.data.updatedAtUtcMs));
+    }
+
+    function isValidVoiceSnippet() {
+      return request.resource.data.keys().hasOnly([
+          'trigger',
+          'normalizedTrigger',
+          'expansion',
+          'createdAtUtcMs',
+          'updatedAtUtcMs',
+          'deletedAtUtcMs'
+        ])
+        && request.resource.data.trigger is string
+        && request.resource.data.trigger.size() >= 1
+        && request.resource.data.trigger.size() <= 60
+        && request.resource.data.normalizedTrigger is string
+        && request.resource.data.normalizedTrigger.size() >= 1
+        && request.resource.data.normalizedTrigger.size() <= 60
+        && request.resource.data.expansion is string
+        && request.resource.data.expansion.size() <= 4000
+        && isReasonableTimestamp(request.resource.data.createdAtUtcMs)
+        && isReasonableTimestamp(request.resource.data.updatedAtUtcMs)
+        && request.resource.data.updatedAtUtcMs >= request.resource.data.createdAtUtcMs
+        && ((request.resource.data.deletedAtUtcMs == null
+              && request.resource.data.expansion.size() >= 1)
+          || (isReasonableTimestamp(request.resource.data.deletedAtUtcMs)
+              && request.resource.data.deletedAtUtcMs >= request.resource.data.updatedAtUtcMs
+              && request.resource.data.expansion == ''));
     }
 
     match /users/{userId} {
@@ -79,6 +113,12 @@ service cloud.firestore {
       match /dictionaryTerms/{termId} {
         allow read: if isSignedInOwner(userId);
         allow create, update: if isSignedInOwner(userId) && isValidDictionaryTerm();
+        allow delete: if isSignedInOwner(userId);
+      }
+
+      match /voiceSnippets/{snippetId} {
+        allow read: if isSignedInOwner(userId);
+        allow create, update: if isSignedInOwner(userId) && isValidVoiceSnippet();
         allow delete: if isSignedInOwner(userId);
       }
     }
