@@ -87,6 +87,8 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     setAppProfiles: vi.fn(),
     setCodeModeSettings: vi.fn(),
     setDictationProfile: vi.fn(),
+    setLlmPolishEnabled: vi.fn().mockResolvedValue(true),
+    polishModelProgress: null,
     setDiagnosticsOptIn: vi.fn(),
     setDomainPacks: vi.fn(),
     setFormatProfile: vi.fn(),
@@ -104,6 +106,20 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     setVadThreshold: vi.fn(),
     addSessionTag: vi.fn(),
     addDictionaryTerm: vi.fn(),
+    exportDictionary: vi.fn(),
+    importDictionary: vi.fn(),
+    refreshDictionary: vi.fn(),
+    syncDictionaryWithCloud: vi.fn().mockResolvedValue([]),
+    voiceSnippets: [],
+    addVoiceSnippet: vi.fn(),
+    updateVoiceSnippet: vi.fn(),
+    deleteVoiceSnippet: vi.fn(),
+    refreshVoiceSnippets: vi.fn(),
+    syncVoiceSnippetsWithCloud: vi.fn().mockResolvedValue({
+      snippets: [],
+      records: [],
+      limitExceeded: false
+    }),
     resetVadThreshold: vi.fn(),
     restorePurchase: vi.fn(),
     startProCheckout: vi.fn(),
@@ -135,6 +151,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
         wrapInFencedBlock: false
       },
       proPostProcessingEnabled: false,
+      llmPolishEnabled: false,
       spokenEditCommands: true,
       onboardingCompleted: true
     },
@@ -168,6 +185,7 @@ describe("App navigation and phase three panels", () => {
 
   it("shows Polish Profiles for pro users and selects Coding with one atomic call", async () => {
     const setDictationProfile = vi.fn().mockResolvedValue(undefined);
+    const setLlmPolishEnabled = vi.fn().mockResolvedValue(true);
     const setFormatProfile = vi.fn();
     const useVoiceWaveSpy = vi
       .spyOn(hookModule, "useVoiceWave")
@@ -193,6 +211,7 @@ describe("App navigation and phase three panels", () => {
             message: null
           },
           setDictationProfile,
+          setLlmPolishEnabled,
           setFormatProfile
         }) as any
       );
@@ -208,7 +227,7 @@ describe("App navigation and phase three panels", () => {
     expect(screen.queryByRole("button", { name: /^Casual/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Literal/ })).toBeInTheDocument();
     // The wait-validated profiles disclose the latency trade up front.
-    expect(screen.getAllByText("Adds ~2s for AI shaping.").length).toBe(2);
+    expect(screen.getAllByText("Typically adds ~2s once the local model is warm.").length).toBe(2);
     expect(
       screen.getByText("No AI rewriting — your words as recognized, punctuation only.")
     ).toBeInTheDocument();
@@ -217,6 +236,7 @@ describe("App navigation and phase three panels", () => {
     await waitFor(() => {
       // ONE atomic profile write — never the old five sequential writes.
       expect(setDictationProfile).toHaveBeenCalledWith("coding");
+      expect(setLlmPolishEnabled).toHaveBeenCalledWith(true);
       expect(setFormatProfile).not.toHaveBeenCalled();
     });
 
@@ -266,7 +286,7 @@ describe("App navigation and phase three panels", () => {
     useVoiceWaveSpy.mockRestore();
   });
 
-  it("switches between home, models, and dictionary tabs", async () => {
+  it("switches between home, models, dictionary, and snippets tabs", async () => {
     render(<App />);
 
     expect(screen.getByText("Good morning, Rishi.")).toBeInTheDocument();
@@ -277,6 +297,182 @@ describe("App navigation and phase three panels", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Dictionary" }));
     expect(screen.getByText("Personal Dictionary")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Snippets" }));
+    expect(screen.getByText("Voice Snippets")).toBeInTheDocument();
+    expect(screen.getByText("Create your first voice snippet")).toBeInTheDocument();
+  });
+
+  it("saves a multiline snippet through the local action", async () => {
+    const addVoiceSnippet = vi.fn().mockResolvedValue(undefined);
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({ addVoiceSnippet }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Snippets" }));
+    fireEvent.click(screen.getByRole("button", { name: "New snippet" }));
+    fireEvent.change(screen.getByLabelText("Spoken trigger"), { target: { value: "my reply" } });
+    fireEvent.change(screen.getByLabelText("Exact expansion"), {
+      target: { value: "Hello,\n\nThanks for reaching out." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save snippet" }));
+
+    await waitFor(() => {
+      expect(addVoiceSnippet).toHaveBeenCalledWith("my reply", "Hello,\n\nThanks for reaching out.");
+    });
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("edits and confirms deletion of an existing snippet", async () => {
+    const updateVoiceSnippet = vi.fn().mockResolvedValue(undefined);
+    const deleteVoiceSnippet = vi.fn().mockResolvedValue(undefined);
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({
+        voiceSnippets: [{
+          snippetId: "snippet-1",
+          trigger: "my email",
+          normalizedTrigger: "my email",
+          expansion: "name@example.com",
+          createdAtUtcMs: 1,
+          updatedAtUtcMs: 1
+        }],
+        updateVoiceSnippet,
+        deleteVoiceSnippet
+      }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Snippets" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit my email" }));
+    fireEvent.change(screen.getByLabelText("Exact expansion"), { target: { value: "new@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save snippet" }));
+    await waitFor(() => {
+      expect(updateVoiceSnippet).toHaveBeenCalledWith("snippet-1", "my email", "new@example.com");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete my email" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteVoiceSnippet).toHaveBeenCalledWith("snippet-1"));
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("searches snippets and scopes keyboard creation and validation to the page", async () => {
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({
+        voiceSnippets: [
+          {
+            snippetId: "snippet-support",
+            trigger: "support reply",
+            normalizedTrigger: "support reply",
+            expansion: "Hello from support",
+            createdAtUtcMs: 1,
+            updatedAtUtcMs: 1
+          },
+          {
+            snippetId: "snippet-email",
+            trigger: "my email",
+            normalizedTrigger: "my email",
+            expansion: "name@example.com",
+            createdAtUtcMs: 2,
+            updatedAtUtcMs: 2
+          }
+        ]
+      }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Snippets" }));
+    const search = screen.getByRole("textbox", { name: "Search voice snippets" });
+    fireEvent.keyDown(document, { key: "f", ctrlKey: true });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: "support" } });
+    expect(screen.getByText("support reply")).toBeInTheDocument();
+    expect(screen.queryByText("my email")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "n", ctrlKey: true });
+    expect(screen.getByLabelText("Spoken trigger")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Exact expansion"), { target: { value: "value" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save snippet" }));
+    expect(screen.getByText("Use a spoken trigger between 1 and 60 characters.")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByLabelText("Spoken trigger")).not.toBeInTheDocument();
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("searches the local approved dictionary by term and source", async () => {
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({
+        dictionaryTerms: [
+          { termId: "dt-1", term: "Kubernetes", source: "manual-add", createdAtUtcMs: 2 },
+          { termId: "dt-2", term: "Tauri", source: "queue-approval", createdAtUtcMs: 1 }
+        ]
+      }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Dictionary" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search approved dictionary terms" }), {
+      target: { value: "queue" }
+    });
+
+    expect(screen.getByText("Tauri")).toBeInTheDocument();
+    expect(screen.queryByText("Kubernetes")).not.toBeInTheDocument();
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("approves the edited pending value through the local dictionary action", async () => {
+    const approveDictionaryQueueEntry = vi.fn().mockResolvedValue(undefined);
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({
+        dictionaryQueue: [{
+          entryId: "dq-1",
+          term: "Voice Wave",
+          sourcePreview: "voice wave desktop",
+          createdAtUtcMs: 1
+        }],
+        approveDictionaryQueueEntry
+      }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Dictionary" }));
+    fireEvent.click(screen.getByRole("button", { name: /Pending review queue/ }));
+    const edit = screen.getByRole("textbox", { name: "Edit pending term Voice Wave" });
+    fireEvent.change(edit, { target: { value: "VoiceWave" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(approveDictionaryQueueEntry).toHaveBeenCalledWith("dq-1", "VoiceWave");
+    });
+    useVoiceWaveSpy.mockRestore();
+  });
+
+  it("retains an invalid pending edit when local approval rejects it", async () => {
+    const approveDictionaryQueueEntry = vi.fn().mockRejectedValue(new Error("dictionary term is empty"));
+    const useVoiceWaveSpy = vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({
+        dictionaryQueue: [{
+          entryId: "dq-invalid",
+          term: "VoiceWave",
+          sourcePreview: "preview",
+          createdAtUtcMs: 1
+        }],
+        approveDictionaryQueueEntry
+      }) as any
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Dictionary" }));
+    fireEvent.click(screen.getByRole("button", { name: /Pending review queue/ }));
+    const edit = screen.getByRole("textbox", { name: "Edit pending term VoiceWave" });
+    fireEvent.change(edit, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(approveDictionaryQueueEntry).toHaveBeenCalledWith("dq-invalid", ""));
+    expect(screen.getByRole("textbox", { name: "Edit pending term VoiceWave" })).toHaveValue("");
+    expect(screen.getByText("preview")).toBeInTheDocument();
+    useVoiceWaveSpy.mockRestore();
   });
 
   it("opens the stats page from the nav", async () => {

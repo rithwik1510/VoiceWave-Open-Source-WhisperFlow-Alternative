@@ -12,8 +12,10 @@ pub mod model_manager;
 pub mod permissions;
 pub mod phase1;
 pub mod settings;
+pub mod snippet;
 pub mod stats;
 pub mod transcript;
+mod secure_store;
 
 #[cfg(feature = "desktop")]
 pub mod state;
@@ -27,7 +29,10 @@ use billing::{CheckoutLaunchResult, EntitlementSnapshot, PortalLaunchResult};
 #[cfg(feature = "desktop")]
 use diagnostics::{DiagnosticsExportResult, DiagnosticsStatus};
 #[cfg(feature = "desktop")]
-use dictionary::{DictionaryExport, DictionaryImportSummary, DictionaryQueueItem, DictionaryTerm};
+use dictionary::{
+    DictionaryExport, DictionaryImportSummary, DictionaryQueueItem, DictionaryReconcileResult,
+    DictionarySyncRecord, DictionaryTerm,
+};
 #[cfg(feature = "desktop")]
 use history::{
     HistoryExportPreset, HistoryExportResult, RetentionPolicy, SessionHistoryQuery,
@@ -46,6 +51,10 @@ use settings::{
     AppProfileOverrides, CodeModeSettings, DomainPackId, FormatProfile, VoiceWaveSettings,
 };
 #[cfg(feature = "desktop")]
+use snippet::{
+    SnippetError, VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord,
+};
+#[cfg(feature = "desktop")]
 use state::{DictationMode, VoiceWaveController, VoiceWaveSnapshot};
 #[cfg(feature = "desktop")]
 use stats::StatsSummary;
@@ -61,6 +70,48 @@ use tauri::{
 
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_LABEL: &str = "voicewave-pill";
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnippetCommandError {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+}
+
+#[cfg(feature = "desktop")]
+impl From<SnippetError> for SnippetCommandError {
+    fn from(error: SnippetError) -> Self {
+        let code = match &error {
+            SnippetError::EmptyTrigger
+            | SnippetError::TriggerTooLong
+            | SnippetError::InvalidTriggerCharacters
+            | SnippetError::ReservedTrigger
+            | SnippetError::EmptyExpansion
+            | SnippetError::ExpansionTooLong
+            | SnippetError::InvalidExpansionCharacters
+            | SnippetError::InvalidSyncTimestamps
+            | SnippetError::TombstoneContainsExpansion => "snippet-validation",
+            SnippetError::DuplicateTrigger => "snippet-duplicate",
+            SnippetError::NotFound(_) => "snippet-not-found",
+            SnippetError::ActiveLimit => "snippet-active-limit",
+            SnippetError::InvalidSyncIdentity => "snippet-identity-mismatch",
+            SnippetError::AppData | SnippetError::Persistence(_) | SnippetError::Parse(_) => {
+                "snippet-persistence"
+            }
+        };
+        let retryable = matches!(
+            &error,
+            SnippetError::AppData | SnippetError::Persistence(_) | SnippetError::Parse(_)
+        );
+        Self {
+            code,
+            message: error.to_string(),
+            retryable,
+        }
+    }
+}
 #[cfg(feature = "desktop")]
 // Compact window dimensions are intentionally larger than the pill surface
 // (52x20 idle, 96x36 listening) so the drop shadow can fully fade out
@@ -1169,6 +1220,99 @@ async fn import_dictionary(
         .map_err(|err| AppError::Controller(err).into())
 }
 
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn get_dictionary_sync_records(
+    runtime: State<'_, RuntimeContext>,
+) -> Result<Vec<DictionarySyncRecord>, String> {
+    Ok(runtime.controller.get_dictionary_sync_records().await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn reconcile_dictionary_records(
+    runtime: State<'_, RuntimeContext>,
+    records: Vec<DictionarySyncRecord>,
+) -> Result<DictionaryReconcileResult, String> {
+    runtime
+        .controller
+        .reconcile_dictionary_records(records)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn list_voice_snippets(
+    runtime: State<'_, RuntimeContext>,
+    query: Option<String>,
+) -> Result<Vec<VoiceSnippet>, SnippetCommandError> {
+    Ok(runtime.controller.list_voice_snippets(query).await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn add_voice_snippet(
+    runtime: State<'_, RuntimeContext>,
+    trigger: String,
+    expansion: String,
+) -> Result<VoiceSnippet, SnippetCommandError> {
+    runtime
+        .controller
+        .add_voice_snippet(trigger, expansion)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn update_voice_snippet(
+    runtime: State<'_, RuntimeContext>,
+    snippet_id: String,
+    trigger: String,
+    expansion: String,
+) -> Result<VoiceSnippet, SnippetCommandError> {
+    runtime
+        .controller
+        .update_voice_snippet(snippet_id, trigger, expansion)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn remove_voice_snippet(
+    runtime: State<'_, RuntimeContext>,
+    snippet_id: String,
+) -> Result<(), SnippetCommandError> {
+    runtime
+        .controller
+        .remove_voice_snippet(snippet_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn get_voice_snippet_sync_records(
+    runtime: State<'_, RuntimeContext>,
+) -> Result<Vec<VoiceSnippetSyncRecord>, SnippetCommandError> {
+    Ok(runtime.controller.get_voice_snippet_sync_records().await)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn reconcile_voice_snippet_records(
+    runtime: State<'_, RuntimeContext>,
+    records: Vec<VoiceSnippetSyncRecord>,
+) -> Result<VoiceSnippetReconcileResult, SnippetCommandError> {
+    runtime
+        .controller
+        .reconcile_voice_snippet_records(records)
+        .await
+        .map_err(Into::into)
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PolishModelStatus {
@@ -1202,7 +1346,10 @@ async fn polish_model_status() -> Result<PolishModelStatus, String> {
 /// progress bar. Idempotent and single-flighted; safe to call on every enable.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-async fn download_polish_model(app: tauri::AppHandle) -> Result<(), String> {
+async fn download_polish_model(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
     let progress_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::inference::llm_polish::download_polish_model(|downloaded, total| {
@@ -1222,6 +1369,9 @@ async fn download_polish_model(app: tauri::AppHandle) -> Result<(), String> {
 
     match result {
         Ok(_) => {
+            // Keep the UI in its preparing state until the selected profile's
+            // prompt has been prefetched as well as the GGUF downloaded.
+            runtime.controller.prewarm_active_polish_profile().await;
             let _ = app.emit(
                 "voicewave://polish-model-progress",
                 PolishModelProgress {
@@ -1291,6 +1441,12 @@ pub fn run() {
             let controller_for_prewarm = controller.clone();
             tauri::async_runtime::spawn(async move {
                 controller_for_prewarm.prewarm_active_model().await;
+                // Warm the optional formatter only after ASR is ready. Running
+                // both model preloads concurrently causes avoidable CPU, disk,
+                // and memory contention on budget machines.
+                controller_for_prewarm
+                    .prewarm_active_polish_profile()
+                    .await;
             });
 
             let controller_for_pill_state = controller.clone();
@@ -1406,6 +1562,14 @@ pub fn run() {
             add_dictionary_term,
             export_dictionary,
             import_dictionary,
+            get_dictionary_sync_records,
+            reconcile_dictionary_records,
+            list_voice_snippets,
+            add_voice_snippet,
+            update_voice_snippet,
+            remove_voice_snippet,
+            get_voice_snippet_sync_records,
+            reconcile_voice_snippet_records,
             polish_model_status,
             download_polish_model
         ])

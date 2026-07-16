@@ -148,6 +148,28 @@ describe("tauri bridge", () => {
     await tauri.addDictionaryTerm("VoiceWave");
     await tauri.exportDictionary();
     await tauri.importDictionary("{\"version\":1}");
+    await tauri.getDictionarySyncRecords();
+    await tauri.reconcileDictionaryRecords([{
+      term: "VoiceWave",
+      normalizedTerm: "voicewave",
+      source: "manual-add",
+      createdAtUtcMs: 1_700_000_000_000,
+      updatedAtUtcMs: 1_700_000_000_000,
+      deletedAtUtcMs: null
+    }]);
+    await tauri.listVoiceSnippets("reply");
+    await tauri.addVoiceSnippet("my reply", "Hello!");
+    await tauri.updateVoiceSnippet("vs-1", "support reply", "Hello there!");
+    await tauri.removeVoiceSnippet("vs-1");
+    await tauri.getVoiceSnippetSyncRecords();
+    await tauri.reconcileVoiceSnippetRecords([{
+      trigger: "Support reply",
+      normalizedTrigger: "support reply",
+      expansion: "Hello there!",
+      createdAtUtcMs: 1_700_000_000_000,
+      updatedAtUtcMs: 1_700_000_000_000,
+      deletedAtUtcMs: null
+    }]);
 
     expect(coreMocks.invoke).toHaveBeenCalledWith("get_voicewave_snapshot", undefined);
     expect(coreMocks.invoke).toHaveBeenCalledWith("set_owner_device_override", {
@@ -170,6 +192,25 @@ describe("tauri bridge", () => {
     expect(coreMocks.invoke).toHaveBeenCalledWith("import_dictionary", {
       payload: "{\"version\":1}"
     });
-    expect(coreMocks.invoke.mock.calls.length).toBeGreaterThanOrEqual(55);
+    expect(coreMocks.invoke).toHaveBeenCalledWith("get_dictionary_sync_records", undefined);
+    expect(coreMocks.invoke).toHaveBeenCalledWith("reconcile_dictionary_records", {
+      records: [expect.objectContaining({ normalizedTerm: "voicewave" })]
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("list_voice_snippets", { query: "reply" });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("add_voice_snippet", {
+      trigger: "my reply",
+      expansion: "Hello!"
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("update_voice_snippet", {
+      snippetId: "vs-1",
+      trigger: "support reply",
+      expansion: "Hello there!"
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("remove_voice_snippet", { snippetId: "vs-1" });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("get_voice_snippet_sync_records", undefined);
+    expect(coreMocks.invoke).toHaveBeenCalledWith("reconcile_voice_snippet_records", {
+      records: [expect.objectContaining({ normalizedTrigger: "support reply" })]
+    });
+    expect(coreMocks.invoke.mock.calls.length).toBeGreaterThanOrEqual(61);
   });
 });

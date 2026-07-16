@@ -9,20 +9,20 @@ import {
   Keyboard,
   Mic,
   Palette,
+  Pencil,
+  Plus,
   Search,
   SlidersHorizontal,
   Sparkles,
   Star,
+  Trash2,
   X
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  addCloudDictionaryTerm,
   type CloudSentence,
-  deleteCloudDictionaryTerm,
   ensureCloudProfile,
   getCloudErrorMessage,
-  listCloudDictionaryTerms,
   listRecentCloudSentences,
   requestPasswordResetCloud,
   saveCloudSentence,
@@ -46,7 +46,6 @@ import type {
   AppProfileOverrides,
   CodeModeSettings,
   DomainPackId,
-  DictionaryTerm,
   FormatProfile,
   MicVolumeGuardMode,
   PolishOutcome,
@@ -64,6 +63,25 @@ type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
 type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
 type SettingsSection = "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
+type DictionarySyncStatus = "device-local" | "syncing" | "synced" | "pending";
+type SnippetSyncStatus = DictionarySyncStatus | "limit-exceeded";
+
+function snippetErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return null;
+  }
+  return typeof error.code === "string" ? error.code : null;
+}
+
+function snippetErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return "Snippet operation failed.";
+}
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Mic }> = [
   { id: "audio", label: "Audio", icon: Mic },
@@ -146,7 +164,7 @@ const POLISH_PROFILE_CARDS: PolishProfileCard[] = [
     description:
       "Terse engineering phrasing. Identifiers, paths, and casing preserved character-for-character.",
     example: "Refactor getUserById to return null instead of throwing when the user doesn't exist.",
-    note: "Adds ~2s for AI shaping."
+    note: "Typically adds ~2s once the local model is warm."
   },
   {
     id: "writing",
@@ -154,7 +172,7 @@ const POLISH_PROFILE_CARDS: PolishProfileCard[] = [
     description: "Grammatical professional prose. Your hedges and uncertainty stay yours.",
     example:
       "I think we should refactor getUserById so that it returns null rather than throwing an exception when the user does not exist.",
-    note: "Adds ~2s for AI shaping."
+    note: "Typically adds ~2s once the local model is warm."
   },
   // Casual is CUT from the v1 selectable lineup (plan 010 gate): on the
   // dev/holdout corpus its output was near-identical to Writing on 50-59%
@@ -191,6 +209,8 @@ function polishOutcomeLabel(outcome: PolishOutcome): string | null {
       return "fallback";
     case "literal":
       return "literal";
+    case "snippetExact":
+      return "snippet";
     case "disabled":
       return null;
   }
@@ -439,9 +459,21 @@ function App() {
   const [historyTag, setHistoryTag] = useState("");
   const [copiedHistoryId, setCopiedHistoryId] = useState<string | null>(null);
   const [dictionaryDraftTerm, setDictionaryDraftTerm] = useState("");
+  const [dictionarySearchQuery, setDictionarySearchQuery] = useState("");
+  const [dictionaryPendingEdits, setDictionaryPendingEdits] = useState<Record<string, string>>({});
   const [dictionaryPortNotice, setDictionaryPortNotice] = useState<string | null>(null);
   const dictionaryImportInputRef = useRef<HTMLInputElement | null>(null);
   const [dictionaryPendingOpen, setDictionaryPendingOpen] = useState(false);
+  const [snippetSearchQuery, setSnippetSearchQuery] = useState("");
+  const [snippetFormOpen, setSnippetFormOpen] = useState(false);
+  const [snippetEditingId, setSnippetEditingId] = useState<string | null>(null);
+  const [snippetTriggerDraft, setSnippetTriggerDraft] = useState("");
+  const [snippetExpansionDraft, setSnippetExpansionDraft] = useState("");
+  const [snippetMutationPending, setSnippetMutationPending] = useState(false);
+  const [snippetDeleteConfirmId, setSnippetDeleteConfirmId] = useState<string | null>(null);
+  const [snippetNotice, setSnippetNotice] = useState<string | null>(null);
+  const snippetSearchRef = useRef<HTMLInputElement | null>(null);
+  const snippetTriggerRef = useRef<HTMLInputElement | null>(null);
   const [ownerTapCount, setOwnerTapCount] = useState(0);
   const [ownerPassphrase, setOwnerPassphrase] = useState("");
   const [profileApplyPending, setProfileApplyPending] = useState<PolishProfile | null>(null);
@@ -451,7 +483,6 @@ function App() {
   const [demoProfile, setDemoProfile] = useState<DemoProfile | null>(null);
   const [cloudUserId, setCloudUserId] = useState<string | null>(null);
   const [cloudRecentSentences, setCloudRecentSentences] = useState<CloudSentence[]>([]);
-  const [cloudDictionaryTerms, setCloudDictionaryTerms] = useState<DictionaryTerm[]>([]);
   const [authMode, setAuthMode] = useState<AuthMode>("signin");
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
@@ -465,6 +496,9 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [dictionarySyncStatus, setDictionarySyncStatus] = useState<DictionarySyncStatus>("device-local");
+  const [snippetSyncStatus, setSnippetSyncStatus] = useState<SnippetSyncStatus>("device-local");
+  const [snippetSyncError, setSnippetSyncError] = useState<string | null>(null);
   const [setupModelChoice, setSetupModelChoice] = useState<SetupModelChoice>("fw-small.en");
   const [setupModelPending, setSetupModelPending] = useState(false);
   const [setupModelError, setSetupModelError] = useState<string | null>(null);
@@ -536,6 +570,12 @@ function App() {
     addDictionaryTerm,
     exportDictionary,
     importDictionary,
+    syncDictionaryWithCloud,
+    voiceSnippets,
+    addVoiceSnippet,
+    updateVoiceSnippet,
+    deleteVoiceSnippet,
+    syncVoiceSnippetsWithCloud,
     resetVadThreshold,
     settings,
     switchToRecommendedInput,
@@ -566,6 +606,8 @@ function App() {
   const pressActiveRef = useRef(false);
   const profileApplyInFlightRef = useRef(false);
   const lastCloudSentenceRef = useRef<string | null>(null);
+  const cloudAuthGenerationRef = useRef(0);
+  const activeCloudUidRef = useRef<string | null>(null);
   // The persisted profile is the authority; absence means a legacy backend
   // and we fall back to the deprecated inference so the cards stay honest.
   const activePolishProfile = useMemo<PolishProfile>(
@@ -604,7 +646,6 @@ function App() {
             })),
     [cloudRecentSentences, cloudUserId, sessionHistory]
   );
-  const activeDictionaryTerms = cloudUserId ? cloudDictionaryTerms : dictionaryTerms;
   const hasInstalledModel = installedModels.length > 0;
   const setupCatalog = useMemo(
     () => modelCatalog.filter((row) => row.modelId === "fw-small.en" || row.modelId === "fw-large-v3-turbo"),
@@ -637,6 +678,53 @@ function App() {
     }
   }, [activeNav, isPro]);
 
+  const reconcileCloudDictionary = useCallback(async (uid: string) => {
+    setDictionarySyncStatus("syncing");
+    try {
+      await syncDictionaryWithCloud(uid);
+      setDictionarySyncStatus("synced");
+      setCloudSyncError(null);
+      return true;
+    } catch (cloudErr) {
+      setDictionarySyncStatus("pending");
+      setCloudSyncError(getCloudErrorMessage(cloudErr));
+      return false;
+    }
+  }, [syncDictionaryWithCloud]);
+
+  const reconcileCloudSnippets = useCallback(async (uid: string) => {
+    const generation = cloudAuthGenerationRef.current;
+    const isCurrent = () =>
+      generation === cloudAuthGenerationRef.current && activeCloudUidRef.current === uid;
+    if (!isCurrent()) {
+      return false;
+    }
+    setSnippetSyncStatus("syncing");
+    try {
+      const result = await syncVoiceSnippetsWithCloud(uid, isCurrent);
+      if (!isCurrent()) {
+        return false;
+      }
+      if (result.limitExceeded) {
+        setSnippetSyncStatus("limit-exceeded");
+        setSnippetSyncError(
+          "Snippet limit exceeded across your devices — delete some snippets to resume sync."
+        );
+      } else {
+        setSnippetSyncStatus("synced");
+        setSnippetSyncError(null);
+      }
+      return true;
+    } catch (syncErr) {
+      if (!isCurrent()) {
+        return false;
+      }
+      setSnippetSyncStatus("pending");
+      setSnippetSyncError(snippetErrorMessage(syncErr));
+      return false;
+    }
+  }, [syncVoiceSnippetsWithCloud]);
+
   useEffect(() => {
     if (!firebaseEnabled) {
       return;
@@ -644,34 +732,49 @@ function App() {
 
     const unsubscribe = subscribeCloudAuth((user) => {
       if (!user) {
+        cloudAuthGenerationRef.current += 1;
+        activeCloudUidRef.current = null;
         setDemoProfile(null);
         setCloudUserId(null);
         setCloudRecentSentences([]);
-        setCloudDictionaryTerms([]);
+        setDictionarySyncStatus("device-local");
+        setSnippetSyncStatus("device-local");
+        setSnippetSyncError(null);
         lastCloudSentenceRef.current = null;
         return;
       }
 
       void (async () => {
-        try {
-          const [profile, recent, cloudTerms] = await Promise.all([
-            ensureCloudProfile(user, "Personal Workspace"),
-            listRecentCloudSentences(user.uid),
-            listCloudDictionaryTerms(user.uid)
-          ]);
-          setDemoProfile(profile);
-          setCloudUserId(user.uid);
-          setCloudRecentSentences(recent);
-          setCloudDictionaryTerms(cloudTerms);
-          setCloudSyncError(null);
-        } catch (cloudErr) {
-          setCloudSyncError(getCloudErrorMessage(cloudErr));
+        if (activeCloudUidRef.current !== user.uid) {
+          cloudAuthGenerationRef.current += 1;
+          activeCloudUidRef.current = user.uid;
+        }
+        setCloudUserId(user.uid);
+        const [profileResult, recentResult] = await Promise.allSettled([
+          ensureCloudProfile(user, "Personal Workspace"),
+          listRecentCloudSentences(user.uid)
+        ]);
+        if (profileResult.status === "fulfilled") {
+          setDemoProfile(profileResult.value);
+        }
+        if (recentResult.status === "fulfilled") {
+          setCloudRecentSentences(recentResult.value);
+        }
+        await Promise.all([
+          reconcileCloudDictionary(user.uid),
+          reconcileCloudSnippets(user.uid)
+        ]);
+        const failedMetadata = [profileResult, recentResult].find(
+          (result): result is PromiseRejectedResult => result.status === "rejected"
+        );
+        if (failedMetadata) {
+          setCloudSyncError(getCloudErrorMessage(failedMetadata.reason));
         }
       })();
     });
 
     return unsubscribe;
-  }, []);
+  }, [reconcileCloudDictionary, reconcileCloudSnippets]);
 
   useEffect(() => {
     if (!cloudUserId || !firebaseEnabled) {
@@ -803,18 +906,22 @@ function App() {
                 workspaceRole: authWorkspaceRole
               })
             : await signInCloud(normalizedEmail, authPassword);
-        const [recent, cloudTerms] = await Promise.all([
-          listRecentCloudSentences(profile.uid),
-          listCloudDictionaryTerms(profile.uid)
-        ]);
+        const recent = await listRecentCloudSentences(profile.uid);
         setDemoProfile({
           name: profile.name,
           email: profile.email,
           workspaceRole: profile.workspaceRole
         });
+        if (activeCloudUidRef.current !== profile.uid) {
+          cloudAuthGenerationRef.current += 1;
+          activeCloudUidRef.current = profile.uid;
+        }
         setCloudUserId(profile.uid);
         setCloudRecentSentences(recent);
-        setCloudDictionaryTerms(cloudTerms);
+        await Promise.all([
+          reconcileCloudDictionary(profile.uid),
+          reconcileCloudSnippets(profile.uid)
+        ]);
         setAuthPassword("");
         setAuthConfirmPassword("");
         setActiveOverlay("profile");
@@ -837,7 +944,9 @@ function App() {
     });
     setCloudUserId(null);
     setCloudRecentSentences([]);
-    setCloudDictionaryTerms([]);
+    setDictionarySyncStatus("device-local");
+    setSnippetSyncStatus("device-local");
+    setSnippetSyncError(null);
     setAuthPassword("");
     setAuthConfirmPassword("");
     setActiveOverlay("profile");
@@ -865,10 +974,14 @@ function App() {
       setAuthPending(true);
       try {
         await signOutCloud();
+        cloudAuthGenerationRef.current += 1;
+        activeCloudUidRef.current = null;
         setDemoProfile(null);
         setCloudUserId(null);
         setCloudRecentSentences([]);
-        setCloudDictionaryTerms([]);
+        setDictionarySyncStatus("device-local");
+        setSnippetSyncStatus("device-local");
+        setSnippetSyncError(null);
         openAuthOverlay("signin");
       } catch (cloudErr) {
         setAuthError(getCloudErrorMessage(cloudErr));
@@ -879,9 +992,13 @@ function App() {
     }
 
     setDemoProfile(null);
+    cloudAuthGenerationRef.current += 1;
+    activeCloudUidRef.current = null;
     setCloudUserId(null);
     setCloudRecentSentences([]);
-    setCloudDictionaryTerms([]);
+    setDictionarySyncStatus("device-local");
+    setSnippetSyncStatus("device-local");
+    setSnippetSyncError(null);
     openAuthOverlay("signin");
   };
 
@@ -929,7 +1046,22 @@ function App() {
     if (profileApplyInFlightRef.current || profileApplyPending) {
       return;
     }
+    const needsAiPolish = profile === "coding" || profile === "writing";
     if (profile === activePolishProfile) {
+      // A migrated or previously-disabled wait profile can be selected while
+      // the shared AI engine is off. Clicking its active card should make the
+      // advertised profile real without resetting advanced customizations.
+      if (needsAiPolish && !(settings.llmPolishEnabled ?? false)) {
+        profileApplyInFlightRef.current = true;
+        setProfileApplyPending(profile);
+        try {
+          await setLlmPolishEnabled(true);
+        } finally {
+          profileApplyInFlightRef.current = false;
+          setProfileApplyPending(null);
+        }
+        return;
+      }
       // Reselecting the active card is the reset gesture when customized;
       // otherwise it's a no-op.
       if (profileCustomized) {
@@ -942,6 +1074,12 @@ function App() {
     setProfileApplyPending(profile);
     setProfileResetConfirming(false);
     try {
+      if (needsAiPolish && !(settings.llmPolishEnabled ?? false)) {
+        const enabled = await setLlmPolishEnabled(true);
+        if (!enabled) {
+          return;
+        }
+      }
       await setDictationProfile(profile);
     } catch (err) {
       if (isUnknownProfileCommandError(err)) {
@@ -1007,50 +1145,60 @@ function App() {
   const retentionOptions: RetentionPolicy[] = ["off", "days7", "days30", "forever"];
   const domainPackOptions: DomainPackId[] = ["coding", "student", "productivity"];
   const sortedDictionaryTerms = useMemo(
-    () => [...activeDictionaryTerms].sort((left, right) => right.createdAtUtcMs - left.createdAtUtcMs),
-    [activeDictionaryTerms]
+    () => {
+      const query = dictionarySearchQuery.trim().toLocaleLowerCase();
+      return [...dictionaryTerms]
+        .filter((term) =>
+          !query || term.term.toLocaleLowerCase().includes(query) || term.source.toLocaleLowerCase().includes(query)
+        )
+        .sort((left, right) => right.createdAtUtcMs - left.createdAtUtcMs);
+    },
+    [dictionarySearchQuery, dictionaryTerms]
   );
   const sortedDictionaryQueue = useMemo(
     () => [...dictionaryQueue].sort((left, right) => right.createdAtUtcMs - left.createdAtUtcMs),
     [dictionaryQueue]
   );
+  const filteredVoiceSnippets = useMemo(() => {
+    const query = snippetSearchQuery.trim().toLocaleLowerCase();
+    return [...voiceSnippets]
+      .filter((snippet) =>
+        !query ||
+        snippet.trigger.toLocaleLowerCase().includes(query) ||
+        snippet.expansion.toLocaleLowerCase().includes(query)
+      )
+      .sort((left, right) => left.normalizedTrigger.localeCompare(right.normalizedTrigger));
+  }, [snippetSearchQuery, voiceSnippets]);
+
+  const syncAfterLocalDictionaryMutation = async () => {
+    if (cloudUserId) {
+      await reconcileCloudDictionary(cloudUserId);
+    }
+  };
 
   const submitDictionaryDraft = () => {
     const normalized = dictionaryDraftTerm.trim();
     if (!normalized) {
       return;
     }
-    if (cloudUserId) {
-      void (async () => {
-        try {
-          const nextTerms = await addCloudDictionaryTerm(cloudUserId, normalized, "manual-add");
-          setCloudDictionaryTerms(nextTerms);
-          setCloudSyncError(null);
-        } catch (cloudErr) {
-          setCloudSyncError(getCloudErrorMessage(cloudErr));
-        }
-      })();
-      setDictionaryDraftTerm("");
-      return;
-    }
-
-    void addDictionaryTerm(normalized);
-    setDictionaryDraftTerm("");
+    void (async () => {
+      try {
+        await addDictionaryTerm(normalized);
+        setDictionaryDraftTerm("");
+        await syncAfterLocalDictionaryMutation();
+      } catch {
+        // The hook already exposes the local validation/persistence error.
+      }
+    })();
   };
 
   const handleDeleteDictionaryTerm = (termId: string) => {
-    if (!cloudUserId) {
-      void deleteDictionaryTerm(termId);
-      return;
-    }
-
     void (async () => {
       try {
-        const nextTerms = await deleteCloudDictionaryTerm(cloudUserId, termId);
-        setCloudDictionaryTerms(nextTerms);
-        setCloudSyncError(null);
-      } catch (cloudErr) {
-        setCloudSyncError(getCloudErrorMessage(cloudErr));
+        await deleteDictionaryTerm(termId);
+        await syncAfterLocalDictionaryMutation();
+      } catch {
+        // The hook already exposes the local persistence error.
       }
     })();
   };
@@ -1090,6 +1238,7 @@ function App() {
         const summary = await importDictionary(text);
         const skippedNote = summary.skipped > 0 ? ` (${summary.skipped} skipped)` : "";
         setDictionaryPortNotice(`Imported ${summary.added} terms${skippedNote}.`);
+        await syncAfterLocalDictionaryMutation();
       } catch (importErr) {
         setDictionaryPortNotice(
           importErr instanceof Error ? importErr.message : "Failed to import dictionary"
@@ -1102,11 +1251,6 @@ function App() {
   };
 
   const handleApproveDictionaryQueueEntry = (entryId: string) => {
-    if (!cloudUserId) {
-      void approveDictionaryQueueEntry(entryId);
-      return;
-    }
-
     const entry = dictionaryQueue.find((row) => row.entryId === entryId);
     if (!entry) {
       return;
@@ -1114,15 +1258,149 @@ function App() {
 
     void (async () => {
       try {
-        const nextTerms = await addCloudDictionaryTerm(cloudUserId, entry.term, "queue-approval");
-        setCloudDictionaryTerms(nextTerms);
-        await rejectDictionaryQueueEntry(entryId);
-        setCloudSyncError(null);
-      } catch (cloudErr) {
-        setCloudSyncError(getCloudErrorMessage(cloudErr));
+        await approveDictionaryQueueEntry(entryId, dictionaryPendingEdits[entryId] ?? entry.term);
+        setDictionaryPendingEdits((current) => {
+          const next = { ...current };
+          delete next[entryId];
+          return next;
+        });
+        await syncAfterLocalDictionaryMutation();
+      } catch {
+        // Invalid edits deliberately remain in the queue and field for correction.
       }
     })();
   };
+
+  const handleRejectDictionaryQueueEntry = (entryId: string) => {
+    void (async () => {
+      try {
+        await rejectDictionaryQueueEntry(entryId);
+        setDictionaryPendingEdits((current) => {
+          const next = { ...current };
+          delete next[entryId];
+          return next;
+        });
+      } catch {
+        // The hook exposes the backend error.
+      }
+    })();
+  };
+
+  const resetSnippetForm = () => {
+    setSnippetFormOpen(false);
+    setSnippetEditingId(null);
+    setSnippetTriggerDraft("");
+    setSnippetExpansionDraft("");
+  };
+
+  const openSnippetCreate = () => {
+    setSnippetEditingId(null);
+    setSnippetTriggerDraft("");
+    setSnippetExpansionDraft("");
+    setSnippetNotice(null);
+    setSnippetFormOpen(true);
+    window.setTimeout(() => snippetTriggerRef.current?.focus(), 0);
+  };
+
+  const openSnippetEdit = (snippetId: string) => {
+    const snippet = voiceSnippets.find((row) => row.snippetId === snippetId);
+    if (!snippet) {
+      return;
+    }
+    setSnippetEditingId(snippetId);
+    setSnippetTriggerDraft(snippet.trigger);
+    setSnippetExpansionDraft(snippet.expansion);
+    setSnippetNotice(null);
+    setSnippetFormOpen(true);
+    window.setTimeout(() => snippetTriggerRef.current?.focus(), 0);
+  };
+
+  const submitSnippetDraft = () => {
+    const trigger = snippetTriggerDraft.trim().replace(/\s+/gu, " ").normalize("NFC");
+    const expansion = snippetExpansionDraft.replace(/\r\n/g, "\n");
+    if (!trigger || [...trigger].length > 60) {
+      setSnippetNotice("Use a spoken trigger between 1 and 60 characters.");
+      return;
+    }
+    if (!expansion.trim() || [...expansion].length > 4_000) {
+      setSnippetNotice("Use an expansion between 1 and 4,000 characters.");
+      return;
+    }
+    setSnippetMutationPending(true);
+    setSnippetNotice(null);
+    void (async () => {
+      let localSaved = false;
+      try {
+        if (snippetEditingId) {
+          await updateVoiceSnippet(snippetEditingId, trigger, expansion);
+        } else {
+          await addVoiceSnippet(trigger, expansion);
+        }
+        localSaved = true;
+        resetSnippetForm();
+        setSnippetNotice(snippetEditingId ? "Snippet updated on this device." : "Snippet saved on this device.");
+      } catch (snippetErr) {
+        if (snippetErrorCode(snippetErr) === "snippet-active-limit") {
+          setSnippetNotice("You have reached the 250-snippet limit. Delete a snippet before adding another.");
+        } else {
+          setSnippetNotice(snippetErrorMessage(snippetErr));
+        }
+      } finally {
+        setSnippetMutationPending(false);
+      }
+      if (localSaved && cloudUserId) {
+        void reconcileCloudSnippets(cloudUserId);
+      }
+    })();
+  };
+
+  const confirmSnippetDelete = (snippetId: string) => {
+    setSnippetMutationPending(true);
+    setSnippetNotice(null);
+    void (async () => {
+      let localDeleted = false;
+      try {
+        await deleteVoiceSnippet(snippetId);
+        localDeleted = true;
+        setSnippetDeleteConfirmId(null);
+        setSnippetNotice("Snippet deleted on this device.");
+      } catch (snippetErr) {
+        setSnippetNotice(snippetErrorMessage(snippetErr));
+      } finally {
+        setSnippetMutationPending(false);
+      }
+      if (localDeleted && cloudUserId) {
+        void reconcileCloudSnippets(cloudUserId);
+      }
+    })();
+  };
+
+  useEffect(() => {
+    if (activeNav !== "snippets") {
+      return;
+    }
+    const onSnippetShortcut = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditable = target instanceof Element
+        && target.matches("input, textarea, [contenteditable='true']");
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "f") {
+        event.preventDefault();
+        snippetSearchRef.current?.focus();
+      } else if (
+        !isEditable &&
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLocaleLowerCase() === "n"
+      ) {
+        event.preventDefault();
+        openSnippetCreate();
+      } else if (event.key === "Escape" && snippetFormOpen) {
+        resetSnippetForm();
+        window.setTimeout(() => snippetSearchRef.current?.focus(), 0);
+      }
+    };
+    window.addEventListener("keydown", onSnippetShortcut);
+    return () => window.removeEventListener("keydown", onSnippetShortcut);
+  }, [activeNav, snippetFormOpen]);
 
   return (
     <>
@@ -1785,10 +2063,29 @@ function App() {
 
           {activeNav === "dictionary" && (
             <section className="vw-panel vw-panel-soft">
-              <p className="vw-kicker">{cloudUserId ? "Synced Across Devices" : "Device Local"}</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="vw-kicker">
+                  {dictionarySyncStatus === "syncing"
+                    ? "Syncing"
+                    : dictionarySyncStatus === "synced"
+                      ? "Synced"
+                      : dictionarySyncStatus === "pending"
+                        ? "Sync pending"
+                        : "Device local"}
+                </p>
+                {dictionarySyncStatus === "pending" && cloudUserId && (
+                  <button
+                    type="button"
+                    className="vw-btn-secondary vw-btn-sm"
+                    onClick={() => void reconcileCloudDictionary(cloudUserId)}
+                  >
+                    Retry sync
+                  </button>
+                )}
+              </div>
               <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Personal Dictionary</h3>
               <p className="mt-1 text-sm text-[#71717A]">
-                {activeDictionaryTerms.length} approved {activeDictionaryTerms.length === 1 ? "term" : "terms"}
+                {dictionaryTerms.length} approved {dictionaryTerms.length === 1 ? "term" : "terms"}
                 {dictionaryQueue.length > 0 ? ` · ${dictionaryQueue.length} pending review` : ""} — new suggestions
                 surface in the floating pill.
               </p>
@@ -1813,7 +2110,7 @@ function App() {
                 </div>
                 <p className="mt-2 text-xs text-[#71717A]">
                   {cloudUserId
-                    ? "New terms are saved to your account and follow you to every install."
+                    ? "Terms take effect on this device immediately and sync to your account when online."
                     : "Sign in to sync dictionary terms across devices."}
                 </p>
               </div>
@@ -1856,9 +2153,19 @@ function App() {
               </div>
 
               <div className="mt-4">
-                <div className="flex items-center justify-between gap-2 px-1 pb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2">
                   <h4 className="text-sm font-semibold text-[#09090B]">Approved terms</h4>
-                  <span className="text-xs tabular-nums text-[#A1A1AA]">{sortedDictionaryTerms.length} total</span>
+                  <span className="text-xs tabular-nums text-[#A1A1AA]">{dictionaryTerms.length} total</span>
+                </div>
+                <div className="relative mb-2">
+                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#A1A1AA]" />
+                  <input
+                    value={dictionarySearchQuery}
+                    onChange={(event) => setDictionarySearchQuery(event.target.value)}
+                    placeholder="Search approved terms or source"
+                    className="vw-field w-full pl-9"
+                    aria-label="Search approved dictionary terms"
+                  />
                 </div>
                 {sortedDictionaryTerms.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-8 text-center">
@@ -1916,8 +2223,18 @@ function App() {
                         key={item.entryId}
                         className="flex items-center justify-between gap-3 border-b border-[#F1F1F3] px-5 py-3 last:border-b-0"
                       >
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-[#09090B]">{item.term}</p>
+                        <div className="min-w-0 flex-1">
+                          <input
+                            className="vw-field w-full"
+                            value={dictionaryPendingEdits[item.entryId] ?? item.term}
+                            onChange={(event) =>
+                              setDictionaryPendingEdits((current) => ({
+                                ...current,
+                                [item.entryId]: event.target.value
+                              }))
+                            }
+                            aria-label={`Edit pending term ${item.term}`}
+                          />
                           <p className="mt-0.5 truncate text-xs text-[#A1A1AA]">{item.sourcePreview}</p>
                         </div>
                         <div className="flex shrink-0 gap-2">
@@ -1931,7 +2248,7 @@ function App() {
                           <button
                             type="button"
                             className="vw-btn-danger vw-btn-sm"
-                            onClick={() => void rejectDictionaryQueueEntry(item.entryId)}
+                            onClick={() => handleRejectDictionaryQueueEntry(item.entryId)}
                           >
                             Dismiss
                           </button>
@@ -1970,6 +2287,201 @@ function App() {
             </section>
           )}
 
+          {activeNav === "snippets" && (
+            <section className="vw-panel vw-panel-soft">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="vw-kicker">
+                    {snippetSyncStatus === "syncing"
+                      ? "Syncing"
+                      : snippetSyncStatus === "synced"
+                        ? "Synced"
+                        : snippetSyncStatus === "pending"
+                          ? "Changes pending"
+                          : snippetSyncStatus === "limit-exceeded"
+                            ? "Action needed"
+                            : "On this device"}
+                  </p>
+                  <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">
+                    Voice Snippets
+                  </h3>
+                  <p className="mt-1 max-w-2xl text-sm text-[#71717A]">
+                    Say a memorable trigger and VoiceWave inserts the expansion exactly as saved — including casing,
+                    links, symbols, and line breaks.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  {snippetSyncStatus === "pending" && cloudUserId && (
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm"
+                      onClick={() => void reconcileCloudSnippets(cloudUserId)}
+                    >
+                      Retry sync
+                    </button>
+                  )}
+                  <button type="button" className="vw-btn-primary vw-btn-sm" onClick={openSnippetCreate}>
+                    <Plus size={14} />
+                    New snippet
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+                <div className="relative min-w-[240px] flex-1">
+                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#A1A1AA]" />
+                  <input
+                    ref={snippetSearchRef}
+                    value={snippetSearchQuery}
+                    onChange={(event) => setSnippetSearchQuery(event.target.value)}
+                    placeholder="Search triggers or expansion text"
+                    className="vw-field w-full pl-9"
+                    aria-label="Search voice snippets"
+                  />
+                </div>
+                <span className="text-xs tabular-nums text-[#A1A1AA]">
+                  {voiceSnippets.length} / 250
+                </span>
+              </div>
+
+              {snippetFormOpen && (
+                <div className="vw-surface-base mt-4 px-5 py-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-[#09090B]">
+                      {snippetEditingId ? "Edit snippet" : "New snippet"}
+                    </p>
+                    <button type="button" className="vw-icon-btn" onClick={resetSnippetForm} aria-label="Cancel snippet form">
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <label className="mt-3 block text-xs font-semibold text-[#52525B]" htmlFor="snippet-trigger">
+                    Spoken trigger
+                  </label>
+                  <input
+                    ref={snippetTriggerRef}
+                    id="snippet-trigger"
+                    value={snippetTriggerDraft}
+                    onChange={(event) => setSnippetTriggerDraft(event.target.value)}
+                    placeholder="my support reply"
+                    className="vw-field mt-1 w-full"
+                  />
+                  <div className="mt-1 flex items-start justify-between gap-3 text-[11px] text-[#A1A1AA]">
+                    <span>
+                      {snippetTriggerDraft.trim() &&
+                      (snippetTriggerDraft.trim().split(/\s+/u).length === 1 || snippetTriggerDraft.trim().length < 5)
+                        ? "Short or common triggers may expand accidentally. A distinctive phrase is safer."
+                        : "Matching ignores case and requires the complete spoken phrase."}
+                    </span>
+                    <span className="shrink-0 tabular-nums">{[...snippetTriggerDraft].length}/60</span>
+                  </div>
+                  <label className="mt-4 block text-xs font-semibold text-[#52525B]" htmlFor="snippet-expansion">
+                    Exact expansion
+                  </label>
+                  <textarea
+                    id="snippet-expansion"
+                    value={snippetExpansionDraft}
+                    onChange={(event) => setSnippetExpansionDraft(event.target.value)}
+                    placeholder={"Hello,\n\nThanks for reaching out. I'll get back to you shortly."}
+                    className="vw-field mt-1 min-h-36 w-full resize-y whitespace-pre-wrap"
+                  />
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-[#A1A1AA]">
+                    <span>Formatting and AI polish never rewrite this saved text.</span>
+                    <span className="tabular-nums">{[...snippetExpansionDraft].length}/4,000</span>
+                  </div>
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={resetSnippetForm}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="vw-btn-primary vw-btn-sm"
+                      onClick={submitSnippetDraft}
+                      disabled={snippetMutationPending}
+                    >
+                      {snippetMutationPending ? "Saving…" : "Save snippet"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {filteredVoiceSnippets.length === 0 ? (
+                <div className="mt-4 rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-10 text-center">
+                  <p className="text-sm font-medium text-[#09090B]">
+                    {voiceSnippets.length === 0 ? "Create your first voice snippet" : "No snippets match this search"}
+                  </p>
+                  <p className="mx-auto mt-1 max-w-lg text-sm text-[#71717A]">
+                    Try “my work email” → “name@company.com”. The right side is inserted literally, not rewritten.
+                  </p>
+                </div>
+              ) : (
+                <div className="vw-row-list vw-list-stagger mt-4 max-h-[520px] overflow-y-auto">
+                  {filteredVoiceSnippets.map((snippet) => (
+                    <div key={snippet.snippetId} className="vw-interactive-row px-4 py-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-[#09090B]">{snippet.trigger}</p>
+                          <p className="mt-1 max-h-24 overflow-hidden whitespace-pre-wrap break-words text-xs leading-relaxed text-[#52525B]">
+                            {snippet.expansion}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-1">
+                          <button
+                            type="button"
+                            className="vw-icon-btn"
+                            onClick={() => openSnippetEdit(snippet.snippetId)}
+                            aria-label={`Edit ${snippet.trigger}`}
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            className="vw-icon-btn"
+                            onClick={() => setSnippetDeleteConfirmId(snippet.snippetId)}
+                            aria-label={`Delete ${snippet.trigger}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      {snippetDeleteConfirmId === snippet.snippetId && (
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#F1F1F3] pt-3">
+                          <p className="text-xs text-[#71717A]">Delete this snippet from every synced device?</p>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              className="vw-btn-secondary vw-btn-sm"
+                              onClick={() => setSnippetDeleteConfirmId(null)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="vw-btn-danger vw-btn-sm"
+                              disabled={snippetMutationPending}
+                              onClick={() => confirmSnippetDelete(snippet.snippetId)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 space-y-1" role="status" aria-live="polite">
+                {snippetNotice && <p className="text-xs text-[#71717A]">{snippetNotice}</p>}
+                {snippetSyncError && (
+                  <p className="text-xs text-[#991B1B]">{snippetSyncError}</p>
+                )}
+                {!cloudUserId && !snippetSyncError && (
+                  <p className="text-xs text-[#A1A1AA]">Sign in to sync snippets across devices. Local snippets remain available offline.</p>
+                )}
+              </div>
+            </section>
+          )}
+
           {activeNav === "pro-tools" && (
             <>
               <section className="vw-panel vw-panel-soft">
@@ -1978,7 +2490,7 @@ function App() {
                     <p className="vw-kicker">Dictation Style</p>
                     <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Polish Profiles</h3>
                     <p className="mt-1 text-sm text-[#71717A]">
-                      One dictation, five shapes. Every card below rewrites the same sentence.
+                      One dictation, four intentional shapes. Every card below uses the same sentence.
                     </p>
                   </div>
                   <span className="vw-chip vw-chip-ink">Pro Active</span>
@@ -1993,6 +2505,14 @@ function App() {
                   {POLISH_PROFILE_CARDS.map((card) => {
                     const isActiveCard = displayedPolishProfile === card.id;
                     const isApplying = profileApplyPending === card.id;
+                    const isAiProfile = card.id === "coding" || card.id === "writing";
+                    const isPreparingAi = Boolean(
+                      isActiveCard &&
+                        isAiProfile &&
+                        polishModelProgress &&
+                        !polishModelProgress.done &&
+                        !polishModelProgress.error
+                    );
                     return (
                       <button
                         key={card.id}
@@ -2013,14 +2533,24 @@ function App() {
                             )}
                           </p>
                           <span className={`vw-chip vw-mode-status-chip ${isActiveCard ? "vw-mode-status-chip-active" : ""}`}>
-                            {isApplying ? "Applying…" : isActiveCard ? "Active" : "Select"}
+                            {isApplying
+                              ? "Applying…"
+                              : isPreparingAi
+                                ? "Preparing AI…"
+                                : isActiveCard
+                                  ? "Active"
+                                  : "Select"}
                           </span>
                         </div>
                         <p className="mt-2 text-sm text-[#3F3F46]">{card.description}</p>
                         <p className="mt-3 border-l-2 border-[#1B8EFF]/45 pl-3 text-sm leading-relaxed text-[#09090B]">
                           {card.example}
                         </p>
-                        <p className="mt-2 text-xs text-[#71717A]">{card.note}</p>
+                        <p className="mt-2 text-xs text-[#71717A]">
+                          {isPreparingAi
+                            ? "Downloading the local polish model. Deterministic formatting stays available."
+                            : card.note}
+                        </p>
                       </button>
                     );
                   })}
@@ -2266,8 +2796,9 @@ function App() {
                     <div>
                       <p className="vw-set-title">On-device AI polish</p>
                       <p className="vw-set-desc">
-                        After dictation, a local model offers a cleaned-up version in the pill. Nothing is sent
-                        to the cloud. Needs a one-time ~1 GB model download.
+                        Standard can offer a cleaned-up version after insertion. Coding and Writing use the
+                        validated local result as the inserted text. Nothing is sent to the cloud; first use
+                        needs a one-time ~1 GB model download.
                       </p>
                     </div>
                     <span className="vw-switch">
@@ -2920,5 +3451,3 @@ function App() {
 }
 
 export default App;
-
-

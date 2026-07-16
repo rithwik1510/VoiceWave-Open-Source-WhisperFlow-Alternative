@@ -45,13 +45,15 @@ export type PolishProfile = "standard" | "coding" | "writing" | "casual" | "lite
  * - `fallbackTimeout` / `fallbackRejected`: the deterministic floor landed
  *   because polish missed the release-to-insert budget or failed validation.
  * - `literal`: Literal profile — the model was never called.
- * - `disabled`: AI polish is off. */
+ * - `disabled`: AI polish is off.
+ * - `snippetExact`: an exact-only voice snippet bypassed all formatting and polish. */
 export type PolishOutcome =
   | "accepted"
   | "fallbackTimeout"
   | "fallbackRejected"
   | "literal"
-  | "disabled";
+  | "disabled"
+  | "snippetExact";
 
 export interface VoiceWaveSettings {
   inputDevice: string | null;
@@ -460,6 +462,44 @@ export interface DictionaryTerm {
   term: string;
   source: string;
   createdAtUtcMs: number;
+}
+
+export interface DictionarySyncRecord {
+  term: string;
+  normalizedTerm: string;
+  source: string;
+  createdAtUtcMs: number;
+  updatedAtUtcMs: number;
+  deletedAtUtcMs: number | null;
+}
+
+export interface DictionaryReconcileResult {
+  terms: DictionaryTerm[];
+  records: DictionarySyncRecord[];
+}
+
+export interface VoiceSnippet {
+  snippetId: string;
+  trigger: string;
+  normalizedTrigger: string;
+  expansion: string;
+  createdAtUtcMs: number;
+  updatedAtUtcMs: number;
+}
+
+export interface VoiceSnippetSyncRecord {
+  trigger: string;
+  normalizedTrigger: string;
+  expansion: string;
+  createdAtUtcMs: number;
+  updatedAtUtcMs: number;
+  deletedAtUtcMs: number | null;
+}
+
+export interface VoiceSnippetReconcileResult {
+  snippets: VoiceSnippet[];
+  records: VoiceSnippetSyncRecord[];
+  limitExceeded: boolean;
 }
 
 export interface DictionaryExport {

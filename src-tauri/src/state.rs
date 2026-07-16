@@ -17,7 +17,7 @@ use crate::{
     },
     dictionary::{
         DictionaryError, DictionaryExport, DictionaryImportSummary, DictionaryManager,
-        DictionaryQueueItem, DictionaryTerm,
+        DictionaryQueueItem, DictionaryReconcileResult, DictionarySyncRecord, DictionaryTerm,
     },
     history::{
         HistoryError, HistoryExportPreset, HistoryExportResult, HistoryManager, PolishHistoryMeta,
@@ -50,6 +50,10 @@ use crate::{
         AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
         DomainPackId, FormatProfile, InsertPath, PolishProfile, SettingsError, SettingsStore,
         VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
+    },
+    snippet::{
+        ProtectionError, ProtectionOutcome, SnippetError, SnippetExpansionPlan, SnippetManager,
+        VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord,
     },
     stats::{StatsManager, StatsSummary},
     transcript::{
@@ -252,6 +256,22 @@ const POLISH_OUTCOME_FALLBACK_TIMEOUT: &str = "fallbackTimeout";
 const POLISH_OUTCOME_FALLBACK_REJECTED: &str = "fallbackRejected";
 const POLISH_OUTCOME_LITERAL: &str = "literal";
 const POLISH_OUTCOME_DISABLED: &str = "disabled";
+const POLISH_OUTCOME_SNIPPET_EXACT: &str = "snippetExact";
+
+fn restore_snippet_candidate(
+    plan: Option<&SnippetExpansionPlan>,
+    candidate: &str,
+) -> Result<String, ProtectionError> {
+    let restored = match plan {
+        Some(plan) => plan.restore(candidate)?,
+        None => candidate.to_string(),
+    };
+    debug_assert!(
+        !restored.contains('\u{e000}') && !restored.contains('\u{e001}'),
+        "protected snippet marker escaped the delivery boundary"
+    );
+    Ok(restored)
+}
 
 /// Claims a warn slot if its cooldown has elapsed; the caller only emits a
 /// notice when this returns true. Each recurring warning owns its own slot.
@@ -395,6 +415,8 @@ pub enum ControllerError {
     History(#[from] HistoryError),
     #[error("dictionary error: {0}")]
     Dictionary(#[from] DictionaryError),
+    #[error("snippet error: {0}")]
+    Snippet(#[from] SnippetError),
     #[error("billing error: {0}")]
     Billing(#[from] BillingError),
     #[error("diagnostics error: {0}")]
@@ -1038,6 +1060,7 @@ struct DictationSession {
 struct CorrectionSession {
     inserted_text: String,
     inserted_at_utc_ms: u64,
+    had_snippet: bool,
 }
 
 pub struct VoiceWaveController {
@@ -1053,6 +1076,7 @@ pub struct VoiceWaveController {
     billing_manager: Arc<Mutex<BillingManager>>,
     model_manager: Mutex<crate::model_manager::ModelManager>,
     dictionary_manager: Arc<Mutex<DictionaryManager>>,
+    snippet_manager: Arc<Mutex<SnippetManager>>,
     benchmark_results: Mutex<Option<BenchmarkRun>>,
     model_statuses: Mutex<HashMap<String, ModelStatus>>,
     model_download_cancels: Mutex<HashMap<String, CancellationToken>>,
@@ -1144,6 +1168,7 @@ impl VoiceWaveController {
         let billing_manager = BillingManager::new()?;
         let model_manager = crate::model_manager::ModelManager::new()?;
         let dictionary_manager = DictionaryManager::new()?;
+        let snippet_manager = SnippetManager::new()?;
         let diagnostics_manager = DiagnosticsManager::new()?;
         // Stats are non-critical: a broken store must never block dictation,
         // so fall back to session-only aggregates instead of erroring out.
@@ -1186,6 +1211,7 @@ impl VoiceWaveController {
             billing_manager: Arc::new(Mutex::new(billing_manager)),
             model_manager: Mutex::new(model_manager),
             dictionary_manager: Arc::new(Mutex::new(dictionary_manager)),
+            snippet_manager: Arc::new(Mutex::new(snippet_manager)),
             benchmark_results: Mutex::new(None),
             model_statuses: Mutex::new(HashMap::new()),
             model_download_cancels: Mutex::new(HashMap::new()),
@@ -1310,6 +1336,47 @@ impl VoiceWaveController {
             }
             WarmupPlan::Unsupported => {
                 // Unknown model — skip warmup silently.
+            }
+        }
+    }
+
+    /// Pre-fill the active wait-validated polish profile when its local model
+    /// is available. This runs at app startup and after a completed model
+    /// download so the first real Coding/Writing dictation does not spend its
+    /// entire insertion budget loading the GGUF and prefilling the prompt.
+    /// Best-effort by design: deterministic formatting remains the fallback.
+    pub async fn prewarm_active_polish_profile(&self) {
+        let profile = {
+            let settings = self.settings.lock().await;
+            if !settings.llm_polish_enabled {
+                return;
+            }
+            let profile = settings.effective_polish_profile();
+            if resolve_profile(profile, &settings).insert_path != InsertPath::WaitValidated {
+                return;
+            }
+            profile
+        };
+
+        if !crate::inference::llm_polish::is_polish_model_present() {
+            return;
+        }
+
+        let profile_name = profile.as_str();
+        match crate::inference::llm_polish::polish_text_for_profile(
+            "warm up".to_string(),
+            profile_name.to_string(),
+        )
+        .await
+        {
+            Ok(Some(_)) => {
+                eprintln!("voicewave: polish profile warmup complete for {profile_name}");
+            }
+            Ok(None) => {
+                eprintln!("voicewave: polish profile warmup skipped for {profile_name}");
+            }
+            Err(err) => {
+                eprintln!("voicewave: polish profile warmup failed for {profile_name}: {err}");
             }
         }
     }
@@ -2888,6 +2955,69 @@ impl VoiceWaveController {
             .map_err(ControllerError::from)
     }
 
+    pub async fn get_dictionary_sync_records(&self) -> Vec<DictionarySyncRecord> {
+        self.dictionary_manager
+            .lock()
+            .await
+            .get_dictionary_sync_records()
+    }
+
+    pub async fn reconcile_dictionary_records(
+        &self,
+        records: Vec<DictionarySyncRecord>,
+    ) -> Result<DictionaryReconcileResult, ControllerError> {
+        self.dictionary_manager
+            .lock()
+            .await
+            .reconcile_dictionary_records(records)
+            .map_err(ControllerError::from)
+    }
+
+    pub async fn list_voice_snippets(&self, query: Option<String>) -> Vec<VoiceSnippet> {
+        self.snippet_manager.lock().await.list_snippets(query)
+    }
+
+    pub async fn add_voice_snippet(
+        &self,
+        trigger: String,
+        expansion: String,
+    ) -> Result<VoiceSnippet, SnippetError> {
+        self.snippet_manager
+            .lock()
+            .await
+            .add_snippet(&trigger, &expansion)
+    }
+
+    pub async fn update_voice_snippet(
+        &self,
+        snippet_id: String,
+        trigger: String,
+        expansion: String,
+    ) -> Result<VoiceSnippet, SnippetError> {
+        self.snippet_manager
+            .lock()
+            .await
+            .update_snippet(&snippet_id, &trigger, &expansion)
+    }
+
+    pub async fn remove_voice_snippet(&self, snippet_id: String) -> Result<(), SnippetError> {
+        self.snippet_manager
+            .lock()
+            .await
+            .remove_snippet(&snippet_id)
+    }
+
+    pub async fn get_voice_snippet_sync_records(&self) -> Vec<VoiceSnippetSyncRecord> {
+        self.snippet_manager.lock().await.get_sync_records()
+    }
+
+    pub async fn reconcile_voice_snippet_records(
+        &self,
+        records: Vec<VoiceSnippetSyncRecord>,
+    ) -> Result<VoiceSnippetReconcileResult, SnippetError> {
+        self.snippet_manager.lock().await.reconcile_records(records)
+    }
+
     async fn ensure_pro_feature(&self, feature_key: &str) -> Result<(), ControllerError> {
         let entitlement = self.billing_manager.lock().await.snapshot();
         if entitlement.is_pro {
@@ -3687,8 +3817,43 @@ impl VoiceWaveController {
             .into_iter()
             .map(|row| row.term)
             .collect::<Vec<_>>();
+        let active_snippets = self.snippet_manager.lock().await.list_snippets(None);
+        let protection = match SnippetExpansionPlan::protect(&baseline_transcript, &active_snippets)
+        {
+            Ok(outcome) => outcome,
+            Err(ProtectionError::TooManyMatches) => {
+                emit_pill_notice(
+                    &app,
+                    "warning",
+                    "Too many snippet triggers",
+                    Some("No snippets were expanded in this dictation.".to_string()),
+                    3_500,
+                );
+                ProtectionOutcome::NoMatch
+            }
+            Err(error) => {
+                eprintln!("voicewave: snippet protection skipped: {error}");
+                ProtectionOutcome::NoMatch
+            }
+        };
+        let (exact_snippet_expansion, inline_snippet_plan) = match protection {
+            ProtectionOutcome::NoMatch => (None, None),
+            ProtectionOutcome::ExactOnly { expansion } => (Some(expansion), None),
+            ProtectionOutcome::Inline(plan) => (None, Some(Arc::new(plan))),
+        };
+        let had_snippet = exact_snippet_expansion.is_some() || inline_snippet_plan.is_some();
+        let deterministic_input = inline_snippet_plan
+            .as_ref()
+            .map(|plan| plan.protected_text())
+            .unwrap_or(&merged_transcript);
+        let literal_input = inline_snippet_plan
+            .as_ref()
+            .map(|plan| plan.protected_text())
+            .unwrap_or(&baseline_transcript);
         let entitlement = self.billing_manager.lock().await.snapshot();
-        let final_transcript = if profile_policy.insert_path == InsertPath::LiteralImmediate {
+        let deterministic_transcript = if let Some(expansion) = &exact_snippet_expansion {
+            expansion.clone()
+        } else if profile_policy.insert_path == InsertPath::LiteralImmediate {
             // Literal branches BEFORE finalize_pro_transcript, from the
             // sanitized ASR baseline: by the end of the deterministic stack
             // the original word sequence (fillers, repeats) is already gone.
@@ -3696,18 +3861,19 @@ impl VoiceWaveController {
             // punctuation/capitalization apply — never filler removal, domain
             // corrections, format profiles, or code mode.
             finalize_literal_transcript(
-                &baseline_transcript,
+                literal_input,
                 settings.spoken_edit_commands,
                 &custom_terms,
             )
         } else if entitlement.is_pro {
             let app_profile_behavior = Self::active_profile_behavior(&settings);
             finalize_pro_transcript(
-                &merged_transcript,
+                deterministic_input,
                 &ProTranscriptOptions {
                     format_profile: settings.format_profile,
                     domain_packs: &settings.active_domain_packs,
                     code_mode: &settings.code_mode,
+                    preserve_protected_content: inline_snippet_plan.is_some(),
                     post_processing_enabled: settings.pro_post_processing_enabled,
                     spoken_edit_commands: settings.spoken_edit_commands,
                     app_profile_behavior: &app_profile_behavior,
@@ -3715,10 +3881,20 @@ impl VoiceWaveController {
                 },
             )
         } else {
-            baseline_transcript.clone()
+            literal_input.to_string()
+        };
+        let final_transcript = if let Some(plan) = inline_snippet_plan.as_ref() {
+            if plan.validate_candidate(&deterministic_transcript).is_ok() {
+                deterministic_transcript
+            } else {
+                eprintln!("voicewave: deterministic formatting changed a snippet slot; using protected baseline");
+                plan.protected_text().to_string()
+            }
+        } else {
+            deterministic_transcript
         };
         let (asr_integrity_percent, asr_raw_word_count, asr_final_word_count) =
-            asr_integrity_metrics(&finalize_text, &final_transcript);
+            asr_integrity_metrics(&finalize_text, &baseline_transcript);
 
         if final_transcript.trim().is_empty() {
             if cancel_token.is_cancelled() {
@@ -3746,7 +3922,7 @@ impl VoiceWaveController {
             && should_reject_low_confidence_transcript_as_no_speech(
                 use_faster_whisper,
                 captured_audio_ms,
-                &final_transcript,
+                &baseline_transcript,
                 decode_telemetry.fw_no_speech_prob,
             )
         {
@@ -3772,7 +3948,15 @@ impl VoiceWaveController {
         // a hard release-to-insert budget; on accept the polished text
         // inserts, on reject/timeout/worker-error the deterministic floor
         // inserts. Literal never calls the model.
-        let mut inserted_text = final_transcript.clone();
+        let mut inserted_text = if let Some(expansion) = &exact_snippet_expansion {
+            expansion.clone()
+        } else {
+            restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript)
+                .unwrap_or_else(|error| {
+                    eprintln!("voicewave: snippet restoration failed before insertion: {error}");
+                    baseline_transcript.clone()
+                })
+        };
         let mut polish_meta = PolishHistoryMeta {
             selected_profile: Some(polish_profile.as_str().to_string()),
             ..PolishHistoryMeta::default()
@@ -3782,89 +3966,107 @@ impl VoiceWaveController {
         // background; its (gated) result may still enrich History later —
         // never the target app.
         let mut late_polish_handle: Option<JoinHandle<Option<String>>> = None;
-        match profile_policy.insert_path {
-            InsertPath::LiteralImmediate => {
-                polish_meta.polish_outcome = Some(POLISH_OUTCOME_LITERAL.to_string());
-            }
-            InsertPath::Immediate => {
-                // Standard: outcome intentionally stays None — the async
-                // polish pass is an offer, not an insertion outcome.
-            }
-            InsertPath::WaitValidated => {
-                // No retry pass exists yet (worker support pending); record
-                // that explicitly so History never has to guess.
-                polish_meta.polish_retried = Some(false);
-                if !settings.llm_polish_enabled {
-                    polish_meta.polish_outcome = Some(POLISH_OUTCOME_DISABLED.to_string());
-                } else {
-                    // Budget zero point == key release, the same point the
-                    // existing release_to_inserted_ms metric measures from.
-                    let elapsed_since_release_ms = release_to_transcribing_ms
-                        .saturating_add(transcribing_started.elapsed().as_millis() as u64);
-                    let remaining_budget_ms =
-                        WAIT_VALIDATED_RELEASE_BUDGET_MS.saturating_sub(elapsed_since_release_ms);
-                    if remaining_budget_ms == 0 {
-                        // Decode alone consumed the budget (long dictation):
-                        // insert the floor immediately, no attempt.
-                        polish_meta.polish_outcome =
-                            Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
+        if exact_snippet_expansion.is_some() {
+            polish_meta.polish_outcome = Some(POLISH_OUTCOME_SNIPPET_EXACT.to_string());
+        } else {
+            match profile_policy.insert_path {
+                InsertPath::LiteralImmediate => {
+                    polish_meta.polish_outcome = Some(POLISH_OUTCOME_LITERAL.to_string());
+                }
+                InsertPath::Immediate => {
+                    // Standard: outcome intentionally stays None — the async
+                    // polish pass is an offer, not an insertion outcome.
+                }
+                InsertPath::WaitValidated => {
+                    // No retry pass exists yet (worker support pending); record
+                    // that explicitly so History never has to guess.
+                    polish_meta.polish_retried = Some(false);
+                    if !settings.llm_polish_enabled {
+                        polish_meta.polish_outcome = Some(POLISH_OUTCOME_DISABLED.to_string());
                     } else {
-                        let raw_for_polish = final_transcript.clone();
-                        let prompt_id = profile_policy.prompt_id.to_string();
-                        let wait_started = Instant::now();
-                        let mut polish_handle = tokio::spawn(async move {
-                            crate::inference::llm_polish::polish_text_for_profile(
-                                raw_for_polish,
-                                prompt_id,
+                        // Budget zero point == key release, the same point the
+                        // existing release_to_inserted_ms metric measures from.
+                        let elapsed_since_release_ms = release_to_transcribing_ms
+                            .saturating_add(transcribing_started.elapsed().as_millis() as u64);
+                        let remaining_budget_ms =
+                            WAIT_VALIDATED_RELEASE_BUDGET_MS.saturating_sub(elapsed_since_release_ms);
+                        if remaining_budget_ms == 0 {
+                            // Decode alone consumed the budget (long dictation):
+                            // insert the floor immediately, no attempt.
+                            polish_meta.polish_outcome =
+                                Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
+                        } else {
+                            let raw_for_polish = final_transcript.clone();
+                            let prompt_id = profile_policy.prompt_id.to_string();
+                            let wait_started = Instant::now();
+                            let mut polish_handle = tokio::spawn(async move {
+                                crate::inference::llm_polish::polish_text_for_profile(
+                                    raw_for_polish,
+                                    prompt_id,
+                                )
+                                .await
+                                .ok()
+                                .flatten()
+                            });
+                            match timeout(
+                                Duration::from_millis(remaining_budget_ms),
+                                &mut polish_handle,
                             )
                             .await
-                            .ok()
-                            .flatten()
-                        });
-                        match timeout(
-                            Duration::from_millis(remaining_budget_ms),
-                            &mut polish_handle,
-                        )
-                        .await
-                        {
-                            Ok(Ok(Some(candidate))) => {
-                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                match gate_polish_candidate(
-                                    &final_transcript,
-                                    &candidate,
-                                    &custom_terms,
-                                    polish_profile,
-                                ) {
-                                    Ok(stabilized) => {
-                                        polish_meta.polish_outcome =
-                                            Some(POLISH_OUTCOME_ACCEPTED.to_string());
-                                        polish_meta.polished_text = Some(stabilized.clone());
-                                        inserted_text = stabilized;
-                                    }
-                                    Err(reasons) => {
-                                        eprintln!(
-                                            "voicewave: {} polish rejected ({reasons:?}); inserting deterministic floor",
-                                            polish_profile.as_str()
-                                        );
-                                        polish_meta.polish_outcome =
-                                            Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
+                            {
+                                Ok(Ok(Some(candidate))) => {
+                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                    match gate_polish_candidate(
+                                        &final_transcript,
+                                        &candidate,
+                                        &custom_terms,
+                                        polish_profile,
+                                    ) {
+                                        Ok(stabilized) => match restore_snippet_candidate(
+                                            inline_snippet_plan.as_deref(),
+                                            &stabilized,
+                                        ) {
+                                            Ok(restored) => {
+                                                polish_meta.polish_outcome =
+                                                    Some(POLISH_OUTCOME_ACCEPTED.to_string());
+                                                polish_meta.polished_text = Some(restored.clone());
+                                                inserted_text = restored;
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "voicewave: {} polish changed a protected snippet slot ({error}); inserting deterministic floor",
+                                                    polish_profile.as_str()
+                                                );
+                                                polish_meta.polish_outcome = Some(
+                                                    POLISH_OUTCOME_FALLBACK_REJECTED.to_string(),
+                                                );
+                                            }
+                                        },
+                                        Err(reasons) => {
+                                            eprintln!(
+                                                "voicewave: {} polish rejected ({reasons:?}); inserting deterministic floor",
+                                                polish_profile.as_str()
+                                            );
+                                            polish_meta.polish_outcome =
+                                                Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
+                                        }
                                     }
                                 }
-                            }
-                            Ok(Ok(None)) | Ok(Err(_)) => {
-                                // Worker error / missing model / empty output.
-                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                polish_meta.polish_outcome =
-                                    Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
-                            }
-                            Err(_elapsed) => {
-                                polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                polish_meta.polish_outcome =
-                                    Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
-                                late_polish_handle = Some(polish_handle);
+                                Ok(Ok(None)) | Ok(Err(_)) => {
+                                    // Worker error / missing model / empty output.
+                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                    polish_meta.polish_outcome =
+                                        Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
+                                }
+                                Err(_elapsed) => {
+                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
+                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
+                                    polish_meta.polish_outcome =
+                                        Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
+                                    late_polish_handle = Some(polish_handle);
+                                }
                             }
                         }
                     }
@@ -3894,7 +4096,8 @@ impl VoiceWaveController {
         let insert_payload = InsertTextRequest {
             text: inserted_text.clone(),
             target_app: None,
-            prefer_clipboard: settings.prefer_clipboard_fallback,
+            prefer_clipboard: settings.prefer_clipboard_fallback
+                || (had_snippet && inserted_text.contains('\n')),
             force_clipboard_only: false,
         };
         let insert_started = Instant::now();
@@ -3935,7 +4138,9 @@ impl VoiceWaveController {
         let previous_correction_session = { self.correction_session.lock().await.clone() };
         let correction_candidates = if insertion_success {
             if let Some(previous) = previous_correction_session {
-                if inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
+                if !had_snippet
+                    && !previous.had_snippet
+                    && inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
                     <= CORRECTION_SESSION_WINDOW_MS
                 {
                     derive_correction_candidates(&previous.inserted_text, &inserted_text)
@@ -3954,6 +4159,7 @@ impl VoiceWaveController {
                 *correction_session = Some(CorrectionSession {
                     inserted_text: inserted_text.clone(),
                     inserted_at_utc_ms,
+                    had_snippet,
                 });
             } else {
                 *correction_session = None;
@@ -3973,6 +4179,7 @@ impl VoiceWaveController {
         if insertion_success
             && settings.llm_polish_enabled
             && profile_policy.insert_path == InsertPath::Immediate
+            && exact_snippet_expansion.is_none()
         {
             let app_handle = app.clone();
             let raw = final_transcript.clone();
@@ -3981,6 +4188,7 @@ impl VoiceWaveController {
             let session_counter = Arc::clone(&self.session_counter);
             let history_manager = Arc::clone(&self.history_manager);
             let record_id_for_polish = insertion_record_id.clone();
+            let snippet_plan_for_polish = inline_snippet_plan.clone();
             tauri::async_runtime::spawn(async move {
                 let polish_started = Instant::now();
                 if let Ok(Some(polished)) = crate::inference::llm_polish::polish_text_for_profile(
@@ -4002,13 +4210,19 @@ impl VoiceWaveController {
                     if stabilized.trim() == raw.trim() {
                         return;
                     }
+                    let Ok(restored) = restore_snippet_candidate(
+                        snippet_plan_for_polish.as_deref(),
+                        &stabilized,
+                    ) else {
+                        return;
+                    };
                     let polish_latency_ms = polish_started.elapsed().as_millis() as u64;
                     // Enrich this dictation's History record (keyed by its
                     // stable record id, so this is never stale) with the
                     // validated candidate.
                     if let Some(record_id) = record_id_for_polish {
                         let update = PolishHistoryMeta {
-                            polished_text: Some(stabilized.clone()),
+                            polished_text: Some(restored.clone()),
                             polish_latency_ms: Some(polish_latency_ms),
                             ..PolishHistoryMeta::default()
                         };
@@ -4046,7 +4260,7 @@ impl VoiceWaveController {
                             "info",
                             "Polished version ready",
                             None,
-                            stabilized,
+                            restored,
                             Some("copyTranscript"),
                         );
                     }
@@ -4064,13 +4278,20 @@ impl VoiceWaveController {
             let app_for_late = app.clone();
             let raw = final_transcript.clone();
             let custom_terms_late = custom_terms.clone();
+            let snippet_plan_late = inline_snippet_plan.clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(Some(candidate)) = handle.await {
                     if let Ok(stabilized) =
                         gate_polish_candidate(&raw, &candidate, &custom_terms_late, polish_profile)
                     {
+                        let Ok(restored) = restore_snippet_candidate(
+                            snippet_plan_late.as_deref(),
+                            &stabilized,
+                        ) else {
+                            return;
+                        };
                         let update = PolishHistoryMeta {
-                            polished_text: Some(stabilized),
+                            polished_text: Some(restored),
                             ..PolishHistoryMeta::default()
                         };
                         if history_manager
@@ -4525,14 +4746,9 @@ impl VoiceWaveController {
                     let hint = {
                         let manager = self.dictionary_manager.lock().await;
                         // Build in ascending priority because hint builder reads terms in reverse:
-                        // pending queue < env terms < approved dictionary terms.
-                        let mut terms = manager
-                            .get_queue(Some(12))
-                            .into_iter()
-                            .map(|row| row.term)
-                            .collect::<Vec<_>>();
-                        terms.reverse();
-                        terms.extend(env_technical_terms());
+                        // environment terms < approved dictionary terms. Pending suggestions
+                        // are untrusted and must never bias decoding before approval.
+                        let mut terms = env_technical_terms();
                         terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
                         build_terminology_hint_from_texts(&terms, 10)
                     };
@@ -5107,14 +5323,15 @@ mod tests {
     }
 
     #[test]
-    fn terminology_hint_prioritizes_approved_terms_over_pending_queue() {
+    fn terminology_hint_prioritizes_approved_terms_over_environment_terms() {
         let mut terms = vec![
             "AUDIO".to_string(),
             "BLANK".to_string(),
             "whisper.cpp".to_string(),
             "VoiceWave".to_string(),
         ];
-        // Mimic runtime ordering: pending < env < approved.
+        // Mimic runtime ordering: environment < approved. Pending terms are
+        // deliberately absent from the runtime input list.
         // The hint helper reads from the end, so approved terms should win first.
         let hint = build_terminology_hint_from_texts(&terms, 1).expect("hint should exist");
         assert_eq!(hint, "VoiceWave");

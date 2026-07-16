@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addDictionaryTerm as addDictionaryTermCommand,
+  addVoiceSnippet as addVoiceSnippetCommand,
   approveDictionaryEntry,
   cancelModelDownload,
   canUseTauri,
@@ -32,6 +33,7 @@ import {
   listInstalledModels,
   listInputDevices,
   listModelCatalog,
+  listVoiceSnippets,
   loadHotkeyConfig,
   loadSnapshot,
   loadSettings,
@@ -42,6 +44,7 @@ import {
   recommendModel,
   rejectDictionaryEntry,
   removeDictionaryTerm,
+  removeVoiceSnippet as removeVoiceSnippetCommand,
   requestMicrophoneAccess,
   restorePurchase as restorePurchaseCommand,
   resumeModelDownload,
@@ -68,12 +71,15 @@ import {
   triggerHotkeyAction,
   undoLastInsertion,
   updateHotkeyConfig,
+  updateVoiceSnippet as updateVoiceSnippetCommand,
   updateSettings,
   downloadPolishModel,
   getPolishModelStatus,
   listenVoicewavePolishModelProgress,
   type PolishModelProgress
 } from "../lib/tauri";
+import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
+import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
 import type {
   AppProfileOverrides,
   CodeModeSettings,
@@ -110,6 +116,7 @@ import type {
   SessionHistoryRecord,
   LatencyBreakdownEvent,
   VoiceWaveHudState,
+  VoiceSnippet,
   VoiceWaveSettings,
   VoiceWaveSnapshot
 } from "../types/voicewave";
@@ -523,6 +530,7 @@ export function useVoiceWave() {
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryRecord[]>([]);
   const [dictionaryQueue, setDictionaryQueue] = useState<DictionaryQueueItem[]>([]);
   const [dictionaryTerms, setDictionaryTerms] = useState<DictionaryTerm[]>([]);
+  const [voiceSnippets, setVoiceSnippets] = useState<VoiceSnippet[]>([]);
 
   const [tauriAvailable] = useState<boolean>(() => canUseTauri());
   const [isBusy, setIsBusy] = useState(false);
@@ -652,12 +660,13 @@ export function useVoiceWave() {
       return;
     }
     try {
-      const [catalogRows, installedRows, historyRows, queueRows, termRows, benchmark] = await Promise.all([
+      const [catalogRows, installedRows, historyRows, queueRows, termRows, snippetRows, benchmark] = await Promise.all([
         listModelCatalog(),
         listInstalledModels(),
         getSessionHistory({ includeFailed: true, limit: 50 }),
         getDictionaryQueue(50),
         getDictionaryTerms(),
+        listVoiceSnippets(),
         getBenchmarkResults()
       ]);
       const supportedCatalog = catalogRows.filter((row) => isSupportedModelId(row.modelId));
@@ -675,6 +684,7 @@ export function useVoiceWave() {
       setSessionHistory(historyRows);
       setDictionaryQueue(queueRows);
       setDictionaryTerms(termRows);
+      setVoiceSnippets(snippetRows);
       setBenchmarkResults(benchmark);
       if (benchmark) {
         try {
@@ -687,6 +697,67 @@ export function useVoiceWave() {
       setError(loadErr instanceof Error ? loadErr.message : "Failed to load Phase III data.");
     }
   }, [settings.activeModel, tauriAvailable]);
+
+  const refreshDictionary = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      const [queueRows, termRows] = await Promise.all([
+        getDictionaryQueue(50),
+        getDictionaryTerms()
+      ]);
+      setDictionaryQueue(queueRows);
+      setDictionaryTerms(termRows);
+    } catch (dictionaryErr) {
+      setError(dictionaryErr instanceof Error ? dictionaryErr.message : "Failed to load dictionary.");
+      throw dictionaryErr;
+    }
+  }, [tauriAvailable]);
+
+  const syncDictionaryWithCloud = useCallback(async (uid: string) => {
+    if (!tauriAvailable) {
+      return [];
+    }
+    const terms = await syncDictionaryRecordsWithCloud(uid);
+    setDictionaryTerms(terms);
+    return terms;
+  }, [tauriAvailable]);
+
+  const refreshVoiceSnippets = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setVoiceSnippets(await listVoiceSnippets());
+    } catch (snippetErr) {
+      setError(snippetErr instanceof Error ? snippetErr.message : "Failed to load snippets.");
+      throw snippetErr;
+    }
+  }, [tauriAvailable]);
+
+  const syncVoiceSnippetsWithCloud = useCallback(async (
+    uid: string,
+    isCurrent?: () => boolean
+  ) => {
+    if (!tauriAvailable) {
+      return { snippets: [], records: [], limitExceeded: false };
+    }
+    try {
+      const result = await syncVoiceSnippetRecordsWithCloud(uid, isCurrent);
+      setVoiceSnippets(result.snippets);
+      return result;
+    } catch (syncErr) {
+      // Reconciliation commits locally before replication. Keep the UI true
+      // to the encrypted local store even when the cloud write fails.
+      try {
+        setVoiceSnippets(await listVoiceSnippets());
+      } catch {
+        // Preserve the original sync error; refreshPhase3Data can retry later.
+      }
+      throw syncErr;
+    }
+  }, [tauriAvailable]);
 
   // Lightweight history-only refresh for the post-dictation event; avoids the
   // full refreshPhase3Data reload (model catalog, dictionary, benchmarks).
@@ -877,7 +948,7 @@ export function useVoiceWave() {
       const nextSettings = { ...settings, vadThreshold: clampedThreshold };
       setSettings(nextSettings);
       if (!tauriAvailable) {
-        return;
+        return true;
       }
       try {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
@@ -1174,7 +1245,7 @@ export function useVoiceWave() {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
       } catch (persistErr) {
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save AI polish preference");
-        return;
+        return false;
       }
       // Enabling AI polish needs the ~1 GB model. Kick off the (idempotent,
       // single-flighted) download; progress arrives via the listener below and
@@ -1190,6 +1261,7 @@ export function useVoiceWave() {
           // Status check is best-effort; the worker also degrades gracefully.
         }
       }
+      return true;
     },
     [settings, tauriAvailable]
   );
@@ -1700,11 +1772,12 @@ export function useVoiceWave() {
     }
     try {
       await approveDictionaryEntry(entryId, normalizedText);
-      await refreshPhase3Data();
+      await refreshDictionary();
     } catch (dictionaryErr) {
       setError(dictionaryErr instanceof Error ? dictionaryErr.message : "Failed to approve term");
+      throw dictionaryErr;
     }
-  }, [dictionaryQueue, refreshPhase3Data, tauriAvailable]);
+  }, [dictionaryQueue, refreshDictionary, tauriAvailable]);
 
   const rejectDictionaryQueueEntry = useCallback(async (entryId: string) => {
     if (!tauriAvailable) {
@@ -1713,11 +1786,12 @@ export function useVoiceWave() {
     }
     try {
       await rejectDictionaryEntry(entryId);
-      await refreshPhase3Data();
+      await refreshDictionary();
     } catch (dictionaryErr) {
       setError(dictionaryErr instanceof Error ? dictionaryErr.message : "Failed to reject term");
+      throw dictionaryErr;
     }
-  }, [refreshPhase3Data, tauriAvailable]);
+  }, [refreshDictionary, tauriAvailable]);
 
   const deleteDictionaryTerm = useCallback(async (termId: string) => {
     if (!tauriAvailable) {
@@ -1726,11 +1800,12 @@ export function useVoiceWave() {
     }
     try {
       await removeDictionaryTerm(termId);
-      await refreshPhase3Data();
+      await refreshDictionary();
     } catch (dictionaryErr) {
       setError(dictionaryErr instanceof Error ? dictionaryErr.message : "Failed to remove term");
+      throw dictionaryErr;
     }
-  }, [refreshPhase3Data, tauriAvailable]);
+  }, [refreshDictionary, tauriAvailable]);
 
   const addDictionaryTerm = useCallback(
     async (term: string) => {
@@ -1756,12 +1831,13 @@ export function useVoiceWave() {
 
       try {
         await addDictionaryTermCommand(normalized);
-        await refreshPhase3Data();
+        await refreshDictionary();
       } catch (dictionaryErr) {
         setError(dictionaryErr instanceof Error ? dictionaryErr.message : "Failed to add term");
+        throw dictionaryErr;
       }
     },
-    [refreshPhase3Data, tauriAvailable]
+    [refreshDictionary, tauriAvailable]
   );
 
   const exportDictionary = useCallback(async (): Promise<DictionaryExport> => {
@@ -1771,11 +1847,65 @@ export function useVoiceWave() {
   const importDictionary = useCallback(
     async (payload: string): Promise<DictionaryImportSummary> => {
       const summary = await importDictionaryCommand(payload);
-      await refreshPhase3Data();
+      await refreshDictionary();
       return summary;
     },
-    [refreshPhase3Data]
+    [refreshDictionary]
   );
+
+  const addVoiceSnippet = useCallback(async (trigger: string, expansion: string) => {
+    if (!tauriAvailable) {
+      const now = Date.now();
+      const normalizedTrigger = trigger.trim().replace(/\s+/gu, " ").normalize("NFC").toLowerCase();
+      setVoiceSnippets((current) => [
+        ...current,
+        {
+          snippetId: `vs-web-${now}`,
+          trigger: trigger.trim().replace(/\s+/gu, " ").normalize("NFC"),
+          normalizedTrigger,
+          expansion: expansion.replace(/\r\n/g, "\n"),
+          createdAtUtcMs: now,
+          updatedAtUtcMs: now
+        }
+      ]);
+      return;
+    }
+    await addVoiceSnippetCommand(trigger, expansion);
+    await refreshVoiceSnippets();
+  }, [refreshVoiceSnippets, tauriAvailable]);
+
+  const updateVoiceSnippet = useCallback(async (
+    snippetId: string,
+    trigger: string,
+    expansion: string
+  ) => {
+    if (!tauriAvailable) {
+      const now = Date.now();
+      setVoiceSnippets((current) => current.map((snippet) =>
+        snippet.snippetId === snippetId
+          ? {
+              ...snippet,
+              trigger: trigger.trim().replace(/\s+/gu, " ").normalize("NFC"),
+              normalizedTrigger: trigger.trim().replace(/\s+/gu, " ").normalize("NFC").toLowerCase(),
+              expansion: expansion.replace(/\r\n/g, "\n"),
+              updatedAtUtcMs: now
+            }
+          : snippet
+      ));
+      return;
+    }
+    await updateVoiceSnippetCommand(snippetId, trigger, expansion);
+    await refreshVoiceSnippets();
+  }, [refreshVoiceSnippets, tauriAvailable]);
+
+  const deleteVoiceSnippet = useCallback(async (snippetId: string) => {
+    if (!tauriAvailable) {
+      setVoiceSnippets((current) => current.filter((snippet) => snippet.snippetId !== snippetId));
+      return;
+    }
+    await removeVoiceSnippetCommand(snippetId);
+    await refreshVoiceSnippets();
+  }, [refreshVoiceSnippets, tauriAvailable]);
 
   useEffect(() => {
     if (!tauriAvailable) {
@@ -1795,6 +1925,7 @@ export function useVoiceWave() {
       setEntitlement(fallbackEntitlement);
       setDictionaryQueue([{ entryId: "dq-web-1", term: "VoiceWave", sourcePreview: "Prototype note", createdAtUtcMs: Date.now() - 5000 }]);
       setDictionaryTerms([{ termId: "dt-web-1", term: "whisper.cpp", source: "seed", createdAtUtcMs: Date.now() - 20000 }]);
+      setVoiceSnippets([]);
       return;
     }
 
@@ -2194,6 +2325,7 @@ export function useVoiceWave() {
     sessionHistory,
     dictionaryQueue,
     dictionaryTerms,
+    voiceSnippets,
     tauriAvailable,
     activeState,
     micQualityWarning,
@@ -2248,6 +2380,13 @@ export function useVoiceWave() {
     addDictionaryTerm,
     exportDictionary,
     importDictionary,
+    refreshDictionary,
+    syncDictionaryWithCloud,
+    addVoiceSnippet,
+    updateVoiceSnippet,
+    deleteVoiceSnippet,
+    refreshVoiceSnippets,
+    syncVoiceSnippetsWithCloud,
     canUseFeature,
     startProCheckout: startProCheckoutAction,
     refreshEntitlement,

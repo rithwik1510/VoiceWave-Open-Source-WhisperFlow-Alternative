@@ -11,6 +11,8 @@ import type {
   DictionaryExport,
   DictionaryImportSummary,
   DictionaryQueueItem,
+  DictionaryReconcileResult,
+  DictionarySyncRecord,
   DictionaryTerm,
   DictationMode,
   AppProfileOverrides,
@@ -45,6 +47,9 @@ import type {
   TranscriptEvent,
   UndoResult,
   VoiceWaveSettings,
+  VoiceSnippet,
+  VoiceSnippetReconcileResult,
+  VoiceSnippetSyncRecord,
   VoiceWaveSnapshot,
   VoiceWaveStateEvent
 } from "../types/voicewave";
@@ -529,4 +534,53 @@ export async function exportDictionary(): Promise<DictionaryExport> {
 
 export async function importDictionary(payload: string): Promise<DictionaryImportSummary> {
   return invokeVoicewave<DictionaryImportSummary>("import_dictionary", { payload });
+}
+
+export async function getDictionarySyncRecords(): Promise<DictionarySyncRecord[]> {
+  return invokeVoicewave<DictionarySyncRecord[]>("get_dictionary_sync_records");
+}
+
+export async function reconcileDictionaryRecords(
+  records: DictionarySyncRecord[]
+): Promise<DictionaryReconcileResult> {
+  return invokeVoicewave<DictionaryReconcileResult>("reconcile_dictionary_records", { records });
+}
+
+export async function listVoiceSnippets(query?: string): Promise<VoiceSnippet[]> {
+  return invokeVoicewave<VoiceSnippet[]>("list_voice_snippets", { query: query ?? null });
+}
+
+export async function addVoiceSnippet(
+  trigger: string,
+  expansion: string
+): Promise<VoiceSnippet> {
+  return invokeVoicewave<VoiceSnippet>("add_voice_snippet", { trigger, expansion });
+}
+
+export async function updateVoiceSnippet(
+  snippetId: string,
+  trigger: string,
+  expansion: string
+): Promise<VoiceSnippet> {
+  return invokeVoicewave<VoiceSnippet>("update_voice_snippet", {
+    snippetId,
+    trigger,
+    expansion
+  });
+}
+
+export async function removeVoiceSnippet(snippetId: string): Promise<void> {
+  await invokeVoicewave<void>("remove_voice_snippet", { snippetId });
+}
+
+export async function getVoiceSnippetSyncRecords(): Promise<VoiceSnippetSyncRecord[]> {
+  return invokeVoicewave<VoiceSnippetSyncRecord[]>("get_voice_snippet_sync_records");
+}
+
+export async function reconcileVoiceSnippetRecords(
+  records: VoiceSnippetSyncRecord[]
+): Promise<VoiceSnippetReconcileResult> {
+  return invokeVoicewave<VoiceSnippetReconcileResult>("reconcile_voice_snippet_records", {
+    records
+  });
 }
