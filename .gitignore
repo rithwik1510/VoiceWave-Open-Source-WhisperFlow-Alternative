@@ -40,6 +40,11 @@ __pycache__/
 
 # Local temp / diagnostic scratch files
 tmp-*
+cargo_check_*.txt
+
+# Generated Remotion renders. Keep the demo source and authored audio assets,
+# but do not commit reproducible multi-megabyte video outputs.
+/demo-video/out/
 
 # Local app data
 .voicewave/

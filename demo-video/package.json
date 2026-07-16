@@ -1,0 +1,21 @@
+{
+  "name": "voicewave-demo-video",
+  "private": true,
+  "description": "VoiceWave launch demo video, built with Remotion.",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Main out/voicewave-demo.mp4",
+    "audio": "node scripts/make-audio.mjs"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.242",
+    "@remotion/google-fonts": "4.0.242",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "4.0.242"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "typescript": "^5.6.3"
+  }
+}
