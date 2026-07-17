@@ -10,7 +10,7 @@ type DotParticle = {
   seed: number
 }
 
-const DISPLAY_TEXT = '100% LOCAL'
+const DISPLAY_TEXT = 'OUT NOW'
 const MAX_PARTICLES = 4200
 
 export default function ComingSoonDots() {
@@ -57,8 +57,9 @@ export default function ComingSoonDots() {
       sampleContext.textBaseline = 'middle'
       sampleContext.fillStyle = '#ffffff'
 
-      // Scale roughly inversely with phrase length ("100% LOCAL" = 10 chars).
-      const fontSize = Math.min(width * (width < 760 ? 0.22 : 0.19), height * 0.7)
+      // Scale calibrated for the 7-char "OUT NOW". If DISPLAY_TEXT is changed
+      // back to a longer phrase, drop these multipliers back to 0.2 / 0.17.
+      const fontSize = Math.min(width * (width < 760 ? 0.3 : 0.26), height * 0.7)
       sampleContext.font = `800 ${fontSize}px Fraunces, serif`
       sampleContext.fillText(DISPLAY_TEXT, width * 0.5, height * 0.52)
 
@@ -246,7 +247,7 @@ export default function ComingSoonDots() {
     <div ref={rootRef} className="coming-soon-dots-wrap">
       <canvas ref={canvasRef} className="coming-soon-dots-canvas" />
       <p className={`coming-soon-fallback-text ${hasGlyphParticles ? 'is-hidden' : ''}`}>{DISPLAY_TEXT}</p>
-      <span className="sr-only">100% local</span>
+      <span className="sr-only">Out now</span>
     </div>
   )
 }

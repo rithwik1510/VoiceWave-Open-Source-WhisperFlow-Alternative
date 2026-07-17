@@ -1,17 +1,6 @@
-import {
-  GITHUB_CHANGELOG_URL,
-  GITHUB_LICENSE_URL,
-  GITHUB_RELEASES_URL,
-  GITHUB_REPO_URL
-} from '../config/site'
 import VoiceWaveLogo from './VoiceWaveLogo'
 
-const footerLinks = [
-  { label: 'GitHub', href: GITHUB_REPO_URL },
-  { label: 'Releases', href: GITHUB_RELEASES_URL },
-  { label: 'Changelog', href: GITHUB_CHANGELOG_URL },
-  { label: 'License', href: GITHUB_LICENSE_URL }
-]
+const footerLinks = ['GitHub', 'Documentation', 'Privacy']
 
 export default function Footer() {
   return (
@@ -29,13 +18,12 @@ export default function Footer() {
                 <VoiceWaveLogo size={14} strokeWidth={2.6} tone="adaptive" adaptiveOn="light" />
               </span>
               <span className="font-mono text-xs font-semibold uppercase tracking-[0.2em] text-[#0d2b58]">
-                Open-source · Offline · Windows
+                Local Runtime Platform
               </span>
             </div>
 
             <p className="mt-6 max-w-lg text-base leading-relaxed text-[#0c2248] sm:text-lg">
-              Free dictation that keeps your voice on your machine. Built in the open —
-              stars, issues, and pull requests all welcome.
+              Private dictation for teams that need reliable, local-first text insertion.
             </p>
 
             <p className="mt-10 font-display text-6xl leading-[0.9] tracking-tight sm:text-7xl md:text-[8.5rem]">
@@ -46,14 +34,8 @@ export default function Footer() {
 
           <nav className="grid gap-5 font-mono text-xs uppercase tracking-[0.14em] text-[#091b3a] md:justify-items-end md:pt-3">
             {footerLinks.map((link) => (
-              <a
-                key={link.label}
-                href={link.href}
-                target="_blank"
-                rel="noreferrer"
-                className="transition-colors hover:text-[#000000]"
-              >
-                / {link.label}
+              <a key={link} href="#" className="transition-colors hover:text-[#000000]">
+                / {link}
               </a>
             ))}
           </nav>
@@ -61,10 +43,11 @@ export default function Footer() {
 
         <div className="mt-12 border-t border-[#0b2756]/30 pt-6">
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-[#0d2b58]">
-            &copy; {new Date().getFullYear()} VoiceWave &middot; Apache-2.0 licensed &middot; your audio never left this machine
+            &copy; {new Date().getFullYear()} VoiceWave Corp. Local mode active.
           </p>
         </div>
       </div>
     </footer>
   )
 }
+

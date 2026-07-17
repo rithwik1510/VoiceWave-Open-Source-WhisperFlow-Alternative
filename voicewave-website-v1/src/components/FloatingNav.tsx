@@ -6,7 +6,7 @@ const links = [
   { href: '#home', label: 'Home' },
   { href: '#demo', label: 'Demo' },
   { href: '#features', label: 'Features' },
-  { href: '#compare', label: 'Compare' }
+  { href: '#trust', label: 'Trust' }
 ]
 
 export default function FloatingNav() {

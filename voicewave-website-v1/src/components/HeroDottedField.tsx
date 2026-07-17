@@ -155,12 +155,6 @@ export default function HeroDottedField({
       return texture
     }
 
-    // Half-float sim storage kills the 8-bit banding in the field/velocity
-    // channels (smoother smoke, no stair-stepped fades). Set after the
-    // renderer exists; falls back to bytes when float render targets are
-    // unavailable.
-    let simTextureType: THREE.TextureDataType = THREE.UnsignedByteType
-
     const createRenderTarget = (width: number, height: number) =>
       new THREE.WebGLRenderTarget(width, height, {
         depthBuffer: false,
@@ -168,7 +162,7 @@ export default function HeroDottedField({
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
-        type: simTextureType
+        type: THREE.UnsignedByteType
       })
 
     const resolveAutoSafeZones = (canvasBounds: DOMRect) => {
@@ -254,28 +248,8 @@ export default function HeroDottedField({
       return { primary, secondary }
     }
 
-    // Layout uniforms only actually change on resize / safe-zone updates, and
-    // Hero memoizes the safeZone object, so reference equality lets the
-    // per-frame call skip the getBoundingClientRect + uniform churn entirely.
-    let appliedSafeZone: HeroSafeZone | undefined
-    let appliedCutoff = -1
-    let appliedResX = 0
-    let appliedResY = 0
-
-    const applyLayoutUniforms = (force = false) => {
+    const applyLayoutUniforms = () => {
       if (!displayMaterial) {
-        return
-      }
-
-      const safeCurrent = safeZoneRef.current
-      if (
-        !force &&
-        safeCurrent &&
-        safeCurrent === appliedSafeZone &&
-        topCutoffRef.current === appliedCutoff &&
-        resolution.x === appliedResX &&
-        resolution.y === appliedResY
-      ) {
         return
       }
 
@@ -320,11 +294,6 @@ export default function HeroDottedField({
       displayMaterial.uniforms.uSafeRadiusPx.value = cornerPx
       displayMaterial.uniforms.uSafeFeatherPx.value = feather
       displayMaterial.uniforms.uTopCutoffPx.value = cutoff
-
-      appliedSafeZone = safeCurrent
-      appliedCutoff = topCutoffRef.current
-      appliedResX = resolution.x
-      appliedResY = resolution.y
     }
 
     const updateDrawResolution = () => {
@@ -353,9 +322,8 @@ export default function HeroDottedField({
 
       const seedTexture = getRenderTexture(readTarget)
       simulationMaterial.uniforms.uPrev.value = seedTexture
-      simulationMaterial.uniforms.uTexelSize.value.set(1 / simWidth, 1 / simHeight)
       displayMaterial.uniforms.uField.value = seedTexture
-      applyLayoutUniforms(true)
+      applyLayoutUniforms()
     }
 
     const swapRenderTargets = () => {
@@ -431,10 +399,6 @@ export default function HeroDottedField({
       renderer.domElement.className = 'hero-dotted-canvas-element'
       canvasMount.appendChild(renderer.domElement)
 
-      if (renderer.capabilities.isWebGL2 && renderer.extensions.has('EXT_color_buffer_float')) {
-        simTextureType = THREE.HalfFloatType
-      }
-
       camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
       displayScene = new THREE.Scene()
       simulationScene = new THREE.Scene()
@@ -456,8 +420,7 @@ export default function HeroDottedField({
           uDt: { value: 0.016 },
           uDecay: { value: config.decay },
           uAmbientStrength: { value: prefersReducedMotion ? config.ambientStrength * 0.2 : config.ambientStrength },
-          uScrollVelocity: { value: new THREE.Vector2(0, 0) },
-          uTexelSize: { value: new THREE.Vector2(1 / MIN_CANVAS_SIZE, 1 / MIN_CANVAS_SIZE) }
+          uScrollVelocity: { value: new THREE.Vector2(0, 0) }
         }
       })
 

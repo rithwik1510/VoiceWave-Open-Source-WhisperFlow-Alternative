@@ -1,19 +1,15 @@
 import { useEffect } from 'react'
-import ComingSoonDots from './components/ComingSoonDots'
-import Comparison from './components/Comparison'
-import Faq from './components/Faq'
-import Features from './components/Features'
-import FinalCta from './components/FinalCta'
-import FloatingNav from './components/FloatingNav'
-import Footer from './components/Footer'
 import Header from './components/Header'
 import Hero from './components/Hero'
-import HowItWorks from './components/HowItWorks'
-import OpenSourceProof from './components/OpenSourceProof'
-import PolishSpotlight from './components/PolishSpotlight'
-import PrivacyDeepDive from './components/PrivacyDeepDive'
-import QuietInkDemo from './components/QuietInkDemo'
+import HoldToTalk from './components/HoldToTalk'
 import WhereItWorks from './components/WhereItWorks'
+import ComingSoonDots from './components/ComingSoonDots'
+import ScrollDemo from './components/ScrollDemo'
+import CapabilityDeepDive from './components/CapabilityDeepDive'
+import Features from './components/Features'
+import TrustProof from './components/TrustProof'
+import Footer from './components/Footer'
+import FloatingNav from './components/FloatingNav'
 
 function App() {
   useEffect(() => {
@@ -98,24 +94,19 @@ function App() {
       <hr className="site-divider" aria-hidden="true" />
 
       <section className="bg-[#f7fbff]">
-        <HowItWorks />
+        <HoldToTalk />
       </section>
 
       <hr className="site-divider" aria-hidden="true" />
 
-      <section className="bg-[#f7fbff] py-4 sm:py-6">
-        <QuietInkDemo />
-      </section>
-
-      <hr className="site-divider" aria-hidden="true" />
-
-      <section className="bg-[#f7fbff]">
-        <PolishSpotlight />
+      <section className="bg-[#f7fbff] py-12 sm:py-16">
+        <ScrollDemo />
       </section>
 
       <hr className="site-divider" aria-hidden="true" />
 
       <section className="bg-[#f7fbff] py-10 sm:py-14">
+        <CapabilityDeepDive />
         <Features />
       </section>
 
@@ -123,22 +114,10 @@ function App() {
         <ComingSoonDots />
       </section>
 
-      <section className="bg-[#f7fbff]">
-        <PrivacyDeepDive />
-      </section>
-
       <hr className="site-divider" aria-hidden="true" />
 
-      <section className="bg-[#f7fbff]">
-        <Comparison />
-      </section>
-
-      <hr className="site-divider" aria-hidden="true" />
-
-      <section className="bg-[#f7fbff] pb-4 sm:pb-6">
-        <OpenSourceProof />
-        <Faq />
-        <FinalCta />
+      <section className="bg-[#f7fbff] pb-10 sm:pb-14">
+        <TrustProof />
       </section>
 
       <Footer />

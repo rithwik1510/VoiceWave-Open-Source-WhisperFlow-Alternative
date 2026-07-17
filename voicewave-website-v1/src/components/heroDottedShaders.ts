@@ -21,7 +21,6 @@ export const heroSimulationFragmentShader = `
   uniform float uDecay;
   uniform float uAmbientStrength;
   uniform vec2 uScrollVelocity;
-  uniform vec2 uTexelSize;
 
   float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -44,17 +43,6 @@ export const heroSimulationFragmentShader = `
     float field = advected.r * uDecay;
     velocity = mix(advected.gb - 0.5, ambientDrift * 14.0, 0.06);
 
-    // Local curl reinforces its own rotation, so moving smoke rolls into
-    // vortices instead of smearing. Gated on speed: idle drift is untouched.
-    vec2 vL = texture2D(uPrev, clamp(vUv - vec2(uTexelSize.x, 0.0), 0.0, 1.0)).gb - 0.5;
-    vec2 vR = texture2D(uPrev, clamp(vUv + vec2(uTexelSize.x, 0.0), 0.0, 1.0)).gb - 0.5;
-    vec2 vB = texture2D(uPrev, clamp(vUv - vec2(0.0, uTexelSize.y), 0.0, 1.0)).gb - 0.5;
-    vec2 vT = texture2D(uPrev, clamp(vUv + vec2(0.0, uTexelSize.y), 0.0, 1.0)).gb - 0.5;
-    float curl = 0.5 * ((vR.y - vL.y) - (vT.x - vB.x));
-    float speed = length(velocity);
-    vec2 swirl = vec2(velocity.y, -velocity.x) * curl * 16.0;
-    velocity += swirl * smoothstep(0.015, 0.09, speed) * uDt;
-
     vec2 uvTop = vec2(vUv.x, 1.0 - vUv.y);
     float pointerDist = distance(uvTop, uPointer);
     float impulse = exp(-pointerDist * pointerDist * 380.0) * uPointerActive;
@@ -70,6 +58,162 @@ export const heroSimulationFragmentShader = `
     velocity = clamp(velocity, vec2(-0.5), vec2(0.5));
 
     gl_FragColor = vec4(field, velocity + 0.5, 1.0);
+  }
+`
+
+export const heroClearFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uTexture;
+  uniform float value;
+
+  void main() {
+    gl_FragColor = value * texture2D(uTexture, vUv);
+  }
+`
+
+export const heroSplatFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uTarget;
+  uniform float aspectRatio;
+  uniform vec3 color;
+  uniform vec2 point;
+  uniform float radius;
+
+  void main() {
+    vec2 p = vUv - point;
+    p.x *= aspectRatio;
+    vec3 splat = exp(-dot(p, p) / radius) * color;
+    vec3 base = texture2D(uTarget, vUv).xyz;
+    gl_FragColor = vec4(base + splat, 1.0);
+  }
+`
+
+export const heroAdvectionFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform sampler2D uSource;
+  uniform vec2 texelSize;
+  uniform float dt;
+  uniform float dissipation;
+
+  vec4 bilerp (sampler2D sam, vec2 uv) {
+    return texture2D(sam, uv);
+  }
+
+  void main() {
+    vec2 coord = clamp(vUv - dt * texture2D(uVelocity, vUv).xy * texelSize, vec2(0.0), vec2(1.0));
+    gl_FragColor = dissipation * bilerp(uSource, coord);
+  }
+`
+
+export const heroDivergenceFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform vec2 texelSize;
+
+  void main() {
+    float L = texture2D(uVelocity, vUv - vec2(texelSize.x, 0.0)).x;
+    float R = texture2D(uVelocity, vUv + vec2(texelSize.x, 0.0)).x;
+    float T = texture2D(uVelocity, vUv + vec2(0.0, texelSize.y)).y;
+    float B = texture2D(uVelocity, vUv - vec2(0.0, texelSize.y)).y;
+
+    float div = 0.5 * (R - L + T - B);
+    gl_FragColor = vec4(div, 0.0, 0.0, 1.0);
+  }
+`
+
+export const heroCurlFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform vec2 texelSize;
+
+  void main() {
+    float L = texture2D(uVelocity, vUv - vec2(texelSize.x, 0.0)).y;
+    float R = texture2D(uVelocity, vUv + vec2(texelSize.x, 0.0)).y;
+    float T = texture2D(uVelocity, vUv + vec2(0.0, texelSize.y)).x;
+    float B = texture2D(uVelocity, vUv - vec2(0.0, texelSize.y)).x;
+    float vorticity = R - L - T + B;
+    gl_FragColor = vec4(0.5 * vorticity, 0.0, 0.0, 1.0);
+  }
+`
+
+export const heroVorticityFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform sampler2D uCurl;
+  uniform vec2 texelSize;
+  uniform float curl;
+  uniform float dt;
+
+  void main() {
+    float L = texture2D(uCurl, vUv - vec2(texelSize.x, 0.0)).x;
+    float R = texture2D(uCurl, vUv + vec2(texelSize.x, 0.0)).x;
+    float T = texture2D(uCurl, vUv + vec2(0.0, texelSize.y)).x;
+    float B = texture2D(uCurl, vUv - vec2(0.0, texelSize.y)).x;
+    float C = texture2D(uCurl, vUv).x;
+
+    vec2 force = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));
+    force /= length(force) + 0.0001;
+    force *= curl * C;
+    force.y *= -1.0;
+
+    vec2 velocity = texture2D(uVelocity, vUv).xy;
+    velocity += force * dt;
+    velocity = clamp(velocity, vec2(-1000.0), vec2(1000.0));
+    gl_FragColor = vec4(velocity, 0.0, 1.0);
+  }
+`
+
+export const heroPressureFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uPressure;
+  uniform sampler2D uDivergence;
+  uniform vec2 texelSize;
+
+  void main() {
+    float L = texture2D(uPressure, vUv - vec2(texelSize.x, 0.0)).x;
+    float R = texture2D(uPressure, vUv + vec2(texelSize.x, 0.0)).x;
+    float T = texture2D(uPressure, vUv + vec2(0.0, texelSize.y)).x;
+    float B = texture2D(uPressure, vUv - vec2(0.0, texelSize.y)).x;
+    float divergence = texture2D(uDivergence, vUv).x;
+
+    float pressure = (L + R + B + T - divergence) * 0.25;
+    gl_FragColor = vec4(pressure, 0.0, 0.0, 1.0);
+  }
+`
+
+export const heroGradientSubtractFragmentShader = `
+  precision highp float;
+
+  varying vec2 vUv;
+  uniform sampler2D uPressure;
+  uniform sampler2D uVelocity;
+  uniform vec2 texelSize;
+
+  void main() {
+    float L = texture2D(uPressure, vUv - vec2(texelSize.x, 0.0)).x;
+    float R = texture2D(uPressure, vUv + vec2(texelSize.x, 0.0)).x;
+    float T = texture2D(uPressure, vUv + vec2(0.0, texelSize.y)).x;
+    float B = texture2D(uPressure, vUv - vec2(0.0, texelSize.y)).x;
+
+    vec2 velocity = texture2D(uVelocity, vUv).xy;
+    velocity -= vec2(R - L, T - B);
+
+    gl_FragColor = vec4(velocity, 0.0, 1.0);
   }
 `
 
@@ -244,22 +388,12 @@ export const heroDisplayFragmentShader = `
     alpha = clamp(alpha, 0.0, 1.0);
     alpha *= uDotAlphaMultiplier;
 
-    // Soft bloom: the half-res field upscales into a naturally blurred plume,
-    // so a faint additive haze between the dots reads as light under glass.
-    // Driven by the sim field only (hover/scroll smoke) — idle look unchanged.
-    float glowSource = clamp(field * 0.85 + flow * 0.35 + activePointer * 0.5, 0.0, 1.0);
-    float glow = pow(glowSource, 1.7) * 0.16;
-    glow *= structure * topZone * bottomZone * maskBlend;
-    glow *= smoothstep(-uSafeFeatherPx * 0.3, uSafeFeatherPx * 1.6, safeNoGlowDist);
-    alpha = clamp(alpha + glow, 0.0, 1.0);
-
     vec3 color = mix(uColorPrimary, uColorSecondary, clamp(energy * 1.0 + videoLuma * 0.22, 0.0, 1.0));
     color = mix(
       color,
       uColorHighlight,
       clamp((activePointer * 0.72 + flow * 0.24 + field * 0.20 + ripple * 0.34 + videoLuma * 0.08) * centerSoft, 0.0, 1.0)
     );
-    color = mix(color, uColorHighlight, glow * 1.3);
 
     gl_FragColor = vec4(color, alpha);
   }
