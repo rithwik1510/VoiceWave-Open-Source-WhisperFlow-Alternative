@@ -1,7 +1,0 @@
-{
-  "name": "VoiceWave Prototype",
-  "description": "A privacy-first local dictation product prototype demonstrating three distinct design directions.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
-}
