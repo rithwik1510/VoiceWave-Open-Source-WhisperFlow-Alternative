@@ -27,8 +27,8 @@ tests and migration work.
 | 004 | Voice snippets (old local-only draft) | P1 | M | 011 | REJECTED (superseded by Plan 012's protected local-first design) |
 | 005 | On-device LLM "polish" pass — feasibility SPIKE | P1 | L | — | DONE (spike GO; Phase 3 off-by-default app wiring landed, `llm_polish_enabled` defaults false) |
 | 006 | Live transcription history (dashboard + History page) | P1 | M | — | DONE (2026-07-06: full-text records, 200-cap, live refresh event, History page un-dead-ended, retention getter, record dedupe) |
-| 011 | Dictionary integrity + local-first cloud sync | P1 | L | — | DONE |
-| 012 | Protected, local-first voice snippets | P1 | L | 011 | IN PROGRESS (implementation complete; desktop smoke test pending) |
+| 011 | Dictionary integrity + local-first cloud sync | P1 | L | — | DONE (shipped 0.5.6) |
+| 012 | Protected, local-first voice snippets | P1 | L | 011 | SHIPPED 0.5.6 — implementation complete and gated on 319 Rust + 67 frontend tests; the Step 9 desktop smoke test (7 checks) was consciously deferred past release, not passed. Run it and record the outcome before marking DONE. |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 

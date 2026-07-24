@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.6] – 2026-07-24
+
+### Added
+
+- **Voice snippets.** Say a phrase you choose — "my support reply", "my work
+  address" — and VoiceWave inserts your saved text exactly as you wrote it.
+  Casing, punctuation, line breaks, URLs, and indentation are preserved
+  byte-for-byte. Triggers work on their own or inline inside a longer
+  dictation, and the same trigger can expand more than once in one utterance.
+  Snippets have their own page in the app with search, edit, and delete.
+- **Snippet expansions are never rewritten.** Saved text is protected through
+  deterministic formatting and the on-device AI polish pass, so neither the
+  formatter nor the language model can reword content you own. If a polish
+  result would disturb a protected expansion, VoiceWave discards it and falls
+  back to the deterministic result.
+- Snippets are stored encrypted on your device, work signed out and offline,
+  and replicate across your devices when you are signed in. Limits: 250
+  snippets, 60-character triggers, 4,000-character expansions, 16 expansions
+  per dictation.
+
+### Fixed
+
+- **The personal dictionary now actually affects transcription when you are
+  signed in.** Signed-in accounts were editing a cloud copy of the dictionary
+  while transcription kept reading the local one, so adding, editing, or
+  deleting a term appeared to work in the app without changing a single
+  transcript. The encrypted local dictionary is now the single source of truth
+  in every account state, and the cloud is replication on top of it.
+- **Deleted dictionary terms stay deleted.** Sync previously merged the two
+  sides by union, which resurrected terms you had removed. Deletes now
+  propagate properly across devices.
+- Dictionary and snippet edits save locally first and no longer roll back when
+  a cloud write fails; the app reports sync state separately from whether your
+  edit was saved.
+- Removed a plaintext dictionary backup file that an older migration left on
+  disk. Dictionary contents are encrypted at rest.
+- Unapproved dictionary suggestions no longer influence transcription before
+  you approve them.
+- The on-device polish pass no longer alters or drops recognized proper nouns
+  such as person, place, and company names.
+- Local polish CPU use is bounded to a four-thread ceiling. This was documented
+  under 0.5.5 but landed after that build was cut; it ships here.
+
+---
+
 ## [0.5.5] – 2026-07-11
 
 ### Added
@@ -21,8 +66,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 - Selecting Coding or Writing automatically enables and prepares the local AI
   polish engine. The persisted profile is warmed after launch and after the
   one-time model download, while deterministic formatting remains available.
-- Local polish CPU use is bounded to the same four-thread ceiling used by the
-  profile benchmark.
+- _(Correction: the four-thread polish CPU ceiling was documented here in
+  error. It was committed after the 0.5.5 build was cut and actually shipped in
+  0.5.6.)_
 
 ---
 

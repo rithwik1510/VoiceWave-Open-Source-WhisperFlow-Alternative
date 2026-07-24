@@ -69,6 +69,44 @@ service cloud.firestore {
             && request.resource.data.deletedAtUtcMs >= request.resource.data.updatedAtUtcMs));
     }
 
+    // TRANSITIONAL (added for the 0.5.6 rollout, 2026-07-24) — REMOVE LATER.
+    //
+    // 0.5.6 changed the dictionary record shape: `termNormalized` became
+    // `normalizedTerm`, and `updatedAtUtcMs`/`deletedAtUtcMs` became required
+    // so that deletes can propagate as tombstones. Those shapes are mutually
+    // exclusive under `hasOnly`, so enforcing only the new one would deny
+    // dictionary writes from clients still on 0.5.5 or earlier. On those
+    // builds a signed-in user's dictionary edits went to Firestore *only*
+    // (the split-brain bug 0.5.6 fixes), so a denied write means the term is
+    // not saved anywhere.
+    //
+    // This validator accepts the legacy shape so both versions keep working
+    // during rollout. 0.5.6+ clients never write it: `dictionarySync.ts`
+    // recomputes identity for legacy rows, writes the deterministic record,
+    // and then deletes the legacy document.
+    //
+    // Removal: once auto-update adoption of 0.5.6+ is effectively complete,
+    // delete this function and drop the `|| isLegacyDictionaryTerm()` branch
+    // from the /dictionaryTerms rule below. Nothing else depends on it.
+    function isLegacyDictionaryTerm() {
+      return request.resource.data.keys().hasOnly([
+          'term',
+          'source',
+          'termNormalized',
+          'createdAtUtcMs'
+        ])
+        && request.resource.data.term is string
+        && request.resource.data.term.size() >= 1
+        && request.resource.data.term.size() <= 72
+        && request.resource.data.source is string
+        && request.resource.data.source.size() >= 1
+        && request.resource.data.source.size() <= 40
+        && request.resource.data.termNormalized is string
+        && request.resource.data.termNormalized.size() >= 1
+        && request.resource.data.termNormalized.size() <= 72
+        && isReasonableTimestamp(request.resource.data.createdAtUtcMs);
+    }
+
     function isValidVoiceSnippet() {
       return request.resource.data.keys().hasOnly([
           'trigger',
@@ -112,7 +150,10 @@ service cloud.firestore {
 
       match /dictionaryTerms/{termId} {
         allow read: if isSignedInOwner(userId);
-        allow create, update: if isSignedInOwner(userId) && isValidDictionaryTerm();
+        // The legacy branch is transitional for the 0.5.6 rollout — see the
+        // removal note on isLegacyDictionaryTerm() above.
+        allow create, update: if isSignedInOwner(userId)
+          && (isValidDictionaryTerm() || isLegacyDictionaryTerm());
         allow delete: if isSignedInOwner(userId);
       }
 

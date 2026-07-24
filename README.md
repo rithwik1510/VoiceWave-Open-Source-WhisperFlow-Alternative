@@ -61,6 +61,29 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.5.6
+
+**Voice snippets**
+
+1. Say a phrase you choose and VoiceWave inserts your saved text exactly as you
+   wrote it — casing, punctuation, line breaks, and URLs preserved
+   byte-for-byte. Triggers work standalone or inline, and repeat within one
+   dictation.
+1. Saved expansions are protected through deterministic formatting and the
+   on-device polish pass, so neither the formatter nor the language model can
+   reword content you own.
+1. Encrypted on device, works signed out and offline, replicates across your
+   devices when signed in. Own page in the app with search, edit, and delete.
+
+**The personal dictionary works when signed in**
+
+1. Signed-in accounts were editing a cloud copy while transcription kept
+   reading the local one, so dictionary changes never reached a transcript.
+   The encrypted local dictionary is now the single source of truth in every
+   account state.
+1. Deleted terms stay deleted across devices instead of being resurrected by
+   union merging, and edits save locally first regardless of cloud state.
+
 ## What's New in 0.5.5
 
 **Mode-aware polish profiles**
@@ -71,9 +94,10 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 1. Literal never calls the language model and keeps fillers and repeated words;
    Standard preserves immediate insertion and can offer an optional polished
    version afterward.
-1. Selecting an AI-shaped profile prepares the local model automatically. The
-   active profile is warmed after launch, and production CPU use is capped to
-   match the four-thread benchmark.
+1. Selecting an AI-shaped profile prepares the local model automatically, and
+   the active profile is warmed after launch. (The four-thread production CPU
+   cap was listed here in error — it landed after this build was cut and ships
+   in 0.5.6.)
 
 ## What's New in 0.5.0
 
