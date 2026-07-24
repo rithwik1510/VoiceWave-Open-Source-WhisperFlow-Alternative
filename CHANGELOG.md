@@ -27,26 +27,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ### Fixed
 
-- **The personal dictionary now actually affects transcription when you are
-  signed in.** Signed-in accounts were editing a cloud copy of the dictionary
-  while transcription kept reading the local one, so adding, editing, or
-  deleting a term appeared to work in the app without changing a single
-  transcript. The encrypted local dictionary is now the single source of truth
-  in every account state, and the cloud is replication on top of it.
-- **Deleted dictionary terms stay deleted.** Sync previously merged the two
-  sides by union, which resurrected terms you had removed. Deletes now
-  propagate properly across devices.
-- Dictionary and snippet edits save locally first and no longer roll back when
-  a cloud write fails; the app reports sync state separately from whether your
-  edit was saved.
-- Removed a plaintext dictionary backup file that an older migration left on
-  disk. Dictionary contents are encrypted at rest.
-- Unapproved dictionary suggestions no longer influence transcription before
-  you approve them.
+- **Removed a plaintext dictionary backup file** that an older migration left
+  behind on disk. Your dictionary is encrypted at rest, and that stray copy no
+  longer exists.
+- **Unapproved dictionary suggestions no longer influence transcription.**
+  Terms waiting in the review queue were being fed to the recognizer before you
+  approved them. Only approved terms are used now.
 - The on-device polish pass no longer alters or drops recognized proper nouns
   such as person, place, and company names.
 - Local polish CPU use is bounded to a four-thread ceiling. This was documented
   under 0.5.5 but landed after that build was cut; it ships here.
+
+### Changed
+
+- **Dictionary storage was rebuilt to be local-first.** The encrypted on-device
+  dictionary is now the single source of truth in every account state, with
+  optional cloud storage acting purely as replication on top of it — including
+  tombstoned deletes that propagate instead of resurrecting, and local writes
+  that never roll back when a remote write fails.
+
+  This is groundwork, not a change you will notice today: cloud sync ships
+  disabled in release builds, so every install already used the local
+  dictionary. It removes a latent split-brain design that would have caused
+  dictionary edits to silently miss transcription once sync is switched on.
 
 ---
 

@@ -75,14 +75,16 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 1. Encrypted on device, works signed out and offline, replicates across your
    devices when signed in. Own page in the app with search, edit, and delete.
 
-**The personal dictionary works when signed in**
+**Dictionary fixes and local-first storage**
 
-1. Signed-in accounts were editing a cloud copy while transcription kept
-   reading the local one, so dictionary changes never reached a transcript.
-   The encrypted local dictionary is now the single source of truth in every
-   account state.
-1. Deleted terms stay deleted across devices instead of being resurrected by
-   union merging, and edits save locally first regardless of cloud state.
+1. Removed a plaintext dictionary backup file left on disk by an older
+   migration, and stopped unapproved suggestions from influencing
+   transcription before you approve them.
+1. Dictionary storage was rebuilt so the encrypted on-device store is the
+   single source of truth in every account state, with optional cloud storage
+   as replication on top — tombstoned deletes that propagate, and local writes
+   that never roll back on a remote failure. Groundwork rather than a
+   user-visible change: cloud sync ships disabled in release builds.
 
 ## What's New in 0.5.5
 
