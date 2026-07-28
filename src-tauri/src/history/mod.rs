@@ -1,3 +1,4 @@
+use crate::atomic_file::{self, StoreLoad};
 use crate::insertion::{InsertResult, InsertionMethod};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
@@ -8,7 +9,6 @@ use directories::ProjectDirs;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -559,28 +559,43 @@ impl HistoryManager {
         Ok(())
     }
 
+    /// Loads stored sessions, resetting rather than erroring on bad bytes.
+    ///
+    /// Losing dictation history to an unclean shutdown is a real cost, but it
+    /// is a far smaller one than an app that refuses to start.
     fn load(&mut self) -> Result<(), HistoryError> {
-        if !self.path.exists() {
-            return Ok(());
+        let key = self.key;
+        let outcome =
+            atomic_file::load_with_recovery(&self.path, "history", |raw| decode_store(raw, &key));
+        match outcome {
+            StoreLoad::Missing => {}
+            StoreLoad::Loaded((store, was_plaintext))
+            | StoreLoad::Recovered((store, was_plaintext)) => {
+                self.store = store;
+                if was_plaintext {
+                    self.log_failed_rewrite(self.persist());
+                }
+            }
+            StoreLoad::Reset => {
+                self.store = HistoryStore::default();
+                self.log_failed_rewrite(self.persist());
+            }
         }
-        let raw = fs::read_to_string(&self.path).map_err(HistoryError::Read)?;
-        if let Ok(encrypted) = serde_json::from_str::<EncryptedHistoryStore>(&raw) {
-            self.store = decrypt_history_store(&encrypted, &self.key)?;
-            return Ok(());
-        }
-
-        self.store = serde_json::from_str(&raw).map_err(HistoryError::Parse)?;
-        self.persist()?;
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), HistoryError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(HistoryError::Write)?;
+    /// Every rewrite on the load path is best effort: the in-memory store is
+    /// already correct, so a disk problem is worth a log line and nothing more.
+    fn log_failed_rewrite(&self, result: Result<(), HistoryError>) {
+        if let Err(error) = result {
+            eprintln!("voicewave: could not rewrite the history store: {error}");
         }
+    }
+
+    fn persist(&self) -> Result<(), HistoryError> {
         let encrypted = encrypt_history_store(&self.store, &self.key)?;
         let raw = serde_json::to_string_pretty(&encrypted).map_err(HistoryError::Parse)?;
-        fs::write(&self.path, raw).map_err(HistoryError::Write)?;
+        atomic_file::atomic_write(&self.path, raw.as_bytes()).map_err(HistoryError::Write)?;
         Ok(())
     }
 }
@@ -614,30 +629,20 @@ fn now_utc_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], HistoryError> {
-    if path.exists() {
-        let encoded = fs::read_to_string(path).map_err(HistoryError::Read)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .map_err(|err| HistoryError::KeyDecode(err.to_string()))?;
-        if bytes.len() != 32 {
-            return Err(HistoryError::KeyDecode(
-                "history.key must decode to 32 bytes".to_string(),
-            ));
-        }
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(&bytes);
-        return Ok(key);
+/// Decodes either the encrypted envelope or a legacy plaintext store. The
+/// `bool` reports whether the payload was plaintext and must be rewritten
+/// encrypted.
+fn decode_store(raw: &str, key: &[u8; 32]) -> Result<(HistoryStore, bool), HistoryError> {
+    if let Ok(encrypted) = serde_json::from_str::<EncryptedHistoryStore>(raw) {
+        return Ok((decrypt_history_store(&encrypted, key)?, false));
     }
+    let store = serde_json::from_str(raw).map_err(HistoryError::Parse)?;
+    Ok((store, true))
+}
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(HistoryError::Write)?;
-    }
-    let mut key = [0_u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
-    fs::write(path, encoded).map_err(HistoryError::Write)?;
-    Ok(key)
+fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], HistoryError> {
+    crate::secure_store::load_or_create_key(path, "history")
+        .map_err(|error| HistoryError::KeyDecode(error.to_string()))
 }
 
 fn encrypt_history_store(
@@ -695,6 +700,40 @@ fn decrypt_history_store(
 mod tests {
     use super::*;
 
+    /// Losing history to an unclean shutdown is a real cost; refusing to
+    /// launch because of it is a much bigger one.
+    #[test]
+    fn corrupt_store_loads_defaults_instead_of_failing() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 299], false),
+            (
+                "truncated",
+                br#"{"version":1,"nonceB64":"AAAA"#.to_vec(),
+                true,
+            ),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("voicewave-history-corrupt-{case}-{}", now_utc_ms()));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let path = dir.join("history.json");
+            std::fs::write(&path, &payload).expect("seed corrupt store");
+
+            let manager = HistoryManager::from_paths(&path, dir.join("history.key"))
+                .expect("a corrupt history store must not stop the app");
+            assert!(manager.store.records.is_empty(), "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn retention_off_drops_records() {
         let key_path = std::env::temp_dir().join("voicewave-history-test.key");
@@ -747,7 +786,7 @@ mod tests {
             .record_transcript("secret phrase should not be plaintext")
             .expect("persist encrypted");
 
-        let raw = fs::read_to_string(temp).expect("read persisted history");
+        let raw = std::fs::read_to_string(temp).expect("read persisted history");
         assert!(!raw.contains("secret phrase should not be plaintext"));
         assert!(raw.contains("ciphertextB64"));
     }

@@ -8,10 +8,11 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use crate::atomic_file::{self, StoreLoad};
 
 const DEFAULT_CHECKOUT_URL: &str = "";
 const DEFAULT_PORTAL_URL: &str = "";
@@ -255,28 +256,45 @@ impl BillingManager {
         }
     }
 
+    /// Loads the entitlement cache, never failing over bad bytes.
+    ///
+    /// Billing state is a local cache of a remote fact, so a store that cannot
+    /// be read is worth exactly one log line and a reset — propagating the
+    /// error out of the constructor panicked Tauri's setup hook and left the
+    /// user with an app that would not launch at all.
     fn load(&mut self) -> Result<(), BillingError> {
-        if !self.path.exists() {
-            return Ok(());
+        let key = self.key;
+        let outcome =
+            atomic_file::load_with_recovery(&self.path, "billing", |raw| decode_store(raw, &key));
+        match outcome {
+            StoreLoad::Missing => {}
+            StoreLoad::Loaded((store, was_plaintext))
+            | StoreLoad::Recovered((store, was_plaintext)) => {
+                self.store = store;
+                if was_plaintext {
+                    self.log_failed_rewrite(self.persist());
+                }
+            }
+            StoreLoad::Reset => {
+                self.store = BillingStore::default();
+                self.log_failed_rewrite(self.persist());
+            }
         }
-        let raw = fs::read_to_string(&self.path).map_err(BillingError::Read)?;
-        if let Ok(encrypted) = serde_json::from_str::<EncryptedBillingStore>(&raw) {
-            self.store = decrypt_billing_store(&encrypted, &self.key)?;
-            return Ok(());
-        }
-
-        self.store = serde_json::from_str(&raw).map_err(BillingError::Parse)?;
-        self.persist()?;
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), BillingError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(BillingError::Write)?;
+    /// Every rewrite on the load path is best effort: the in-memory store is
+    /// already correct, so a disk problem is worth a log line and nothing more.
+    fn log_failed_rewrite(&self, result: Result<(), BillingError>) {
+        if let Err(error) = result {
+            eprintln!("voicewave: could not rewrite the billing store: {error}");
         }
+    }
+
+    fn persist(&self) -> Result<(), BillingError> {
         let encrypted = encrypt_billing_store(&self.store, &self.key)?;
         let raw = serde_json::to_string_pretty(&encrypted).map_err(BillingError::Parse)?;
-        fs::write(&self.path, raw).map_err(BillingError::Write)?;
+        atomic_file::atomic_write(&self.path, raw.as_bytes()).map_err(BillingError::Write)?;
         Ok(())
     }
 }
@@ -300,30 +318,20 @@ fn sha256_hex(input: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], BillingError> {
-    if path.exists() {
-        let encoded = fs::read_to_string(path).map_err(BillingError::Read)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .map_err(|err| BillingError::KeyDecode(err.to_string()))?;
-        if bytes.len() != 32 {
-            return Err(BillingError::KeyDecode(
-                "billing.key must decode to 32 bytes".to_string(),
-            ));
-        }
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(&bytes);
-        return Ok(key);
+/// Decodes either the encrypted envelope or a legacy plaintext store. The
+/// `bool` reports whether the payload was plaintext and therefore needs to be
+/// rewritten in encrypted form.
+fn decode_store(raw: &str, key: &[u8; 32]) -> Result<(BillingStore, bool), BillingError> {
+    if let Ok(encrypted) = serde_json::from_str::<EncryptedBillingStore>(raw) {
+        return Ok((decrypt_billing_store(&encrypted, key)?, false));
     }
+    let store = serde_json::from_str(raw).map_err(BillingError::Parse)?;
+    Ok((store, true))
+}
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(BillingError::Write)?;
-    }
-    let mut key = [0_u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
-    fs::write(path, encoded).map_err(BillingError::Write)?;
-    Ok(key)
+fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], BillingError> {
+    crate::secure_store::load_or_create_key(path, "billing")
+        .map_err(|error| BillingError::KeyDecode(error.to_string()))
 }
 
 fn encrypt_billing_store(
@@ -387,6 +395,42 @@ fn now_utc_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that cannot be parsed must cost the cached entitlement, never
+    /// the launch: a 299-byte zero-filled billing.json (the NTFS
+    /// unclean-shutdown signature) used to panic Tauri's setup hook.
+    #[test]
+    fn corrupt_store_loads_defaults_instead_of_failing() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 299], false),
+            (
+                "truncated",
+                br#"{"version":1,"nonceB64":"AAAA"#.to_vec(),
+                true,
+            ),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("voicewave-billing-corrupt-{case}-{}", now_utc_ms()));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let path = dir.join("billing.json");
+            std::fs::write(&path, &payload).expect("seed corrupt store");
+
+            let manager = BillingManager::from_paths(&path, dir.join("billing.key"))
+                .expect("a corrupt billing store must not stop the app");
+            assert!(!manager.store.owner_override_enabled, "{case}");
+            assert_eq!(manager.store.last_refreshed_at_utc_ms, 0, "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 
     #[test]
     fn owner_override_forces_pro_snapshot() {

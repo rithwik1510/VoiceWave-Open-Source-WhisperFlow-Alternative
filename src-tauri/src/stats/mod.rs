@@ -8,13 +8,13 @@
 //! the end of every dictation. On first run it backfills itself from whatever
 //! diagnostics records exist so the dashboard opens with real history.
 
+use crate::atomic_file::{self, StoreLoad};
 use crate::diagnostics::LatencyMetricRecord;
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -132,11 +132,14 @@ impl StatsManager {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if !path.exists() {
-            return Ok(());
+        // Stats are derived rollups: a corrupt file costs a lifetime counter,
+        // never the launch. `load_with_recovery` also quarantines the bad copy.
+        match atomic_file::load_with_recovery(path, "stats", |raw| {
+            serde_json::from_str::<StatsStore>(raw)
+        }) {
+            StoreLoad::Loaded(store) | StoreLoad::Recovered(store) => self.store = store,
+            StoreLoad::Missing | StoreLoad::Reset => self.store = StatsStore::default(),
         }
-        let raw = fs::read_to_string(path).map_err(StatsError::Read)?;
-        self.store = serde_json::from_str(&raw).map_err(StatsError::Parse)?;
         Ok(())
     }
 
@@ -144,11 +147,8 @@ impl StatsManager {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(StatsError::Write)?;
-        }
         let raw = serde_json::to_string(&self.store).map_err(StatsError::Parse)?;
-        fs::write(path, raw).map_err(StatsError::Write)
+        atomic_file::atomic_write(path, raw.as_bytes()).map_err(StatsError::Write)
     }
 
     pub fn backfilled(&self) -> bool {
@@ -323,6 +323,39 @@ mod tests {
             .timestamp_millis() as u64
     }
 
+    /// Stats already degraded gracefully at the call site; this makes the
+    /// store itself recover so it does not have to.
+    #[test]
+    fn corrupt_store_loads_defaults_instead_of_failing() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 299], false),
+            ("truncated", br#"{"days":{"2026-07-06""#.to_vec(), true),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "voicewave-stats-corrupt-{case}-{}-{seq}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let path = dir.join("stats.json");
+            std::fs::write(&path, &payload).expect("seed corrupt store");
+
+            let manager = StatsManager::from_path(&path)
+                .expect("a corrupt stats store must not stop the app");
+            assert_eq!(manager.summary().all_time_words, 0, "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn gates_reject_empty_and_too_short_dictations() {
         let mut stats = StatsManager::in_memory();
@@ -405,7 +438,7 @@ mod tests {
         let stats = StatsManager::from_path(&path).expect("reload");
         assert!(stats.backfilled());
         assert_eq!(stats.summary_for_today(today).all_time_words, 60);
-        let _ = fs::remove_file(path);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -422,7 +455,7 @@ mod tests {
         let summary = stats.summary_for_today(today);
         assert_eq!(summary.all_time_words, 25);
         assert_eq!(summary.all_time_dictations, 1);
-        let _ = fs::remove_file(path);
+        let _ = std::fs::remove_file(path);
     }
 
     /// Minimal valid LatencyMetricRecord for struct-update syntax in tests

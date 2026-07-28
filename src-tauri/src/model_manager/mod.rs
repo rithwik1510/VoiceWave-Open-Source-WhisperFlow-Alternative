@@ -1,3 +1,4 @@
+use crate::atomic_file;
 use base64::Engine;
 use directories::ProjectDirs;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -823,16 +824,29 @@ impl ModelManager {
     }
 
     fn load_installed(&mut self) -> Result<(), ModelError> {
-        if !self.installed_index_path.exists() {
-            return Ok(());
-        }
-        let raw = fs::read_to_string(&self.installed_index_path).map_err(ModelError::Read)?;
+        // `read_to_string_recovering` finishes an interrupted replace and
+        // reports a zero-filled file as absent — a plain `trim()` does not,
+        // because Rust never classifies `\0` as whitespace.
+        let raw = match atomic_file::read_to_string_recovering(&self.installed_index_path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                if !self.installed_index_path.exists() {
+                    return Ok(());
+                }
+                self.installed.clear();
+                self.persist_installed()?;
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!(
+                    "voicewave: failed to read the installed model index at '{}': {}",
+                    self.installed_index_path.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
         let normalized = raw.trim_start_matches('\u{feff}').trim();
-        if normalized.is_empty() {
-            self.installed.clear();
-            self.persist_installed()?;
-            return Ok(());
-        }
         let decoded = serde_json::from_str::<InstalledModelStore>(normalized).or_else(|_| {
             serde_json::from_str::<Vec<InstalledModel>>(normalized)
                 .map(|installed| InstalledModelStore { installed })
@@ -915,28 +929,36 @@ impl ModelManager {
     }
 
     fn persist_installed(&self) -> Result<(), ModelError> {
-        if let Some(parent) = self.installed_index_path.parent() {
-            fs::create_dir_all(parent).map_err(ModelError::Write)?;
-        }
         let payload = InstalledModelStore {
             installed: self.list_installed(),
         };
         let encoded = serde_json::to_string_pretty(&payload).map_err(ModelError::Parse)?;
-        fs::write(&self.installed_index_path, encoded).map_err(ModelError::Write)?;
+        atomic_file::atomic_write(&self.installed_index_path, encoded.as_bytes())
+            .map_err(ModelError::Write)?;
         Ok(())
     }
 
     fn load_downloads(&mut self) -> Result<(), ModelError> {
-        if !self.download_state_path.exists() {
-            return Ok(());
-        }
-        let raw = fs::read_to_string(&self.download_state_path).map_err(ModelError::Read)?;
+        let raw = match atomic_file::read_to_string_recovering(&self.download_state_path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                if !self.download_state_path.exists() {
+                    return Ok(());
+                }
+                self.downloads.clear();
+                self.persist_downloads()?;
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!(
+                    "voicewave: failed to read the model download checkpoints at '{}': {}",
+                    self.download_state_path.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
         let normalized = raw.trim_start_matches('\u{feff}').trim();
-        if normalized.is_empty() {
-            self.downloads.clear();
-            self.persist_downloads()?;
-            return Ok(());
-        }
         let decoded = serde_json::from_str::<DownloadCheckpointStore>(normalized).or_else(|_| {
             serde_json::from_str::<Vec<DownloadCheckpoint>>(normalized)
                 .map(|downloads| DownloadCheckpointStore { downloads })
@@ -964,15 +986,12 @@ impl ModelManager {
     }
 
     fn persist_downloads(&self) -> Result<(), ModelError> {
-        if let Some(parent) = self.download_state_path.parent() {
-            fs::create_dir_all(parent).map_err(ModelError::Write)?;
-        }
-
         let payload = DownloadCheckpointStore {
             downloads: self.downloads.values().cloned().collect(),
         };
         let encoded = serde_json::to_string_pretty(&payload).map_err(ModelError::Parse)?;
-        fs::write(&self.download_state_path, encoded).map_err(ModelError::Write)?;
+        atomic_file::atomic_write(&self.download_state_path, encoded.as_bytes())
+            .map_err(ModelError::Write)?;
         Ok(())
     }
 
@@ -1842,6 +1861,24 @@ mod tests {
             rewritten.contains("\"installed\""),
             "installed metadata should be rewritten with default structure"
         );
+    }
+
+    /// A zero-filled index is the unclean-shutdown signature; `trim()` alone
+    /// would let those NUL bytes through to serde.
+    #[test]
+    fn load_installed_recovers_from_zero_filled_file() {
+        let root = test_root("zero-filled-installed-index");
+        let mut manager = ModelManager::with_test_paths(&root).expect("manager");
+        fs::write(&manager.installed_index_path, vec![0_u8; 299]).expect("seed zero-filled index");
+
+        manager
+            .load_installed()
+            .expect("zero-filled installed metadata should recover");
+        assert!(manager.installed.is_empty());
+
+        let rewritten =
+            fs::read_to_string(&manager.installed_index_path).expect("rewritten metadata");
+        assert!(rewritten.contains("\"installed\""));
     }
 
     #[test]

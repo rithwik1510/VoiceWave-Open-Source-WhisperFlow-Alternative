@@ -229,6 +229,38 @@ fn emit_pill_action_notice(
     );
 }
 
+/// Tells the user once per launch that a store had to be reset after an
+/// unclean shutdown.
+///
+/// Recovery itself already happened while the controller was built; this is
+/// only the explanation for why something looks different. The emit is delayed
+/// because the pill's webview registers its `voicewave://pill-notice` listener
+/// after the setup hook returns — an immediate emit would land before anything
+/// is listening. The stderr line is the guaranteed record; the pill is a
+/// best-effort courtesy.
+pub fn announce_store_resets(app: &AppHandle) {
+    let labels = crate::atomic_file::take_store_resets();
+    if labels.is_empty() {
+        return;
+    }
+    eprintln!(
+        "voicewave: reset to defaults after unreadable data: {}",
+        labels.join(", ")
+    );
+    let handle = app.clone();
+    let detail = format!("Affected: {}.", labels.join(", "));
+    tauri::async_runtime::spawn(async move {
+        sleep(Duration::from_secs(4)).await;
+        emit_pill_notice(
+            &handle,
+            "warning",
+            "Some settings were reset after an unclean shutdown.",
+            Some(detail),
+            8_000,
+        );
+    });
+}
+
 /// Cooldown between repeats of the same recurring pill warning (mic guard,
 /// CPU fallback, poor audio) so a persistent condition doesn't nag on every
 /// single dictation.

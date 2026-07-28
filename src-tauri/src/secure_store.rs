@@ -5,7 +5,7 @@ use aes_gcm::{
 use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::path::Path;
 
 const ENVELOPE_VERSION: u8 = 1;
 const KEY_BYTES: usize = 32;
@@ -21,12 +21,6 @@ pub(crate) struct EncryptedEnvelope {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SecureStoreError {
-    #[error("failed to read {label}: {source}")]
-    Read {
-        label: String,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("failed to write {label}: {source}")]
     Write {
         label: String,
@@ -47,46 +41,64 @@ pub(crate) enum SecureStoreError {
     KeyDecode { label: String, message: String },
 }
 
+/// Loads the key at `path`, regenerating it when the file is missing or
+/// unreadable.
+///
+/// A key file can be zero-filled by the same interrupted-write mechanism that
+/// corrupts stores. Refusing to launch over it is the worst possible outcome:
+/// a fresh key means the encrypted store no longer decrypts, and the store's
+/// own recovery path then quarantines it and starts from defaults. Losing a
+/// local cache beats an app that cannot start.
 pub(crate) fn load_or_create_key(
     path: &Path,
     label: &str,
 ) -> Result<[u8; KEY_BYTES], SecureStoreError> {
-    if path.exists() {
-        let encoded = fs::read_to_string(path).map_err(|source| SecureStoreError::Read {
-            label: label.to_string(),
-            source,
-        })?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .map_err(|error| SecureStoreError::KeyDecode {
-                label: label.to_string(),
-                message: error.to_string(),
-            })?;
-        if bytes.len() != KEY_BYTES {
-            return Err(SecureStoreError::KeyDecode {
-                label: label.to_string(),
-                message: format!("{label}.key must decode to {KEY_BYTES} bytes"),
-            });
+    let stored = crate::atomic_file::read_to_string_recovering(path).unwrap_or_else(|error| {
+        eprintln!("voicewave: failed to read the {label} key, regenerating: {error}");
+        None
+    });
+
+    if let Some(encoded) = stored {
+        match decode_key(&encoded, label) {
+            Ok(key) => return Ok(key),
+            Err(error) => {
+                eprintln!("voicewave: {label} key is unusable, regenerating: {error}");
+                if let Err(error) = crate::atomic_file::quarantine_corrupt(path) {
+                    eprintln!("voicewave: could not quarantine the {label} key: {error}");
+                }
+                crate::atomic_file::note_store_reset(label);
+            }
         }
-
-        let mut key = [0_u8; KEY_BYTES];
-        key.copy_from_slice(&bytes);
-        return Ok(key);
     }
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| SecureStoreError::Write {
-            label: label.to_string(),
-            source,
-        })?;
-    }
     let mut key = [0_u8; KEY_BYTES];
     OsRng.fill_bytes(&mut key);
     let encoded = base64::engine::general_purpose::STANDARD.encode(key);
-    fs::write(path, encoded).map_err(|source| SecureStoreError::Write {
-        label: label.to_string(),
-        source,
+    crate::atomic_file::atomic_write(path, encoded.as_bytes()).map_err(|source| {
+        SecureStoreError::Write {
+            label: label.to_string(),
+            source,
+        }
     })?;
+    Ok(key)
+}
+
+fn decode_key(encoded: &str, label: &str) -> Result<[u8; KEY_BYTES], SecureStoreError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim().trim_matches('\0').trim())
+        .map_err(|error| SecureStoreError::KeyDecode {
+            label: label.to_string(),
+            message: error.to_string(),
+        })?;
+    if bytes.len() != KEY_BYTES {
+        return Err(SecureStoreError::KeyDecode {
+            label: label.to_string(),
+            message: format!("{label}.key must decode to {KEY_BYTES} bytes"),
+        });
+    }
+
+    let mut key = [0_u8; KEY_BYTES];
+    key.copy_from_slice(&bytes);
     Ok(key)
 }
 

@@ -1,3 +1,4 @@
+use crate::atomic_file::{self, StoreLoad};
 use crate::settings::{DecodeMode, VoiceWaveSettings};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
@@ -369,7 +370,8 @@ impl DiagnosticsManager {
                 .collect(),
         };
         let encoded = serde_json::to_string_pretty(&bundle).map_err(DiagnosticsError::Parse)?;
-        fs::write(&file_path, encoded).map_err(DiagnosticsError::Write)?;
+        atomic_file::atomic_write(&file_path, encoded.as_bytes())
+            .map_err(DiagnosticsError::Write)?;
 
         self.store.last_export_path = Some(file_path.to_string_lossy().to_string());
         self.store.last_exported_at_utc_ms = Some(exported_at);
@@ -383,38 +385,61 @@ impl DiagnosticsManager {
         })
     }
 
+    /// Loads the metrics store, resetting rather than erroring on bad bytes.
+    /// Diagnostics are pure telemetry; they must never be able to stop the app
+    /// from starting.
     fn load(&mut self) -> Result<(), DiagnosticsError> {
-        if !self.store_path.exists() {
-            return Ok(());
+        let key = self.key;
+        let outcome = atomic_file::load_with_recovery(&self.store_path, "diagnostics", |raw| {
+            decode_store(raw, &key)
+        });
+        match outcome {
+            StoreLoad::Missing => {}
+            StoreLoad::Loaded((store, was_plaintext))
+            | StoreLoad::Recovered((store, was_plaintext)) => {
+                self.store = store;
+                if was_plaintext {
+                    self.log_failed_rewrite(
+                        backup_legacy_plaintext(&self.store_path).and_then(|()| self.persist()),
+                    );
+                }
+            }
+            StoreLoad::Reset => {
+                self.store = DiagnosticsStore::default();
+                self.log_failed_rewrite(self.persist());
+            }
         }
-        let raw = fs::read_to_string(&self.store_path).map_err(DiagnosticsError::Read)?;
-        if let Ok(encrypted) = serde_json::from_str::<EncryptedDiagnosticsStore>(&raw) {
-            self.store = decrypt_diagnostics_store(&encrypted, &self.key)?;
-            return Ok(());
-        }
-
-        self.store = serde_json::from_str(&raw).map_err(DiagnosticsError::Parse)?;
-        backup_legacy_plaintext(&self.store_path)?;
-        self.persist()?;
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), DiagnosticsError> {
-        if let Some(parent) = self.store_path.parent() {
-            fs::create_dir_all(parent).map_err(DiagnosticsError::Write)?;
+    /// Every rewrite on the load path is best effort: the in-memory store is
+    /// already correct, so a disk problem is worth a log line and nothing more.
+    fn log_failed_rewrite(&self, result: Result<(), DiagnosticsError>) {
+        if let Err(error) = result {
+            eprintln!("voicewave: could not rewrite the diagnostics store: {error}");
         }
+    }
+
+    fn persist(&self) -> Result<(), DiagnosticsError> {
         let encrypted = encrypt_diagnostics_store(&self.store, &self.key)?;
         let raw = serde_json::to_string_pretty(&encrypted).map_err(DiagnosticsError::Parse)?;
-        fs::write(&self.store_path, raw).map_err(DiagnosticsError::Write)?;
+        atomic_file::atomic_write(&self.store_path, raw.as_bytes())
+            .map_err(DiagnosticsError::Write)?;
         Ok(())
     }
 }
 
+/// Keeps a copy of the pre-encryption store during the plaintext migration.
+///
+/// The suffix is deliberately not `.bak`: that sibling now belongs to
+/// [`atomic_file::atomic_write`], which deletes it after every successful
+/// replace, so a migration snapshot parked there would not survive the very
+/// next persist.
 fn backup_legacy_plaintext(path: &Path) -> Result<(), DiagnosticsError> {
     if !path.exists() {
         return Ok(());
     }
-    let backup_path = path.with_extension("json.bak");
+    let backup_path = atomic_file::sibling_with_suffix(path, ".legacy-plaintext");
     if backup_path.exists() {
         return Ok(());
     }
@@ -422,30 +447,19 @@ fn backup_legacy_plaintext(path: &Path) -> Result<(), DiagnosticsError> {
     Ok(())
 }
 
-fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], DiagnosticsError> {
-    if path.exists() {
-        let encoded = fs::read_to_string(path).map_err(DiagnosticsError::Read)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .map_err(|err| DiagnosticsError::KeyDecode(err.to_string()))?;
-        if bytes.len() != 32 {
-            return Err(DiagnosticsError::KeyDecode(
-                "diagnostics.key must decode to 32 bytes".to_string(),
-            ));
-        }
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(&bytes);
-        return Ok(key);
+/// Decodes either the encrypted envelope or a legacy plaintext store. The
+/// `bool` reports whether the payload was plaintext and must be migrated.
+fn decode_store(raw: &str, key: &[u8; 32]) -> Result<(DiagnosticsStore, bool), DiagnosticsError> {
+    if let Ok(encrypted) = serde_json::from_str::<EncryptedDiagnosticsStore>(raw) {
+        return Ok((decrypt_diagnostics_store(&encrypted, key)?, false));
     }
+    let store = serde_json::from_str(raw).map_err(DiagnosticsError::Parse)?;
+    Ok((store, true))
+}
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(DiagnosticsError::Write)?;
-    }
-    let mut key = [0_u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
-    fs::write(path, encoded).map_err(DiagnosticsError::Write)?;
-    Ok(key)
+fn load_or_create_key(path: &PathBuf) -> Result<[u8; 32], DiagnosticsError> {
+    crate::secure_store::load_or_create_key(path, "diagnostics")
+        .map_err(|error| DiagnosticsError::KeyDecode(error.to_string()))
 }
 
 fn encrypt_diagnostics_store(
@@ -569,6 +583,46 @@ mod tests {
             key,
             export_dir,
             store: DiagnosticsStore::default(),
+        }
+    }
+
+    /// Diagnostics are pure telemetry; a corrupt store must never be able to
+    /// stop the app from starting.
+    #[test]
+    fn corrupt_store_loads_defaults_instead_of_failing() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 299], false),
+            (
+                "truncated",
+                br#"{"version":1,"nonceB64":"AAAA"#.to_vec(),
+                true,
+            ),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "voicewave-diagnostics-corrupt-{case}-{}",
+                now_utc_ms()
+            ));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let store_path = dir.join("diagnostics.json");
+            std::fs::write(&store_path, &payload).expect("seed corrupt store");
+
+            let manager = DiagnosticsManager::from_paths(
+                &store_path,
+                dir.join("diagnostics.key"),
+                dir.join("exports"),
+            )
+            .expect("a corrupt diagnostics store must not stop the app");
+            assert!(manager.store.records.is_empty(), "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 

@@ -15,6 +15,7 @@ pub mod settings;
 pub mod snippet;
 pub mod stats;
 pub mod transcript;
+mod atomic_file;
 mod secure_store;
 
 #[cfg(feature = "desktop")]
@@ -1478,6 +1479,9 @@ pub fn run() {
                 .map_err(|err| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::other(err))
                 })?;
+            // Stores recover silently rather than aborting the launch; this is
+            // the one place that can still tell the user it happened.
+            state::announce_store_resets(&app.handle().clone());
             // Open the cue output stream now so the first hotkey press
             // doesn't pay the audio-device-open latency.
             tauri::async_runtime::spawn_blocking(cue::prewarm);

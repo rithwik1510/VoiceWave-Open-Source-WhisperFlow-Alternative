@@ -1,3 +1,4 @@
+use crate::atomic_file::{self, StoreLoad};
 use crate::secure_store::{decrypt_bytes, encrypt_json, load_or_create_key, EncryptedEnvelope};
 use base64::Engine;
 use directories::ProjectDirs;
@@ -5,7 +6,6 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -171,7 +171,8 @@ impl SnippetManager {
     ) -> Result<Self, SnippetError> {
         let path = path.as_ref().to_path_buf();
         let key_path = key_path.as_ref().to_path_buf();
-        recover_interrupted_replace(&path)?;
+        atomic_file::recover_interrupted_replace(&path)
+            .map_err(|error| SnippetError::Persistence(error.to_string()))?;
         let key = load_or_create_key(&key_path, "snippets")
             .map_err(|error| SnippetError::Persistence(error.to_string()))?;
         let mut manager = Self {
@@ -450,29 +451,23 @@ impl SnippetManager {
         format!("vs-{id}")
     }
 
+    /// Loads snippets, resetting rather than erroring when neither the primary
+    /// nor its backup decodes — a broken store must not stop the app booting.
     fn load(&mut self) -> Result<(), SnippetError> {
-        if !self.path.exists() {
-            return Ok(());
-        }
-        let backup = sibling_with_suffix(&self.path, ".bak");
-        match load_store_from_path(&self.path, &self.key) {
-            Ok(store) => {
-                self.store = store;
-                if backup.exists() {
-                    let _ = fs::remove_file(backup);
-                }
-                Ok(())
-            }
-            Err(_primary_error) if backup.exists() => {
-                let store = load_store_from_path(&backup, &self.key)?;
-                fs::remove_file(&self.path)
-                    .map_err(|error| SnippetError::Persistence(error.to_string()))?;
-                fs::rename(&backup, &self.path)
-                    .map_err(|error| SnippetError::Persistence(error.to_string()))?;
+        let key = self.key;
+        let outcome =
+            atomic_file::load_with_recovery(&self.path, "snippets", |raw| decode_store(raw, &key));
+        match outcome {
+            StoreLoad::Missing => Ok(()),
+            StoreLoad::Loaded(store) | StoreLoad::Recovered(store) => {
                 self.store = store;
                 Ok(())
             }
-            Err(primary_error) => Err(primary_error),
+            StoreLoad::Reset => {
+                self.store = SnippetStore::default();
+                let _ = self.persist();
+                Ok(())
+            }
         }
     }
 
@@ -488,7 +483,8 @@ impl SnippetManager {
         let envelope = encrypt_json(&self.store, &self.key, "snippets")
             .map_err(|error| SnippetError::Persistence(error.to_string()))?;
         let raw = serde_json::to_vec_pretty(&envelope).map_err(SnippetError::Parse)?;
-        atomic_replace(&self.path, &raw)
+        atomic_file::atomic_write(&self.path, &raw)
+            .map_err(|error| SnippetError::Persistence(error.to_string()))
     }
 }
 
@@ -974,70 +970,14 @@ fn now_utc_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-fn recover_interrupted_replace(path: &Path) -> Result<(), SnippetError> {
-    let backup = sibling_with_suffix(path, ".bak");
-    let temporary = sibling_with_suffix(path, ".tmp");
-    if !path.exists() && backup.exists() {
-        fs::rename(&backup, path).map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    }
-    if temporary.exists() {
-        fs::remove_file(temporary).map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    }
-    Ok(())
-}
-
-fn load_store_from_path(path: &Path, key: &[u8; 32]) -> Result<SnippetStore, SnippetError> {
-    let raw =
-        fs::read_to_string(path).map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    let envelope = serde_json::from_str::<EncryptedEnvelope>(&raw).map_err(SnippetError::Parse)?;
+/// Decodes an encrypted snippet payload. Shared by the primary and the `.bak`
+/// attempt inside [`atomic_file::load_with_recovery`].
+fn decode_store(raw: &str, key: &[u8; 32]) -> Result<SnippetStore, SnippetError> {
+    let envelope = serde_json::from_str::<EncryptedEnvelope>(raw).map_err(SnippetError::Parse)?;
     let plaintext = decrypt_bytes(&envelope, key, "snippets")
         .map_err(|error| SnippetError::Persistence(error.to_string()))?;
     let store = serde_json::from_slice::<SnippetStore>(&plaintext).map_err(SnippetError::Parse)?;
     Ok(sanitize_stored_records(store))
-}
-
-fn atomic_replace(path: &Path, contents: &[u8]) -> Result<(), SnippetError> {
-    let parent = path.parent().ok_or_else(|| {
-        SnippetError::Persistence("snippet store has no parent directory".to_string())
-    })?;
-    fs::create_dir_all(parent).map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    let temporary = sibling_with_suffix(path, ".tmp");
-    let backup = sibling_with_suffix(path, ".bak");
-    if temporary.exists() {
-        fs::remove_file(&temporary)
-            .map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    }
-    fs::write(&temporary, contents)
-        .map_err(|error| SnippetError::Persistence(error.to_string()))?;
-
-    let had_existing = path.exists();
-    if had_existing {
-        if backup.exists() {
-            fs::remove_file(&backup)
-                .map_err(|error| SnippetError::Persistence(error.to_string()))?;
-        }
-        fs::rename(path, &backup).map_err(|error| SnippetError::Persistence(error.to_string()))?;
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        if had_existing {
-            let _ = fs::rename(&backup, path);
-        }
-        let _ = fs::remove_file(&temporary);
-        return Err(SnippetError::Persistence(error.to_string()));
-    }
-    if had_existing {
-        // The new primary is already durable. Backup cleanup is best-effort:
-        // reporting failure here would roll memory back while disk has the new
-        // state. Startup recovery removes a leftover backup safely.
-        let _ = fs::remove_file(backup);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1061,6 +1001,40 @@ mod manager_tests {
         }
     }
 
+    /// Snippets already recovered from a `.bak`; this covers the case where
+    /// there is no usable copy at all and the constructor must still succeed.
+    #[test]
+    fn corrupt_store_loads_defaults_instead_of_failing() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 299], false),
+            (
+                "truncated",
+                br#"{"version":1,"nonceB64":"AAAA"#.to_vec(),
+                true,
+            ),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("voicewave-snippet-corrupt-{case}-{}", now_utc_ms()));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let path = dir.join("snippets.json");
+            std::fs::write(&path, &payload).expect("seed corrupt store");
+
+            let manager = SnippetManager::from_paths(&path, dir.join("snippets.key"))
+                .expect("a corrupt snippet store must not stop the app");
+            assert!(manager.list_snippets(None).is_empty(), "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn manager_encrypted_reload_and_literal_validation() {
         let mut store_manager = manager("encrypted-reload");
@@ -1071,7 +1045,7 @@ mod manager_tests {
             .expect("add");
         assert_eq!(saved.normalized_trigger, "my reply");
         assert_eq!(saved.expansion, "Line one\n\tLine TWO");
-        let raw = fs::read_to_string(&path).expect("encrypted file");
+        let raw = std::fs::read_to_string(&path).expect("encrypted file");
         assert!(!raw.contains("Line TWO"));
         assert!(raw.contains("ciphertextB64"));
         drop(store_manager);
@@ -1230,7 +1204,7 @@ mod manager_tests {
         let mut manager = manager("rollback");
         let original_path = manager.path.clone();
         let blocker = original_path.with_extension("blocker");
-        fs::write(&blocker, b"not a directory").expect("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker");
         manager.path = blocker.join("snippets.json");
         assert!(matches!(
             manager.add_snippet("should fail", "value"),
@@ -1337,9 +1311,9 @@ mod manager_tests {
     fn manager_recovers_valid_backup_when_primary_is_corrupt() {
         let mut manager = manager("backup-recovery");
         manager.add_snippet("safe reply", "value").expect("add");
-        let backup = sibling_with_suffix(&manager.path, ".bak");
-        fs::copy(&manager.path, &backup).expect("backup");
-        fs::write(&manager.path, b"not an encrypted envelope").expect("corrupt primary");
+        let backup = atomic_file::sibling_with_suffix(&manager.path, ".bak");
+        std::fs::copy(&manager.path, &backup).expect("backup");
+        std::fs::write(&manager.path, b"not an encrypted envelope").expect("corrupt primary");
 
         let reopened =
             SnippetManager::from_paths(&manager.path, &manager._key_path).expect("recover backup");

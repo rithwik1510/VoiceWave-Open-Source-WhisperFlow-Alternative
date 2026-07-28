@@ -1,5 +1,6 @@
 pub mod profile;
 
+use crate::atomic_file::{self, StoreLoad};
 use crate::audio::input_volume::MicVolumeGuardMode;
 use directories::ProjectDirs;
 pub use profile::{
@@ -8,10 +9,7 @@ pub use profile::{
     InsertPath, PolishProfile, ProfileBundle,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -267,17 +265,21 @@ impl SettingsStore {
         }
     }
 
+    /// Loads settings, falling back to defaults instead of erroring when the
+    /// file on disk is unreadable.
+    ///
+    /// The old `raw.trim().is_empty()` guard looked like it covered a blank
+    /// file, but Rust does not treat `\0` as whitespace — a zero-filled
+    /// settings.json (the NTFS unclean-shutdown signature) walked straight
+    /// into `serde_json` and took the whole app down with it.
     pub fn load(&self) -> Result<VoiceWaveSettings, SettingsError> {
-        if !self.path.exists() {
-            return Ok(VoiceWaveSettings::default());
-        }
-        let raw = fs::read_to_string(&self.path).map_err(SettingsError::Read)?;
-        let normalized = raw.trim_start_matches('\u{feff}').trim();
-        if normalized.is_empty() {
-            return Ok(VoiceWaveSettings::default());
-        }
-        let mut settings: VoiceWaveSettings =
-            serde_json::from_str(normalized).map_err(SettingsError::Parse)?;
+        let outcome = atomic_file::load_with_recovery(&self.path, "settings", |raw| {
+            serde_json::from_str::<VoiceWaveSettings>(raw.trim_start_matches('\u{feff}'))
+        });
+        let mut settings = match outcome {
+            StoreLoad::Loaded(settings) | StoreLoad::Recovered(settings) => settings,
+            StoreLoad::Missing | StoreLoad::Reset => VoiceWaveSettings::default(),
+        };
         settings.active_model = normalize_active_model_id(&settings.active_model);
         normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
@@ -285,11 +287,8 @@ impl SettingsStore {
     }
 
     pub fn save(&self, settings: &VoiceWaveSettings) -> Result<(), SettingsError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(SettingsError::Write)?;
-        }
         let raw = serde_json::to_string_pretty(settings).map_err(SettingsError::Parse)?;
-        fs::write(&self.path, raw).map_err(SettingsError::Write)?;
+        atomic_file::atomic_write(&self.path, raw.as_bytes()).map_err(SettingsError::Write)?;
         Ok(())
     }
 }
@@ -442,6 +441,45 @@ mod tests {
             assert_eq!(loaded.active_model, expected, "migration for {raw_model}");
 
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// `raw.trim()` never treated `\0` as whitespace, so a zero-filled
+    /// settings.json walked past the blank-file guard into serde and took the
+    /// whole app down with it.
+    #[test]
+    fn load_returns_default_for_corrupt_files() {
+        for (case, payload, expect_quarantine) in [
+            ("nul", vec![0_u8; 512], false),
+            ("truncated", br#"{"activeModel":"fw-sm"#.to_vec(), true),
+            ("garbage", vec![0x8f, 0x2c, 0xff, 0x00, 0x41, 0xfe], true),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "voicewave-settings-corrupt-{case}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock should be valid")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("case dir");
+            let path = dir.join("settings.json");
+            std::fs::write(&path, &payload).expect("seed corrupt settings");
+
+            let store = SettingsStore::from_path(&path);
+            let loaded = store
+                .load()
+                .expect("a corrupt settings file must not stop the app");
+            assert_eq!(loaded.active_model, "fw-small.en", "{case}");
+            assert_eq!(loaded.toggle_hotkey, LOCKED_TOGGLE_HOTKEY, "{case}");
+
+            let quarantined = std::fs::read_dir(&dir)
+                .expect("read case dir")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count();
+            assert_eq!(quarantined, usize::from(expect_quarantine), "{case}");
+
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
