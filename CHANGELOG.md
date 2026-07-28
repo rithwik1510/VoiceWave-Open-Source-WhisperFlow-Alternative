@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.8] – 2026-07-28
+
+Crash-safety release. VoiceWave could be left unable to start by something as
+ordinary as losing power at the wrong moment; it no longer can.
+
+### Fixed
+
+- **VoiceWave could refuse to launch after an unclean shutdown.** If the machine
+  lost power, blue-screened, or the app was force-killed while it happened to be
+  saving one of its data files, that file could be left with its size recorded
+  but none of its contents written. On the next launch VoiceWave would fail to
+  start — no window, no message, nothing to act on — and the only way out was
+  knowing which file to delete by hand. Every store now recovers instead:
+  it finishes the interrupted save, falls back to the backup copy, and if
+  neither can be read, sets that one file aside and starts from defaults. The
+  app launches.
+- **Saves are now crash-safe.** Data is written to a temporary file and flushed
+  all the way to disk before it replaces the original, with the previous copy
+  kept until the new one is durable. Losing power mid-save can no longer destroy
+  your settings, dictionary, snippets, history, stats, or diagnostics.
+- **A damaged encryption key no longer blocks startup.** It is set aside and
+  regenerated. The store it protected resets to defaults, which is a local cache
+  loss rather than an app that will not open.
+
+### Changed
+
+- If anything did have to be reset, VoiceWave now says so once on the next
+  launch rather than quietly behaving differently.
+- A leftover plaintext diagnostics backup from an older migration no longer uses
+  a filename that collides with the new backup, and stale backups are removed
+  once the main file is confirmed readable.
+
+---
+
 ## [0.5.7] – 2026-07-28
 
 First-run reliability release. Everything here is about the very first minutes

@@ -61,6 +61,22 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.5.8
+
+**Crash safety**
+
+1. VoiceWave could refuse to launch after an unclean shutdown. If the machine
+   lost power or the app was force-killed while saving one of its data files,
+   that file could be left with its size recorded but no contents — and the app
+   would then fail to start, with no window and no message. Every store now
+   recovers: it finishes the interrupted save, falls back to a backup, and if
+   neither can be read, sets that file aside and starts from defaults.
+1. Saves are crash-safe. Data is written to a temporary file and flushed to disk
+   before replacing the original, so losing power mid-save can no longer destroy
+   your settings, dictionary, snippets, history, or stats.
+1. A damaged encryption key is set aside and regenerated instead of blocking
+   startup, and VoiceWave tells you once if anything had to be reset.
+
 ## What's New in 0.5.7
 
 **First-run reliability**
