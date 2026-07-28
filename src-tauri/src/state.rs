@@ -29,7 +29,7 @@ use crate::{
     },
     inference::{
         cpu_runtime_pool_enabled, ensure_faster_whisper_ready, faster_whisper_cache_hint,
-        faster_whisper_runtime_model_id, is_faster_whisper_model,
+        faster_whisper_runtime_model_id, is_faster_whisper_model, kill_faster_whisper_workers,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
         polish_gate::gate_polish_candidate, prefetch_faster_whisper_model, prewarm_runtime,
         warmup_faster_whisper_model, warmup_plan_for_model, InferenceError, InferenceWorker,
@@ -451,6 +451,53 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+/// Percent complete for a faster-whisper download, derived from the bytes on
+/// disk in the HuggingFace cache. Capped at 99 so a mid-flight status can never
+/// read as finished, and 0 when the expected size is unknown.
+fn faster_whisper_download_percent(downloaded_bytes: u64, expected_total_bytes: u64) -> u8 {
+    if expected_total_bytes == 0 {
+        return 0;
+    }
+    ((downloaded_bytes.saturating_mul(100) / expected_total_bytes).min(99)) as u8
+}
+
+/// Bytes on disk plus percent for a faster-whisper model download. Used by the
+/// failed/cancelled status builders so the user keeps seeing how far the
+/// download actually got.
+fn faster_whisper_download_progress(model_id: &str, expected_total_bytes: u64) -> (u64, u8) {
+    let runtime_model = faster_whisper_runtime_model_id(model_id).unwrap_or("");
+    let downloaded = dir_size_bytes(&faster_whisper_cache_hint(runtime_model));
+    (
+        downloaded,
+        faster_whisper_download_percent(downloaded, expected_total_bytes),
+    )
+}
+
+/// Terminal status for a cancelled faster-whisper download. HuggingFace keeps
+/// the `.incomplete` blobs, so pressing Install again range-resumes from the
+/// bytes already on disk — the message says so.
+fn faster_whisper_cancelled_status(
+    model_id: &str,
+    active_model: &str,
+    expected_total_bytes: u64,
+) -> ModelStatus {
+    let (downloaded, progress) = faster_whisper_download_progress(model_id, expected_total_bytes);
+    ModelStatus {
+        model_id: model_id.to_string(),
+        state: ModelStatusState::Cancelled,
+        progress,
+        active: active_model == model_id,
+        installed: false,
+        message: Some(
+            "Download cancelled. Progress is kept — Install resumes where it left off.".to_string(),
+        ),
+        installed_model: None,
+        downloaded_bytes: Some(downloaded),
+        total_bytes: Some(expected_total_bytes.max(1)),
+        resumable: false,
+    }
 }
 
 fn clamp_vad_threshold(value: f32) -> f32 {
@@ -2227,11 +2274,71 @@ impl VoiceWaveController {
                 .insert(model_id.clone(), preparing.clone());
             self.emit_model_status(&app, &preparing);
 
-            ensure_faster_whisper_ready().await.map_err(|err| {
-                        ControllerError::Runtime(format!(
-                            "Faster-Whisper runtime is not ready: {err}. Reinstall the latest beta build or configure the bundled runtime."
-                        ))
-                    })?;
+            // Registered before any await so Cancel can reach this download for
+            // its whole lifetime (runtime prep included). Removed on every exit
+            // path below.
+            let cancel_token = CancellationToken::new();
+            self.model_download_cancels
+                .lock()
+                .await
+                .insert(model_id.clone(), cancel_token.clone());
+
+            if let Err(err) = ensure_faster_whisper_ready().await {
+                // Cancel kills the worker, which can be what made runtime prep
+                // fail — report that as a cancel, not as a broken install.
+                let cancelled = cancel_token.is_cancelled();
+                eprintln!(
+                    "voicewave: faster-whisper runtime not ready (cancelled={cancelled}): {err}"
+                );
+                self.model_download_cancels.lock().await.remove(&model_id);
+                let status = if cancelled {
+                    faster_whisper_cancelled_status(&model_id, &active_model, expected_total_bytes)
+                } else {
+                    ModelStatus {
+                        model_id: model_id.clone(),
+                        state: ModelStatusState::Failed,
+                        progress: 0,
+                        active: active_model == model_id,
+                        installed: false,
+                        message: Some(
+                            "The bundled speech runtime failed to start. Try restarting VoiceWave or reinstalling."
+                                .to_string(),
+                        ),
+                        installed_model: None,
+                        downloaded_bytes: Some(0),
+                        total_bytes: Some(expected_total_bytes.max(1)),
+                        resumable: false,
+                    }
+                };
+                self.model_statuses
+                    .lock()
+                    .await
+                    .insert(model_id.clone(), status.clone());
+                self.emit_model_status(&app, &status);
+                if cancelled {
+                    return Ok(status);
+                }
+                return Err(ControllerError::Runtime(format!(
+                    "Faster-Whisper runtime is not ready: {err}. Reinstall the latest beta build or configure the bundled runtime."
+                )));
+            }
+
+            // A cancel landing during runtime prep must not fall through into a
+            // fresh download (the worker it killed has already respawned).
+            if cancel_token.is_cancelled() {
+                self.model_download_cancels.lock().await.remove(&model_id);
+                let status = faster_whisper_cancelled_status(
+                    &model_id,
+                    &active_model,
+                    expected_total_bytes,
+                );
+                self.model_statuses
+                    .lock()
+                    .await
+                    .insert(model_id.clone(), status.clone());
+                self.emit_model_status(&app, &status);
+                return Ok(status);
+            }
 
             let runtime_model = faster_whisper_runtime_model_id(&model_id).unwrap_or("");
             let cache_dir = faster_whisper_cache_hint(runtime_model);
@@ -2282,14 +2389,62 @@ impl VoiceWaveController {
             });
 
             let prefetch_result = prefetch_faster_whisper_model(&model_id).await;
+            // The poller must be stopped and joined BEFORE any terminal status
+            // is emitted, otherwise its next tick re-emits "downloading" over
+            // the failed/cancelled status and freezes the UI again.
             progress_cancel.store(true, Ordering::Relaxed);
             let _ = progress_handle.await;
 
-            let prefetch = prefetch_result.map_err(|err| {
-                ControllerError::Runtime(format!(
-                    "Faster-Whisper model prefetch failed: {err}. Check internet access and retry."
-                ))
-            })?;
+            let prefetch = match prefetch_result {
+                Ok(value) => value,
+                Err(err) => {
+                    let cancelled = cancel_token.is_cancelled();
+                    self.model_download_cancels.lock().await.remove(&model_id);
+                    eprintln!(
+                        "voicewave: faster-whisper prefetch failed for {model_id} (cancelled={cancelled}): {err}"
+                    );
+                    let status = if cancelled {
+                        faster_whisper_cancelled_status(
+                            &model_id,
+                            &active_model,
+                            expected_total_bytes,
+                        )
+                    } else {
+                        let (downloaded, progress) =
+                            faster_whisper_download_progress(&model_id, expected_total_bytes);
+                        ModelStatus {
+                            model_id: model_id.clone(),
+                            state: ModelStatusState::Failed,
+                            progress,
+                            active: active_model == model_id,
+                            installed: false,
+                            message: Some(
+                                "Couldn't download the speech model. Check your internet connection and press Retry."
+                                    .to_string(),
+                            ),
+                            installed_model: None,
+                            downloaded_bytes: Some(downloaded),
+                            total_bytes: Some(expected_total_bytes.max(1)),
+                            resumable: false,
+                        }
+                    };
+                    self.model_statuses
+                        .lock()
+                        .await
+                        .insert(model_id.clone(), status.clone());
+                    self.emit_model_status(&app, &status);
+                    if cancelled {
+                        // A user-initiated cancel is not an error: returning Ok
+                        // keeps the frontend from painting an error toast over
+                        // the cancelled status.
+                        return Ok(status);
+                    }
+                    return Err(ControllerError::Runtime(format!(
+                        "Faster-Whisper model prefetch failed: {err}. Check internet access and retry."
+                    )));
+                }
+            };
+            self.model_download_cancels.lock().await.remove(&model_id);
             let installed = {
                 let mut manager = self.model_manager.lock().await;
                 manager.install_faster_whisper_model(&model_id, &prefetch.cache_hint_path)?
@@ -2409,12 +2564,42 @@ impl VoiceWaveController {
     ) -> Result<ModelStatus, ControllerError> {
         if is_faster_whisper_model(&model_id) {
             let active_model = self.settings.lock().await.active_model.clone();
-            let status = self
+            let token = self
+                .model_download_cancels
+                .lock()
+                .await
+                .get(&model_id)
+                .cloned();
+            let Some(token) = token else {
+                // Nothing in flight: report the current status instead of
+                // killing a (possibly warm) worker for no reason.
+                let status = self
+                    .model_manager
+                    .lock()
+                    .await
+                    .get_download_status(&model_id, Some(active_model.as_str()))
+                    .ok_or(ControllerError::MissingModel(model_id.clone()))?;
+                self.model_statuses
+                    .lock()
+                    .await
+                    .insert(model_id, status.clone());
+                self.emit_model_status(&app, &status);
+                return Ok(status);
+            };
+            token.cancel();
+            // The prefetch is blocked inside the worker's WhisperModel() call
+            // and never reads stdin, so killing the process is the only way to
+            // abort it. The worker respawns (cold) on the next request.
+            kill_faster_whisper_workers();
+            let expected_total_bytes: u64 = self
                 .model_manager
                 .lock()
                 .await
-                .get_download_status(&model_id, Some(active_model.as_str()))
-                .ok_or(ControllerError::MissingModel(model_id.clone()))?;
+                .get_catalog_item(&model_id)
+                .map(|item| item.size_bytes)
+                .unwrap_or(0);
+            let status =
+                faster_whisper_cancelled_status(&model_id, &active_model, expected_total_bytes);
             self.model_statuses
                 .lock()
                 .await
@@ -5003,7 +5188,8 @@ mod tests {
     use super::{
         asr_integrity_metrics, build_terminology_hint_from_texts, clamp_vad_threshold,
         classify_insertion_target, decode_mode_key, decode_mode_rank, derive_correction_candidates,
-        effective_release_watchdog_threshold_ms, floor_decode_mode, insertion_method_key,
+        effective_release_watchdog_threshold_ms, faster_whisper_download_percent, floor_decode_mode,
+        insertion_method_key,
         is_likely_low_quality_input_name, now_utc_ms, release_watchdog_recovered,
         push_release_allowed, push_to_talk_release_decision,
         should_reject_low_confidence_transcript_as_no_speech, DictationStartTrigger, PillAction,
@@ -5014,6 +5200,18 @@ mod tests {
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
+
+    #[test]
+    fn faster_whisper_download_percent_is_bounded_and_safe() {
+        assert_eq!(faster_whisper_download_percent(0, 0), 0);
+        assert_eq!(faster_whisper_download_percent(1_000, 0), 0);
+        assert_eq!(faster_whisper_download_percent(0, 400), 0);
+        assert_eq!(faster_whisper_download_percent(200, 400), 50);
+        // Never reports 100 mid-flight: a finished download is signalled by the
+        // Installed status, not by the bytes-on-disk poller.
+        assert_eq!(faster_whisper_download_percent(400, 400), 99);
+        assert_eq!(faster_whisper_download_percent(u64::MAX, 400), 99);
+    }
 
     #[test]
     fn pill_action_serializes_camel_case_kind_label_value() {

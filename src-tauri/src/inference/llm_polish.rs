@@ -260,6 +260,22 @@ fn checkin_worker(mut worker: PolishWorkerProcess) {
     let _ = worker.child.wait();
 }
 
+/// Kill the parked polish worker on shutdown. Like the ASR worker it is
+/// spawned DETACHED_PROCESS, so quitting otherwise leaves a llama.cpp process
+/// holding the model in RAM. A worker that is mid-request has been checked out
+/// of the slot and is not reachable here; polish requests are seconds long, so
+/// that window is left alone rather than adding a pid registry for it.
+pub fn kill_polish_worker() {
+    if let Some(slot) = POLISH_WORKER.get() {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(mut worker) = guard.take() {
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+            }
+        }
+    }
+}
+
 fn response_timeout() -> Duration {
     let ms = std::env::var("VOICEWAVE_POLISH_TIMEOUT_MS")
         .ok()

@@ -1596,7 +1596,10 @@ function App() {
                                 {installLabel}
                               </button>
                             )}
-                            {statusRow?.state === "downloading" && (
+                            {/* Pause/Resume only exist on the resumable download
+                                path; faster-whisper downloads report
+                                resumable:false and can only be cancelled. */}
+                            {statusRow?.state === "downloading" && statusRow.resumable && (
                               <button
                                 type="button"
                                 className="vw-btn-secondary vw-btn-sm"
@@ -1605,7 +1608,7 @@ function App() {
                                 Pause
                               </button>
                             )}
-                            {statusRow?.state === "paused" && (
+                            {statusRow?.state === "paused" && statusRow.resumable && (
                               <button
                                 type="button"
                                 className="vw-btn-secondary vw-btn-sm"

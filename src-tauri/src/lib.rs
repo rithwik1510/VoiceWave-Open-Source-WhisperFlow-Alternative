@@ -41,6 +41,8 @@ use history::{
 #[cfg(feature = "desktop")]
 use hotkey::{HotkeyAction, HotkeyConfig, HotkeyPhase, HotkeySnapshot};
 #[cfg(feature = "desktop")]
+use inference::{kill_faster_whisper_workers, llm_polish::kill_polish_worker};
+#[cfg(feature = "desktop")]
 use insertion::{InsertResult, InsertTextRequest, RecentInsertion, UndoResult};
 #[cfg(feature = "desktop")]
 use model_manager::{InstalledModel, ModelCatalogItem, ModelDownloadRequest, ModelStatus};
@@ -317,6 +319,16 @@ fn configure_main_window_close_behavior(app: &tauri::AppHandle, hide_to_tray: bo
     }
 }
 
+/// Kill the python side-processes before the app goes away. Both workers are
+/// spawned DETACHED_PROCESS, so without this a quit during the first-run model
+/// download leaves a python.exe downloading ~487 MB with no UI attached to it.
+/// Safe to call more than once (both helpers no-op when nothing is running).
+#[cfg(feature = "desktop")]
+fn shutdown_inference_workers() {
+    kill_faster_whisper_workers();
+    kill_polish_worker();
+}
+
 #[cfg(feature = "desktop")]
 fn configure_system_tray(app: &tauri::AppHandle) -> Result<(), String> {
     let show_item = MenuItemBuilder::with_id(TRAY_SHOW_ID, "Open VoiceWave")
@@ -349,6 +361,7 @@ fn configure_system_tray(app: &tauri::AppHandle) -> Result<(), String> {
                     });
                 }
                 TRAY_QUIT_ID => {
+                    shutdown_inference_workers();
                     app.exit(0);
                 }
                 _ => {}
@@ -1573,8 +1586,15 @@ pub fn run() {
             polish_model_status,
             download_polish_model
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running voicewave tauri app");
+        .build(tauri::generate_context!())
+        .expect("error while running voicewave tauri app")
+        .run(|_app, event| {
+            // Covers every exit route (window close, app.exit, OS shutdown),
+            // not just the tray Quit item.
+            if matches!(event, tauri::RunEvent::Exit) {
+                shutdown_inference_workers();
+            }
+        });
 }
 
 #[cfg(not(feature = "desktop"))]

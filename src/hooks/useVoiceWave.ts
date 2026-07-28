@@ -138,6 +138,14 @@ function isSupportedModelId(modelId: string): boolean {
   return SUPPORTED_MODEL_IDS.includes(modelId as (typeof SUPPORTED_MODEL_IDS)[number]);
 }
 
+/** faster-whisper downloads run inside the bundled python runtime, which has no
+ * pause/resume: they can only be cancelled and restarted (HuggingFace keeps the
+ * partial blobs, so a restart range-resumes). Catalog format is
+ * "faster-whisper"; ids are prefixed "fw-" (mirrors is_faster_whisper_model). */
+function isFasterWhisperModelId(modelId: string): boolean {
+  return modelId.startsWith("fw-");
+}
+
 const fallbackSettings: VoiceWaveSettings = {
   inputDevice: null,
   activeModel: "fw-small.en",
@@ -1424,6 +1432,9 @@ export function useVoiceWave() {
         setError("Desktop runtime is required to download models. Run npm run tauri:dev.");
         return;
       }
+      const catalogRow = modelCatalog.find((item) => item.modelId === modelId);
+      const resumable =
+        catalogRow?.format !== "faster-whisper" && !isFasterWhisperModelId(modelId);
       try {
         setModelStatuses((prev) => ({
           ...prev,
@@ -1433,18 +1444,47 @@ export function useVoiceWave() {
             progress: 5,
             active: false,
             installed: false,
-            message: "Preparing signed model download.",
+            message: "Preparing model download…",
             installedModel: null,
             downloadedBytes: 0,
-            totalBytes: modelCatalog.find((item) => item.modelId === modelId)?.sizeBytes ?? null,
-            resumable: true
+            totalBytes: catalogRow?.sizeBytes ?? null,
+            resumable
           }
         }));
         const status = await downloadModel({ modelId });
         setModelStatuses((prev) => ({ ...prev, [modelId]: status }));
         await refreshPhase3Data();
       } catch (modelErr) {
-        setError(modelErr instanceof Error ? modelErr.message : "Model install failed");
+        const message = modelErr instanceof Error ? modelErr.message : "Model install failed";
+        setError(message);
+        // Belt and braces: even if the backend never emitted a terminal status
+        // (or the IPC call itself rejected), the row must leave "downloading"
+        // so Retry/Cancel appear instead of a frozen progress bar. A terminal
+        // status the backend already emitted is kept — its message is the
+        // friendly one.
+        setModelStatuses((prev) => {
+          const current = prev[modelId];
+          if (current?.state === "failed" || current?.state === "cancelled") {
+            return prev;
+          }
+          return {
+            ...prev,
+            [modelId]: {
+              ...(current ?? {
+                modelId,
+                active: false,
+                installed: false,
+                installedModel: null,
+                totalBytes: catalogRow?.sizeBytes ?? null,
+                downloadedBytes: 0
+              }),
+              state: "failed",
+              progress: 0,
+              message,
+              resumable: false
+            }
+          };
+        });
       }
     },
     [modelCatalog, refreshPhase3Data, settings.activeModel, tauriAvailable]
@@ -2044,7 +2084,9 @@ export function useVoiceWave() {
             message: payload.message ?? null,
             downloadedBytes: payload.downloadedBytes ?? null,
             totalBytes: payload.totalBytes ?? null,
-            resumable: payload.state !== "installed"
+            // ModelEvent carries no `resumable`; faster-whisper downloads never
+            // are (no pause/resume in the python runtime).
+            resumable: payload.state !== "installed" && !isFasterWhisperModelId(payload.modelId)
           }
         }));
       });

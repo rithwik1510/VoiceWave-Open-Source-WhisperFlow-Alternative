@@ -419,6 +419,17 @@ export function Onboarding({
   const formatSize = (bytes?: number) =>
     bytes ? `${Math.round(bytes / (1024 * 1024))} MB` : "";
 
+  // A bare percent hides how much of a ~487 MB download is left (and stalls
+  // read as "nothing is happening"). Show the bytes when the backend sends them.
+  const downloadedLabel =
+    typeof status?.downloadedBytes === "number" &&
+    typeof status?.totalBytes === "number" &&
+    status.totalBytes > 0
+      ? `${Math.round(status.downloadedBytes / (1024 * 1024))} MB of ${Math.round(
+          status.totalBytes / (1024 * 1024)
+        )} MB`
+      : null;
+
   return (
     <div className="vw-onb-backdrop" role="dialog" aria-modal="true" aria-label="Welcome to VoiceWave">
       {step === "welcome" &&
@@ -436,7 +447,7 @@ export function Onboarding({
                   everywhere.
                 </h1>
                 <p className="mt-4 max-w-[26rem] text-[15px] leading-relaxed text-[#71717A]">
-                  A minute of setup, then dictation in every app on this PC.
+                  A quick setup, then dictation in every app on this PC.
                   Private, offline, and yours — audio never leaves this machine.
                 </p>
 
@@ -586,6 +597,9 @@ export function Onboarding({
                         <div className="vw-onb-progress mt-3">
                           <div className="vw-onb-progress-fill" style={{ width: `${Math.max(4, progress)}%` }} />
                         </div>
+                      )}
+                      {!downloadFailed && downloadedLabel && (
+                        <p className="mt-2 text-xs tabular-nums text-[#A1A1AA]">{downloadedLabel}</p>
                       )}
                       {downloadFailed && status?.message && (
                         <p className="mt-2 text-xs text-[#A94444]">{status.message}</p>

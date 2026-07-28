@@ -121,7 +121,23 @@ struct WorkerProcess {
     next_id: u64,
 }
 
+/// Killing on drop is deliberate: the worker is spawned DETACHED_PROCESS, so a
+/// handle dropped without an explicit kill (an error path, a panicking blocking
+/// thread) leaves a python.exe running with nothing left that can reach it.
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        unregister_worker_pid(self.child.id());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 static WORKER: OnceLock<Mutex<Option<WorkerProcess>>> = OnceLock::new();
+/// PIDs of every live worker process. Needed because an in-flight request
+/// checks the worker OUT of `WORKER` (see `checkout_worker`), so during the
+/// first-run model download — exactly when cancelling or quitting has to reach
+/// the process — the slot is empty and the pid is the only handle left.
+static LIVE_WORKER_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// Serializes worker requests. Without this, a dictation arriving while the
 /// startup prefetch is still loading the model checks out an empty slot,
 /// spawns a SECOND worker, and pays the full model load itself (observed as
@@ -285,6 +301,73 @@ pub async fn transcribe_samples_with_overrides(
         backend_used: response.backend_used,
         backend_fallback: response.backend_fallback,
     })
+}
+
+/// Reap a worker that was spawned but never became a `WorkerProcess` (so its
+/// kill-on-drop never applies) and drop its pid from the live registry.
+fn kill_partial_worker(mut child: Child) {
+    unregister_worker_pid(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn register_worker_pid(pid: u32) {
+    if let Ok(mut guard) = LIVE_WORKER_PIDS.lock() {
+        if !guard.contains(&pid) {
+            guard.push(pid);
+        }
+    }
+}
+
+fn unregister_worker_pid(pid: u32) {
+    if let Ok(mut guard) = LIVE_WORKER_PIDS.lock() {
+        guard.retain(|value| *value != pid);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn kill_process_by_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    // SAFETY: opening a process we spawned ourselves; failure returns null.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: handle came from OpenProcess above and is closed right after.
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_process_by_pid(_pid: u32) {}
+
+/// Kill every live faster-whisper worker process.
+///
+/// Two callers: cancelling a model download (the prefetch is blocked inside the
+/// worker's `WhisperModel()` call and never reads stdin, so killing the process
+/// is the only way to abort it) and app shutdown (DETACHED_PROCESS workers
+/// otherwise outlive the app and keep downloading in the background).
+///
+/// The worker's warm model cache dies with it; the next request respawns via
+/// `ensure_worker` and pays one model load. That is the accepted tradeoff.
+pub fn kill_worker_processes() {
+    if let Some(slot) = WORKER.get() {
+        if let Ok(mut guard) = slot.lock() {
+            // Dropping the handle kills and unregisters it (see Drop above).
+            drop(guard.take());
+        }
+    }
+    let pids = LIVE_WORKER_PIDS
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default();
+    for pid in pids {
+        kill_process_by_pid(pid);
+    }
 }
 
 pub fn cache_hint_for_model(model_id: &str) -> PathBuf {
@@ -662,21 +745,40 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
             "failed to spawn faster-whisper worker using '{python}': {err}. Reinstall the latest beta build or configure VOICEWAVE_FASTER_WHISPER_PYTHON."
         ))
     })?;
+    register_worker_pid(child.id());
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| InferenceError::RuntimeJoin("worker stdin unavailable".to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| InferenceError::RuntimeJoin("worker stdout unavailable".to_string()))?;
+    // Every early return below must reap the child: it is detached, so a
+    // dropped `Child` handle would leave a live python.exe behind.
+    let stdin = match child.stdin.take() {
+        Some(value) => value,
+        None => {
+            kill_partial_worker(child);
+            return Err(InferenceError::RuntimeJoin(
+                "worker stdin unavailable".to_string(),
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(value) => value,
+        None => {
+            kill_partial_worker(child);
+            return Err(InferenceError::RuntimeJoin(
+                "worker stdout unavailable".to_string(),
+            ));
+        }
+    };
     let mut stdout_reader = BufReader::new(stdout);
 
     let mut ready_line = String::new();
-    let ready_bytes = stdout_reader
-        .read_line(&mut ready_line)
-        .map_err(|err| InferenceError::RuntimeJoin(format!("worker ready read failed: {err}")))?;
+    let ready_bytes = match stdout_reader.read_line(&mut ready_line) {
+        Ok(value) => value,
+        Err(err) => {
+            kill_partial_worker(child);
+            return Err(InferenceError::RuntimeJoin(format!(
+                "worker ready read failed: {err}"
+            )));
+        }
+    };
     if ready_bytes == 0 {
         let stderr = child
             .stderr
@@ -687,6 +789,7 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
                 out
             })
             .unwrap_or_default();
+        kill_partial_worker(child);
         return Err(InferenceError::RuntimeJoin(format!(
             "faster-whisper worker exited before ready. stderr: {}",
             stderr.trim()
