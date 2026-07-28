@@ -61,6 +61,22 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.5.7
+
+**First-run reliability**
+
+1. A failed speech-model download no longer traps setup. If the one-time
+   download fails — no connection, a captive network, a dropped link — VoiceWave
+   now says so and offers Retry instead of showing a progress bar that never
+   moves. Whatever downloaded before the failure is kept.
+1. Cancel actually cancels a model download, and keeps the bytes already
+   fetched so Install resumes rather than restarting. Pause and Resume, which
+   never applied to these models, are no longer shown.
+1. Quitting during a download no longer leaves a background helper process
+   running after the app is closed.
+1. Setup shows downloaded size ("213 MB of 465 MB") alongside the percentage,
+   so a slow connection reads as slow rather than stuck.
+
 ## What's New in 0.5.6
 
 **Voice snippets**

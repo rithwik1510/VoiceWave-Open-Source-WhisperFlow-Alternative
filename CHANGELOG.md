@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.7] – 2026-07-28
+
+First-run reliability release. Everything here is about the very first minutes
+after install — the one-time speech-model download and the setup flow around it.
+
+### Fixed
+
+- **A failed model download no longer traps setup.** If the one-time speech
+  model download failed — no connection, a captive hotel or office network, a
+  dropped link — setup showed a progress bar that never moved, with no error
+  message and no way forward. VoiceWave now tells you what happened and offers
+  Retry, and whatever downloaded before the failure is kept.
+- **Cancel actually cancels a model download.** The Cancel button had no effect
+  on the download running underneath it, which kept going regardless. It now
+  stops the download and keeps the bytes already fetched, so pressing Install
+  again resumes instead of starting over. Pause and Resume, which never applied
+  to these models, are no longer shown.
+- **Quitting during a download no longer leaves a process behind.** VoiceWave
+  now shuts down its speech and polish helpers on exit, instead of leaving one
+  downloading invisibly after the app was closed.
+
+### Changed
+
+- Setup shows how much of the model has arrived ("213 MB of 465 MB") rather than
+  a bare percentage, so a slow connection reads as slow instead of stuck.
+- The welcome screen no longer promises a fixed setup time it cannot guarantee
+  on a slow connection.
+
+---
+
 ## [0.5.6] – 2026-07-24
 
 ### Added
