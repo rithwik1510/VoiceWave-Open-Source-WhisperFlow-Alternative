@@ -88,6 +88,7 @@ export default function OpenSourceProof() {
               href={GITHUB_REPO_URL}
               target="_blank"
               rel="noreferrer"
+              data-goatcounter-click="github-open-source"
               className="inline-flex items-center gap-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-[#0b3f98] transition-colors hover:text-[#0050d2]"
             >
               Browse the source <ArrowUpRight className="h-3 w-3" aria-hidden="true" />

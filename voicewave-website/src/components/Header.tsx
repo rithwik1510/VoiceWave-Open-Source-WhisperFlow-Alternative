@@ -46,6 +46,7 @@ export default function Header() {
               href={GITHUB_REPO_URL}
               target="_blank"
               rel="noreferrer"
+              data-goatcounter-click="github-header"
               className="hidden items-center gap-1.5 rounded-full border border-white/20 px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-white/85 transition-colors hover:border-white/45 hover:text-white sm:inline-flex"
               aria-label={stars !== null ? `View source on GitHub — ${stars} stars` : 'View source on GitHub'}
             >
@@ -58,6 +59,7 @@ export default function Header() {
               target="_blank"
               rel="noreferrer"
               download
+              data-goatcounter-click="download-exe-header"
               className="inline-flex items-center gap-1.5 rounded-full border border-white/35 bg-white/10 px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-white transition-colors hover:bg-white/16"
             >
               <span className="hidden sm:inline">Download</span>

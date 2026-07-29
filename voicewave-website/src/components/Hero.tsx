@@ -174,6 +174,7 @@ export default function Hero() {
             target="_blank"
             rel="noreferrer"
             download
+            data-goatcounter-click="download-exe-hero"
             className="lime-cta pointer-events-auto mt-8 px-6 py-2.5"
           >
             Download Setup

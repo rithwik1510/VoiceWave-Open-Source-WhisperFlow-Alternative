@@ -55,6 +55,7 @@ export default function FinalCta() {
               target="_blank"
               rel="noreferrer"
               download
+              data-goatcounter-click="download-exe-final"
               className="lime-cta mt-9 px-7 py-3"
             >
               Download for Windows
