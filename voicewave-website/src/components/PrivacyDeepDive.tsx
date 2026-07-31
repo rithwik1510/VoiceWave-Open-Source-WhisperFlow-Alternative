@@ -313,7 +313,8 @@ export default function PrivacyDeepDive() {
             <h3 className="font-display text-3xl sm:text-4xl font-bold text-[#FFFFFF] mb-4">No Cloud Transcription. Ever.</h3>
             <p className="text-base sm:text-lg text-[#b8c9de] font-medium leading-relaxed max-w-sm mb-6">
               Your audio is captured, decoded, and discarded on your machine. Diagnostics
-              stay local and encrypted — exported only if you choose to.
+              stay local and encrypted — exported only if you choose to. Optional anonymous
+              usage counting is off by default and never includes audio or transcript text.
             </p>
 
             <PrivacyFlowDiagram />

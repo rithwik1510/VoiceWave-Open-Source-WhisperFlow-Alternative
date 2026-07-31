@@ -9,7 +9,7 @@ import {
 import { formatCompact, useGitHubStats } from '../lib/useGitHubStats'
 
 export default function OpenSourceProof() {
-  const { stars, totalDownloads, latestVersion } = useGitHubStats()
+  const { stars, installerTransfers, latestVersion } = useGitHubStats()
 
   const stats = [
     {
@@ -20,8 +20,8 @@ export default function OpenSourceProof() {
     },
     {
       icon: DownloadCloud,
-      value: totalDownloads !== null ? formatCompact(totalDownloads) : '—',
-      label: 'Release downloads',
+      value: installerTransfers !== null ? formatCompact(installerTransfers) : '—',
+      label: 'Installer transfers',
       href: GITHUB_RELEASES_URL
     },
     {

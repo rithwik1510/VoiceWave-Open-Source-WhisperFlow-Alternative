@@ -550,6 +550,7 @@ function App() {
     setCodeModeSettings,
     setDictationProfile,
     setDiagnosticsOptIn,
+    setAnonymousUsageOptIn,
     setDomainPacks,
     setFormatProfile,
     setInputDevice,
@@ -1437,6 +1438,7 @@ function App() {
                 finalTranscript={snapshot.lastFinal}
                 recentSentences={recentSentences}
                 pushToTalkHotkey={settings.pushToTalkHotkey}
+                userName={demoProfile?.name}
                 isPro={isPro}
                 historyOff={historyPolicy === "off"}
               />
@@ -2852,6 +2854,26 @@ function App() {
 
               {settingsSection === "diagnostics" && (
                 <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Anonymous usage count</p>
+                      <p className="vw-set-desc">
+                        Help us count real activated installations. After a successful dictation, VoiceWave
+                        shares only a random installation ID, app version, and a once-per-day active marker.
+                        No audio, transcript, account, filename, or settings data is sent.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Share anonymous usage count"
+                        checked={settings.anonymousUsageOptIn}
+                        onChange={(event) => void setAnonymousUsageOptIn(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+
                   <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">Diagnostics</p>

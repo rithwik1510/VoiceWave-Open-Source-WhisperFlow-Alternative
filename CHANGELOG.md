@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.5.9] – 2026-07-31
+
+Usage visibility and small dashboard-polish release.
+
+### Added
+
+- **Optional anonymous activated-install counting.** Users can explicitly enable
+  a content-free usage count in Settings. VoiceWave then records one activation
+  after the first successful dictation and at most one active marker per day.
+  Updates retain the same random installation identifier, so updating does not
+  create another user.
+- Analytics events contain only the random installation identifier, app
+  version, and GitHub distribution channel. Audio, transcripts, account
+  identity, filenames, settings, and device details are never sent.
+
+### Fixed
+
+- The Home greeting no longer contains a hardcoded name. Signed-in users see
+  their profile name; guest users see a general VoiceWave welcome.
+- The website release counter no longer adds updater metadata checks or demo
+  assets to its total. It now reports and labels only installer transfers.
+
+---
+
 ## [0.5.8] – 2026-07-28
 
 Crash-safety release. VoiceWave could be left unable to start by something as

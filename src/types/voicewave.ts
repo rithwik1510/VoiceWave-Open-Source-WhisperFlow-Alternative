@@ -64,6 +64,9 @@ export interface VoiceWaveSettings {
   releaseTailMs: number;
   decodeMode: DecodeMode;
   diagnosticsOptIn: boolean;
+  /** Explicit consent for two content-free analytics events: first successful
+   * dictation and once-per-day activity. Off by default. */
+  anonymousUsageOptIn: boolean;
   toggleHotkey: string;
   pushToTalkHotkey: string;
   preferClipboardFallback: boolean;

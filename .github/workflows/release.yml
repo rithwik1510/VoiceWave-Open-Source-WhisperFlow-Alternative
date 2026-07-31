@@ -32,6 +32,7 @@ jobs:
       TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
       VIBE_SAFE_TARGET_DIR: C:\vw-target
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VITE_TELEMETRYDECK_APP_ID: ${{ secrets.TELEMETRYDECK_APP_ID }}
     steps:
       - name: Checkout at release tag
         uses: actions/checkout@v4

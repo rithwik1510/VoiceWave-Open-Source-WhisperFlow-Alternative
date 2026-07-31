@@ -61,6 +61,20 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.5.9
+
+**Usage visibility and dashboard polish**
+
+1. Optional anonymous activated-install counting records one first successful
+   dictation and at most one active marker per day. It is off by default and
+   never sends audio, transcript text, account identity, filenames, or settings.
+1. Updates keep the same random installation identifier, so updating VoiceWave
+   does not inflate the active-install count.
+1. The Home greeting now uses the signed-in profile name or a general guest
+   welcome instead of a hardcoded name.
+1. The website now labels and counts installer transfers only, excluding updater
+   metadata checks and unrelated release assets.
+
 ## What's New in 0.5.8
 
 **Crash safety**
@@ -365,6 +379,9 @@ Reference: [docs/monetization.md](docs/monetization.md)
 1. Local-only ASR and deterministic local post-processing in current monetization architecture.
 1. Model/update verification paths are documented in phase evidence.
 1. Diagnostics export is user-triggered and revocable.
+1. Anonymous activated-install analytics is off by default. If explicitly enabled, VoiceWave sends only a
+   random installation identifier, app version, first-success marker, and once-per-day active marker — never
+   audio, transcript text, account identity, filenames, or settings.
 
 References:
 

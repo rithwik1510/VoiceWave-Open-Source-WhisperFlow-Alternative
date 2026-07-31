@@ -142,6 +142,10 @@ pub struct VoiceWaveSettings {
     pub release_tail_ms: u64,
     pub decode_mode: DecodeMode,
     pub diagnostics_opt_in: bool,
+    /// Explicit opt-in for content-free activated-install analytics. The
+    /// frontend sends only first-use and once-per-day active markers tied to a
+    /// random local identifier; transcript/audio/account data never leaves.
+    pub anonymous_usage_opt_in: bool,
     pub toggle_hotkey: String,
     pub push_to_talk_hotkey: String,
     pub prefer_clipboard_fallback: bool,
@@ -214,6 +218,7 @@ impl Default for VoiceWaveSettings {
             release_tail_ms: 500,
             decode_mode: DecodeMode::Balanced,
             diagnostics_opt_in: false,
+            anonymous_usage_opt_in: false,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
             push_to_talk_hotkey: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
@@ -392,6 +397,7 @@ mod tests {
         assert_eq!(loaded.release_tail_ms, 300);
         assert_eq!(loaded.decode_mode, DecodeMode::Fast);
         assert!(loaded.diagnostics_opt_in);
+        assert!(!loaded.anonymous_usage_opt_in);
         assert!(loaded.prefer_clipboard_fallback);
         assert_eq!(loaded.format_profile, FormatProfile::Technical);
         assert!(loaded.pro_post_processing_enabled);

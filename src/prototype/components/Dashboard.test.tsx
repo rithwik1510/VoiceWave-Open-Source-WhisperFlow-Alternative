@@ -21,6 +21,24 @@ describe("Dashboard", () => {
     expect(screen.getByText("FW SMALL.EN")).toBeInTheDocument();
   });
 
+  it("personalizes the greeting when a signed-in name is available", () => {
+    render(
+      <Dashboard
+        theme={THEME}
+        status="idle"
+        onPressStart={vi.fn()}
+        onPressEnd={vi.fn()}
+        currentModel="fw-small.en"
+        partialTranscript={null}
+        finalTranscript={null}
+        pushToTalkHotkey="Ctrl+Windows"
+        userName="Rishi"
+      />
+    );
+
+    expect(screen.getByText("Welcome back, Rishi.")).toBeInTheDocument();
+  });
+
   it("keeps hold-to-talk lifecycle on pointer press and release", () => {
     const onPressStart = vi.fn();
     const onPressEnd = vi.fn();

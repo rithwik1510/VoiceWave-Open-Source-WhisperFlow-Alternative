@@ -80,6 +80,7 @@ import {
 } from "../lib/tauri";
 import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
+import { trackAnonymousUsage } from "../lib/telemetry";
 import type {
   AppProfileOverrides,
   CodeModeSettings,
@@ -155,6 +156,7 @@ const fallbackSettings: VoiceWaveSettings = {
   releaseTailMs: DEFAULT_RELEASE_TAIL_MS,
   decodeMode: DEFAULT_DECODE_MODE,
   diagnosticsOptIn: false,
+  anonymousUsageOptIn: false,
   toggleHotkey: "Ctrl+Alt+X",
   pushToTalkHotkey: "Ctrl+Windows",
   preferClipboardFallback: false,
@@ -408,6 +410,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     releaseTailMs: clampReleaseTailMs(settings.releaseTailMs ?? DEFAULT_RELEASE_TAIL_MS),
     decodeMode: settings.decodeMode ?? DEFAULT_DECODE_MODE,
     diagnosticsOptIn: settings.diagnosticsOptIn ?? false,
+    anonymousUsageOptIn: settings.anonymousUsageOptIn ?? false,
     formatProfile: settings.formatProfile ?? "default",
     activeDomainPacks: settings.activeDomainPacks ?? [],
     appProfileOverrides: settings.appProfileOverrides ?? fallbackSettings.appProfileOverrides,
@@ -504,6 +507,8 @@ function parseProRequiredFeature(error: unknown): ProFeatureId | null {
 export function useVoiceWave() {
   const [snapshot, setSnapshot] = useState<VoiceWaveSnapshot>(fallbackSnapshot);
   const [settings, setSettings] = useState<VoiceWaveSettings>(fallbackSettings);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   const [hotkeys, setHotkeys] = useState<HotkeySnapshot>(fallbackHotkeys);
   const [permissions, setPermissions] = useState<PermissionSnapshot>(fallbackPermissions);
   const [inputDevices, setInputDevices] = useState<string[]>([]);
@@ -1315,6 +1320,26 @@ export function useVoiceWave() {
     [tauriAvailable]
   );
 
+  const setAnonymousUsageOptIn = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = { ...settings, anonymousUsageOptIn: enabled };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(
+          persistErr instanceof Error
+            ? persistErr.message
+            : "Failed to update anonymous usage sharing"
+        );
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
   const exportDiagnosticsBundle = useCallback(async () => {
     if (!tauriAvailable) {
       setError("Diagnostics export requires desktop runtime (tauri).");
@@ -2037,6 +2062,9 @@ export function useVoiceWave() {
           lastPartial: event.isFinal ? prev.lastPartial : event.text,
           lastFinal: event.isFinal ? event.text : prev.lastFinal
         }));
+        if (event.isFinal && event.text.trim()) {
+          void trackAnonymousUsage(settingsRef.current.anonymousUsageOptIn).catch(() => undefined);
+        }
       });
 
       insertionUnlisten = await listenVoicewaveInsertion((result) => {
@@ -2390,6 +2418,7 @@ export function useVoiceWave() {
     setDictationProfile,
     setProPostProcessingEnabled,
     setDiagnosticsOptIn,
+    setAnonymousUsageOptIn,
     exportDiagnosticsBundle,
     recommendedVadThreshold: RECOMMENDED_VAD_THRESHOLD,
     setPreferClipboardFallback,

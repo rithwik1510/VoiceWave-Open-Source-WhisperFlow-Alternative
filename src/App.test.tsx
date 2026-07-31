@@ -90,6 +90,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     setLlmPolishEnabled: vi.fn().mockResolvedValue(true),
     polishModelProgress: null,
     setDiagnosticsOptIn: vi.fn(),
+    setAnonymousUsageOptIn: vi.fn(),
     setDomainPacks: vi.fn(),
     setFormatProfile: vi.fn(),
     setInputDevice: vi.fn(),
@@ -132,6 +133,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
       releaseTailMs: 350,
       decodeMode: "balanced",
       diagnosticsOptIn: false,
+      anonymousUsageOptIn: false,
       toggleHotkey: "Ctrl+Alt+X",
       pushToTalkHotkey: "Ctrl+Windows",
       preferClipboardFallback: false,
@@ -289,7 +291,7 @@ describe("App navigation and phase three panels", () => {
   it("switches between home, models, dictionary, and snippets tabs", async () => {
     render(<App />);
 
-    expect(screen.getByText("Good morning, Rishi.")).toBeInTheDocument();
+    expect(screen.getByText("Welcome to VoiceWave.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run 10s Check" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
@@ -529,6 +531,7 @@ describe("App navigation and phase three panels", () => {
 
   it("renders diagnostics controls in settings and triggers opt-in and export actions", async () => {
     const setDiagnosticsOptIn = vi.fn();
+    const setAnonymousUsageOptIn = vi.fn();
     const exportDiagnosticsBundle = vi.fn();
     const useVoiceWaveSpy = vi
       .spyOn(hookModule, "useVoiceWave")
@@ -543,6 +546,7 @@ describe("App navigation and phase three panels", () => {
             watchdogRecoveryCount: 1
           },
           setDiagnosticsOptIn,
+          setAnonymousUsageOptIn,
           exportDiagnosticsBundle
         }) as any
       );
@@ -556,6 +560,8 @@ describe("App navigation and phase three panels", () => {
     fireEvent.click(within(settingsDialog).getByRole("button", { name: "Diagnostics" }));
     fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Enable diagnostics" }));
     expect(setDiagnosticsOptIn).toHaveBeenCalledWith(true);
+    fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Share anonymous usage count" }));
+    expect(setAnonymousUsageOptIn).toHaveBeenCalledWith(true);
 
     fireEvent.click(within(settingsDialog).getByRole("button", { name: "Export Diagnostics Bundle" }));
     expect(exportDiagnosticsBundle).toHaveBeenCalledTimes(1);

@@ -3,14 +3,14 @@ import { GITHUB_API_RELEASES_URL, GITHUB_API_REPO_URL } from '../config/site'
 
 export type GitHubStats = {
   stars: number | null
-  totalDownloads: number | null
+  installerTransfers: number | null
   latestVersion: string | null
 }
 
-const CACHE_KEY = 'vw-github-stats-v1'
+const CACHE_KEY = 'vw-github-stats-v2'
 const CACHE_TTL_MS = 30 * 60 * 1000
 
-const EMPTY: GitHubStats = { stars: null, totalDownloads: null, latestVersion: null }
+const EMPTY: GitHubStats = { stars: null, installerTransfers: null, latestVersion: null }
 
 let inFlight: Promise<GitHubStats> | null = null
 
@@ -49,25 +49,29 @@ const fetchStats = async (): Promise<GitHubStats> => {
 
   const stars = typeof repo?.stargazers_count === 'number' ? repo.stargazers_count : null
 
-  let totalDownloads: number | null = null
+  let installerTransfers: number | null = null
   let latestVersion: string | null = null
   if (Array.isArray(releases)) {
-    totalDownloads = 0
+    installerTransfers = 0
     for (const release of releases) {
       if (!latestVersion && typeof release?.tag_name === 'string' && !release.prerelease && !release.draft) {
         latestVersion = release.tag_name
       }
       if (Array.isArray(release?.assets)) {
         for (const asset of release.assets) {
-          if (typeof asset?.download_count === 'number') {
-            totalDownloads += asset.download_count
+          if (
+            typeof asset?.name === 'string' &&
+            asset.name.toLowerCase().endsWith('.exe') &&
+            typeof asset?.download_count === 'number'
+          ) {
+            installerTransfers += asset.download_count
           }
         }
       }
     }
   }
 
-  return { stars, totalDownloads, latestVersion }
+  return { stars, installerTransfers, latestVersion }
 }
 
 /**
