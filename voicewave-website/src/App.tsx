@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import ComingSoonDots from './components/ComingSoonDots'
+
 import Comparison from './components/Comparison'
 import Faq from './components/Faq'
 import Features from './components/Features'
@@ -15,7 +16,21 @@ import PrivacyDeepDive from './components/PrivacyDeepDive'
 import QuietInkDemo from './components/QuietInkDemo'
 import WhereItWorks from './components/WhereItWorks'
 
+declare global {
+  interface Window {
+    goatcounter?: { bind_events?: () => void }
+  }
+}
+
 function App() {
+  // GoatCounter's count.js binds its [data-goatcounter-click] handlers once, on
+  // script load — which on this SPA happens before React has rendered any of the
+  // CTAs. Without re-binding after mount, no download or GitHub click ever
+  // reports, and the dashboard silently shows zero conversions forever.
+  useEffect(() => {
+    window.goatcounter?.bind_events?.()
+  }, [])
+
   useEffect(() => {
     const root = document.documentElement
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
