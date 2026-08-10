@@ -5,8 +5,19 @@ Fable review pass; review fixes: active heatmap range pill gained an inset
 `accent-rule` ring for dark-mode edge definition, and dark
 `--vw-color-text-hint` was raised `#7d7d86`→`#84848e` to clear 4.5:1 AA on
 cards — every other audited pair passed). Gates: tsc clean, vitest 74/74,
-cargo 344 lib + integration all green, `vite build` succeeds. Desktop
-visual smoke test in both themes still pending before release.
+cargo 344 lib + integration all green, `vite build` succeeds.
+
+Smoke-test finding (2026-08-10): the shipped app shell and Home screen live in
+`src/prototype/` (Layout.tsx, Dashboard.tsx, constants.ts `ONYX_PALETTE`) —
+NOT in components/ — and were missed by every migration scope, leaving a
+half-light shell with unreadable dark-gray-on-dark card text. Fixed: the
+ONYX_PALETTE class strings and both components now use semantic tokens, and
+three tokens were added for the Harmonic shell — `--vw-color-shell`
+(`#efeff3`/`#060609`), `--vw-color-canvas` (`#ffffff`/`#101014`),
+`--vw-recording-fill` (`#000000`/`#2a2a31`). Dark elevation order is
+shell < page < canvas < surface < inset. Deliberately literal: the recording
+waveform panel (black + white bars, both themes) and the brand accent
+hexes/gradients in constants.ts. Visual pass in both themes still pending.
 
 ## Product intent
 

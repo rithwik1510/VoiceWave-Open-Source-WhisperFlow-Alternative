@@ -88,8 +88,8 @@ export const Layout: React.FC<LayoutProps> = ({
           ${shapes.navItemShape}
           ${
             isActive
-              ? "bg-white text-[#09090B] font-semibold shadow-[0_1px_2px_rgba(9,9,11,0.05)] border border-[#E4E4E7]"
-              : "border border-transparent text-[#52525B] hover:bg-white/55 hover:text-[#09090B]"
+              ? "bg-surface text-ink-strong font-semibold shadow-[var(--vw-shadow-card)] border border-edge"
+              : "border border-transparent text-quiet hover:bg-surface-hover hover:text-ink-strong"
           }
         `}
         type="button"
@@ -97,7 +97,7 @@ export const Layout: React.FC<LayoutProps> = ({
         <div className={`flex items-center ${sidebarCollapsed ? "gap-0 justify-center w-full" : "gap-3"}`}>
           <Icon
             size={17}
-            className={`vw-nav-icon ${isActive ? "text-[#09090B]" : "text-[#71717A] group-hover:text-[#09090B]"}`}
+            className={`vw-nav-icon ${isActive ? "text-ink-strong" : "text-faint group-hover:text-ink-strong"}`}
           />
           <span className="vw-nav-label">{item.label}</span>
         </div>
@@ -122,7 +122,7 @@ export const Layout: React.FC<LayoutProps> = ({
             <>
               <button
                 type="button"
-                className="h-8 w-8 text-[#52525B] transition hover:text-[#18181B]"
+                className="h-8 w-8 text-quiet transition hover:text-ink"
                 onClick={() => setSidebarCollapsed((prev) => !prev)}
                 aria-label="Expand sidebar"
                 title="Expand sidebar"
@@ -160,7 +160,7 @@ export const Layout: React.FC<LayoutProps> = ({
               </div>
               <button
                 type="button"
-                className="ml-auto h-8 w-8 text-[#52525B] transition hover:text-[#18181B]"
+                className="ml-auto h-8 w-8 text-quiet transition hover:text-ink"
                 onClick={() => setSidebarCollapsed((prev) => !prev)}
                 aria-label="Collapse sidebar"
                 title="Collapse sidebar"
@@ -189,7 +189,7 @@ export const Layout: React.FC<LayoutProps> = ({
               >
                 {isPro ? "PRO ACTIVE" : "PRO"}
               </span>
-              <p className="mt-2.5 mb-3 text-xs leading-relaxed text-[#52525B]">
+              <p className="mt-2.5 mb-3 text-xs leading-relaxed text-quiet">
                 {isPro
                   ? "Format profiles, code mode, and power history are unlocked on this device."
                   : "The release offer unlocks every Pro tool for coders and students."}
@@ -230,8 +230,8 @@ export const Layout: React.FC<LayoutProps> = ({
         <header className={`h-14 flex items-center justify-between px-6 flex-shrink-0 z-20 ${colors.shellBg}`}>
           <div className="flex items-center gap-3 text-sm">
             {isRecording && (
-              <div className={`px-3 py-1 flex items-center gap-2 ${colors.recording} text-white rounded-full text-xs font-medium`}>
-                <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+              <div className={`px-3 py-1 flex items-center gap-2 ${colors.recording} text-on-accent rounded-full text-xs font-medium`}>
+                <div className="w-2 h-2 rounded-full bg-on-accent animate-pulse" />
                 Recording
               </div>
             )}
@@ -241,7 +241,7 @@ export const Layout: React.FC<LayoutProps> = ({
             <div ref={profileMenuRef} className="relative">
               <button
                 type="button"
-                className="flex items-center gap-3 rounded-full px-1.5 py-1 transition hover:bg-white/50"
+                className="flex items-center gap-3 rounded-full px-1.5 py-1 transition hover:bg-surface-hover"
                 onClick={() => setProfileMenuOpen((prev) => !prev)}
                 aria-haspopup="menu"
                 aria-expanded={profileMenuOpen}
@@ -251,8 +251,8 @@ export const Layout: React.FC<LayoutProps> = ({
                   <UserCircle size={20} className="opacity-70" />
                 </div>
                 <div className="text-sm hidden sm:block text-left">
-                  <p className="leading-none font-medium text-[#09090B]">{profileDisplayName}</p>
-                  <p className="mt-1 text-[11px] leading-none text-[#71717A]">{profileStatusLabel}</p>
+                  <p className="leading-none font-medium text-ink-strong">{profileDisplayName}</p>
+                  <p className="mt-1 text-[11px] leading-none text-faint">{profileStatusLabel}</p>
                 </div>
               </button>
               {profileMenuOpen && (
@@ -292,7 +292,7 @@ export const Layout: React.FC<LayoutProps> = ({
 
         <div className="flex-1 overflow-hidden relative pr-2 pb-2">
           <div
-            className={`vw-canvas-scroll w-full h-full overflow-y-auto relative ${colors.canvasBg} rounded-3xl border border-[#E4E4E7] shadow-[0_1px_3px_rgba(9,9,11,0.04)]`}
+            className={`vw-canvas-scroll w-full h-full overflow-y-auto relative ${colors.canvasBg} rounded-3xl border border-edge shadow-[var(--vw-shadow-card)]`}
           >
             <div className="px-6 py-6 min-h-full">{children}</div>
           </div>

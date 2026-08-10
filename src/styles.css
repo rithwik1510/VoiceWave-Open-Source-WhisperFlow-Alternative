@@ -37,6 +37,11 @@
   --vw-color-surface-subtle: #f4f4f5;
   --vw-color-surface-hover: #f8f8f8;
   --vw-color-row-hover: #fcfcfd;
+  /* App shell (outside the canvas card) and the canvas itself — the shipped
+     Harmonic layout in src/prototype (plan 014). */
+  --vw-color-shell: #efeff3;
+  --vw-color-canvas: #ffffff;
+  --vw-recording-fill: #000000;
   --vw-color-border: #e4e4e7;
   --vw-color-border-strong: #d4d4d8;
   --vw-color-divider: #f1f1f3;
@@ -150,6 +155,9 @@
   --vw-color-surface-subtle: #212127;
   --vw-color-surface-hover: #22222a;
   --vw-color-row-hover: #1c1c22;
+  --vw-color-shell: #060609;
+  --vw-color-canvas: #101014;
+  --vw-recording-fill: #2a2a31;
   --vw-color-border: #26262c;
   --vw-color-border-strong: #34343c;
   --vw-color-divider: #1e1e24;

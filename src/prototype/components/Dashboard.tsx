@@ -125,9 +125,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <p className={`${colors.textSecondary} text-lg font-light opacity-80`}>System is local and secure. Ready to transcribe.</p>
         </div>
 
-        <div className="flex items-center gap-2 pb-1 text-sm text-[#71717A]">
+        <div className="flex items-center gap-2 pb-1 text-sm text-faint">
           <span>Hold</span>
-          <kbd className="rounded-lg border border-[#E4E4E7] bg-white px-2 py-1 font-sans text-xs font-semibold text-[#09090B] shadow-[0_1px_2px_rgba(9,9,11,0.05)]">
+          <kbd className="rounded-lg border border-edge bg-surface px-2 py-1 font-sans text-xs font-semibold text-ink-strong shadow-[var(--vw-shadow-card)]">
             {pushToTalkHotkey}
           </kbd>
           <span>to dictate anywhere</span>
@@ -303,7 +303,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   ))}
                 </div>
               ) : (
-                <p className="text-[#52525B] text-sm md:text-base leading-relaxed text-left md:text-center max-w-[56rem]">
+                <p className="text-quiet text-sm md:text-base leading-relaxed text-left md:text-center max-w-[56rem]">
                   {idleHint}
                 </p>
               )}
@@ -319,7 +319,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         >
           {transcriptRows.length === 0 && (
             <div className="px-6 py-8 text-center">
-              <p className="text-sm text-[#71717A]">
+              <p className="text-sm text-faint">
                 {historyOff
                   ? "History is off, so dictations aren't kept. Turn it on in the History tab to see them here."
                   : "Your recent dictations will appear here."}
@@ -330,15 +330,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div
               key={row.id}
               className={`grid grid-cols-[110px_1fr] gap-0 ${
-                index !== transcriptRows.length - 1 ? `border-b border-[#F1F1F3]` : ""
+                index !== transcriptRows.length - 1 ? `border-b border-hairline` : ""
               } ${row.latest ? "vw-home-row-latest" : ""}`}
             >
-              <div className="px-6 py-4 text-sm text-[#71717A]">{row.time}</div>
+              <div className="px-6 py-4 text-sm text-faint">{row.time}</div>
               <div
                 className={`px-6 py-4 text-base leading-relaxed ${
                   row.latest
-                    ? "text-[#09090B] font-medium"
-                    : "text-[#27272A]"
+                    ? "text-ink-strong font-medium"
+                    : "text-ink"
                 }`}
               >
                 {row.text}
@@ -347,8 +347,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           ))}
           {transcriptRows.length === 0 && (
             <div className="px-6 py-10 text-center">
-              <p className="text-sm font-medium text-[#09090B]">Nothing dictated yet today</p>
-              <p className="mt-1 text-sm text-[#71717A]">
+              <p className="text-sm font-medium text-ink-strong">Nothing dictated yet today</p>
+              <p className="mt-1 text-sm text-faint">
                 Hold {pushToTalkHotkey} in any app and your words will land here.
               </p>
             </div>
