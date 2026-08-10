@@ -174,8 +174,10 @@
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
   --vw-ring-shell-bg: rgba(92, 179, 255, 0.12);
   /* Fully opaque in dark: the light theme's 1.5% translucency lets the
-     bright comet bleed through the card face as a ghost shape at night. */
-  --vw-ring-inner-bg: #1e2128;
+     bright comet bleed through the card face as a ghost shape at night.
+     The vertical sheen (lighter top) + inset highlight below give the flat
+     night surface its card-ness. */
+  --vw-ring-inner-bg: linear-gradient(180deg, #252a35 0%, #1e2128 62%);
   /* No halo in the dark theme — any blue box-shadow reads as a glowing
      rectangle against night surfaces. The ring itself is the accent. */
   --vw-ring-glow: none;
@@ -1158,6 +1160,23 @@ body {
    180° behind for balance. Full brightness is fine because at any instant
    only ~15% of the perimeter carries light; the shell hairline keeps the
    resting edge defined. */
+/* Night card relief: top inner highlight (overhead light), sheen via the
+   inner-bg gradient, and a real drop into the canvas. Light mode keeps its
+   paper-flat treatment. */
+:root[data-theme="dark"] .vw-ring-inner {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 14px 30px -18px rgba(0, 0, 0, 0.65) !important;
+}
+
+:root[data-theme="dark"] .vw-home-transcript-card,
+:root[data-theme="dark"] .vw-home-state-output:not(.bg-black) {
+  background: linear-gradient(180deg, #232833 0%, #1e2128 70%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 12px 26px -18px rgba(0, 0, 0, 0.6) !important;
+}
+
 :root[data-theme="dark"] .vw-ring-shell::before {
   background: conic-gradient(
     from 0deg,
