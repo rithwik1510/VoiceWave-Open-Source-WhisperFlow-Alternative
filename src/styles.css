@@ -137,31 +137,34 @@
 --------------------------------------------------------------------------- */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  color: #f4f4f5;
-  background-color: #0b0b0e;
+  color: #f3f5f9;
+  background-color: #12151d;
 
-  --vw-ink: #e4e4e7;
-  --vw-ink-strong: #fafafa;
-  --vw-ink-hover: #d4d4d8;
-  --vw-ink-contrast: #09090b;
-  --vw-color-text-primary: #f4f4f5;
-  --vw-color-text-secondary: #a3adbb;
-  --vw-color-text-muted: #8b8b94;
-  --vw-color-text-label: #d4d4d8;
-  --vw-color-text-quiet: #a1a1aa;
-  --vw-color-text-hint: #84848e;
-  --vw-color-surface: #17171b;
-  --vw-color-surface-soft: #0b0b0e;
-  --vw-color-surface-subtle: #212127;
-  --vw-color-surface-hover: #22222a;
-  --vw-color-row-hover: #1c1c22;
-  --vw-color-shell: #060609;
-  --vw-color-canvas: #101014;
-  --vw-recording-fill: #2a2a31;
-  --vw-color-border: #26262c;
-  --vw-color-border-strong: #34343c;
-  --vw-color-divider: #1e1e24;
-  --vw-track-quiet: #26262c;
+  /* Night neutrals are blue-tinted (hue ~220, the Signal Blue family) with
+     WIDE lightness steps between layers — shell < page < canvas < surface <
+     inset — so the dark UI layers like paper/off-white does in light. */
+  --vw-ink: #e6eaf1;
+  --vw-ink-strong: #f7f9fc;
+  --vw-ink-hover: #d7dde7;
+  --vw-ink-contrast: #0b0d12;
+  --vw-color-text-primary: #f3f5f9;
+  --vw-color-text-secondary: #a9b4c7;
+  --vw-color-text-muted: #97a0b0;
+  --vw-color-text-label: #d5dae3;
+  --vw-color-text-quiet: #a7aebc;
+  --vw-color-text-hint: #8e97a8;
+  --vw-color-surface: #1d222d;
+  --vw-color-surface-soft: #12151d;
+  --vw-color-surface-subtle: #29303e;
+  --vw-color-surface-hover: #2b3240;
+  --vw-color-row-hover: #222835;
+  --vw-color-shell: #0b0d12;
+  --vw-color-canvas: #161a23;
+  --vw-recording-fill: #333b4b;
+  --vw-color-border: #2f3745;
+  --vw-color-border-strong: #3e4859;
+  --vw-color-divider: #262d3a;
+  --vw-track-quiet: #2f3745;
   --vw-scrim: rgba(0, 0, 0, 0.6);
   --vw-scrim-strong: rgba(0, 0, 0, 0.72);
 
@@ -169,14 +172,14 @@
   --vw-accent-rule: rgba(27, 142, 255, 0.55);
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
   --vw-ring-shell-bg: linear-gradient(180deg, rgba(27, 142, 255, 0.16) 0%, rgba(126, 216, 255, 0.12) 100%);
-  --vw-ring-inner-bg: rgba(23, 23, 27, 0.985);
+  --vw-ring-inner-bg: rgba(29, 34, 45, 0.985);
 
   --vw-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.45);
   --vw-shadow-float: 0 16px 40px rgba(0, 0, 0, 0.6);
 
-  --vw-state-idle-border: #2e323a;
-  --vw-state-idle-accent: #8b98a8;
-  --vw-state-idle-accent-soft: #454e5c;
+  --vw-state-idle-border: #384253;
+  --vw-state-idle-accent: #97a5ba;
+  --vw-state-idle-accent-soft: #4d586c;
   --vw-state-listening-border: #2f9dff;
   --vw-state-listening-accent: #4db2ff;
   --vw-state-listening-accent-soft: #1d5c96;
@@ -202,16 +205,16 @@
   --vw-status-success: #4ade80;
   --vw-status-success-text: #4ade80;
 
-  --vw-heat-empty: #1e242e;
+  --vw-heat-empty: #262e3d;
   --vw-heat-1: #173157;
   --vw-heat-2: #1e4f96;
   --vw-heat-3: #1b8eff;
   --vw-heat-4: #7ed8ff;
 
-  --vw-onb-canvas: #0a0a0d;
-  --vw-onb-dot-idle: #3a3a44;
-  --vw-onb-key-border: #34343c;
-  --vw-onb-dock-bg: rgba(23, 23, 27, 0.9);
+  --vw-onb-canvas: #0a0c11;
+  --vw-onb-dot-idle: #3d4553;
+  --vw-onb-key-border: #3e4859;
+  --vw-onb-dock-bg: rgba(29, 34, 45, 0.9);
   --vw-onb-dock-track: #1d2a3d;
 }
 
