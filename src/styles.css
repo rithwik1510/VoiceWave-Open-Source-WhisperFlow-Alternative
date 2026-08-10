@@ -1150,19 +1150,27 @@ body {
   animation: vw-accent-border-flow var(--vw-ring-speed) linear infinite;
 }
 
-/* Night: the conic's near-transparent navy tail vanishes against dark, which
-   breaks the ring into floating bright arcs and lets the sweep read as stray
-   lines. Keep every stop visible-but-quiet so the ring stays a continuous
-   hairline with a soft comet, not glow artifacts. */
+/* Night: a fully-lit border reads as a neon rectangle on dark, so instead of
+   dimming the ring, dark lights only a traveling segment — a bright comet
+   with a fading tail orbiting the card (border-beam), plus a fainter twin
+   180° behind for balance. Full brightness is fine because at any instant
+   only ~15% of the perimeter carries light; the shell hairline keeps the
+   resting edge defined. */
 :root[data-theme="dark"] .vw-ring-shell::before {
   background: conic-gradient(
-    from 8deg,
-    rgba(92, 179, 255, 0.12) 0deg,
-    rgba(27, 142, 255, 0.3) 132deg,
-    rgba(126, 216, 255, 0.34) 236deg,
-    rgba(167, 232, 255, 0.28) 302deg,
-    rgba(27, 142, 255, 0.26) 342deg,
-    rgba(92, 179, 255, 0.12) 360deg
+    from 0deg,
+    transparent 0deg,
+    transparent 118deg,
+    rgba(10, 42, 140, 0.0) 128deg,
+    rgba(27, 142, 255, 0.35) 152deg,
+    rgba(126, 216, 255, 0.7) 168deg,
+    transparent 178deg,
+    transparent 298deg,
+    rgba(10, 42, 140, 0.0) 306deg,
+    rgba(27, 142, 255, 0.55) 330deg,
+    rgba(126, 216, 255, 0.95) 348deg,
+    rgba(196, 236, 255, 1) 356deg,
+    transparent 360deg
   );
 }
 
