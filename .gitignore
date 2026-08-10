@@ -80,3 +80,7 @@ scripts/llm-polish/wheelhouse-cuda/
 /Marketing plans/
 /export-voicewave-demo.mjs
 .gstack/
+
+# pi-subagents mission state
+.pi-subagents/
+nul
