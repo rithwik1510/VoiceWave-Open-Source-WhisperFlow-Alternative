@@ -71,6 +71,7 @@
   --vw-glow-blue: 0 8px 20px -10px rgba(27, 142, 255, 0.55);
   --vw-ring-shell-bg: linear-gradient(180deg, rgba(229, 242, 255, 0.68) 0%, rgba(231, 246, 255, 0.62) 100%);
   --vw-ring-inner-bg: rgba(255, 255, 255, 0.985);
+  --vw-ring-glow: 0 10px 26px -14px rgba(27, 142, 255, 0.4);
 
   /* Radii */
   --vw-radius-lg: 16px;
@@ -137,49 +138,50 @@
 --------------------------------------------------------------------------- */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  color: #f3f5f9;
-  background-color: #12151d;
+  color: #f3f5f8;
+  background-color: #13151a;
 
-  /* Night neutrals are blue-tinted (hue ~220, the Signal Blue family) with
-     WIDE lightness steps between layers — shell < page < canvas < surface <
-     inset — so the dark UI layers like paper/off-white does in light. */
-  --vw-ink: #e6eaf1;
-  --vw-ink-strong: #f7f9fc;
-  --vw-ink-hover: #d7dde7;
-  --vw-ink-contrast: #0b0d12;
-  --vw-color-text-primary: #f3f5f9;
-  --vw-color-text-secondary: #a9b4c7;
-  --vw-color-text-muted: #97a0b0;
-  --vw-color-text-label: #d5dae3;
-  --vw-color-text-quiet: #a7aebc;
-  --vw-color-text-hint: #8e97a8;
-  --vw-color-surface: #1d222d;
-  --vw-color-surface-soft: #12151d;
-  --vw-color-surface-subtle: #29303e;
-  --vw-color-surface-hover: #2b3240;
-  --vw-color-row-hover: #222835;
-  --vw-color-shell: #0b0d12;
-  --vw-color-canvas: #161a23;
-  --vw-recording-fill: #333b4b;
-  --vw-color-border: #2f3745;
-  --vw-color-border-strong: #3e4859;
-  --vw-color-divider: #262d3a;
-  --vw-track-quiet: #2f3745;
+  /* Night neutrals carry a WHISPER of the Signal Blue hue (~220, low sat)
+     with WIDE lightness steps between layers — shell < page < canvas <
+     surface < inset — so the dark UI layers like paper/off-white in light. */
+  --vw-ink: #e7e9ee;
+  --vw-ink-strong: #f7f8fb;
+  --vw-ink-hover: #d8dbe2;
+  --vw-ink-contrast: #0c0d11;
+  --vw-color-text-primary: #f3f5f8;
+  --vw-color-text-secondary: #a9b1bf;
+  --vw-color-text-muted: #98a0ab;
+  --vw-color-text-label: #d6d9e0;
+  --vw-color-text-quiet: #a8aeb9;
+  --vw-color-text-hint: #8f96a2;
+  --vw-color-surface: #1e2128;
+  --vw-color-surface-soft: #13151a;
+  --vw-color-surface-subtle: #2a2d36;
+  --vw-color-surface-hover: #2b2f38;
+  --vw-color-row-hover: #22252d;
+  --vw-color-shell: #0c0d11;
+  --vw-color-canvas: #16181e;
+  --vw-recording-fill: #343a46;
+  --vw-color-border: #30343d;
+  --vw-color-border-strong: #3f4450;
+  --vw-color-divider: #262932;
+  --vw-track-quiet: #30343d;
   --vw-scrim: rgba(0, 0, 0, 0.6);
   --vw-scrim-strong: rgba(0, 0, 0, 0.72);
 
   --vw-accent-text: #5cb3ff;
   --vw-accent-rule: rgba(27, 142, 255, 0.55);
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
-  --vw-ring-shell-bg: linear-gradient(180deg, rgba(27, 142, 255, 0.16) 0%, rgba(126, 216, 255, 0.12) 100%);
-  --vw-ring-inner-bg: rgba(29, 34, 45, 0.985);
+  --vw-ring-shell-bg: rgba(92, 179, 255, 0.2);
+  --vw-ring-inner-bg: rgba(30, 33, 40, 0.985);
+  --vw-ring-glow: 0 6px 16px -14px rgba(27, 142, 255, 0.18);
 
   --vw-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.45);
   --vw-shadow-float: 0 16px 40px rgba(0, 0, 0, 0.6);
 
-  --vw-state-idle-border: #384253;
-  --vw-state-idle-accent: #97a5ba;
-  --vw-state-idle-accent-soft: #4d586c;
+  --vw-state-idle-border: #363e4b;
+  --vw-state-idle-accent: #95a1b2;
+  --vw-state-idle-accent-soft: #4c5563;
   --vw-state-listening-border: #2f9dff;
   --vw-state-listening-accent: #4db2ff;
   --vw-state-listening-accent-soft: #1d5c96;
@@ -205,16 +207,16 @@
   --vw-status-success: #4ade80;
   --vw-status-success-text: #4ade80;
 
-  --vw-heat-empty: #262e3d;
+  --vw-heat-empty: #272a34;
   --vw-heat-1: #173157;
   --vw-heat-2: #1e4f96;
   --vw-heat-3: #1b8eff;
   --vw-heat-4: #7ed8ff;
 
-  --vw-onb-canvas: #0a0c11;
-  --vw-onb-dot-idle: #3d4553;
-  --vw-onb-key-border: #3e4859;
-  --vw-onb-dock-bg: rgba(29, 34, 45, 0.9);
+  --vw-onb-canvas: #0b0c10;
+  --vw-onb-dot-idle: #3d4350;
+  --vw-onb-key-border: #3f4450;
+  --vw-onb-dock-bg: rgba(30, 33, 40, 0.9);
   --vw-onb-dock-track: #1d2a3d;
 }
 
@@ -1112,7 +1114,7 @@ body {
   padding: var(--vw-ring-size);
   border-radius: var(--vw-ring-radius);
   background: var(--vw-ring-shell-bg);
-  box-shadow: 0 10px 26px -14px rgba(27, 142, 255, 0.4);
+  box-shadow: var(--vw-ring-glow);
 }
 
 .vw-ring-shell-lg {
@@ -1144,6 +1146,22 @@ body {
   );
   transform-origin: center;
   animation: vw-accent-border-flow var(--vw-ring-speed) linear infinite;
+}
+
+/* Night: the conic's near-transparent navy tail vanishes against dark, which
+   breaks the ring into floating bright arcs and lets the sweep read as stray
+   lines. Keep every stop visible-but-quiet so the ring stays a continuous
+   hairline with a soft comet, not glow artifacts. */
+:root[data-theme="dark"] .vw-ring-shell::before {
+  background: conic-gradient(
+    from 8deg,
+    rgba(92, 179, 255, 0.24) 0deg,
+    rgba(27, 142, 255, 0.6) 132deg,
+    rgba(126, 216, 255, 0.66) 236deg,
+    rgba(167, 232, 255, 0.58) 302deg,
+    rgba(27, 142, 255, 0.55) 342deg,
+    rgba(92, 179, 255, 0.24) 360deg
+  );
 }
 
 .vw-ring-inner {
