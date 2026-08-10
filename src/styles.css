@@ -172,7 +172,7 @@
   --vw-accent-text: #5cb3ff;
   --vw-accent-rule: rgba(27, 142, 255, 0.55);
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
-  --vw-ring-shell-bg: rgba(92, 179, 255, 0.2);
+  --vw-ring-shell-bg: rgba(92, 179, 255, 0.12);
   --vw-ring-inner-bg: rgba(30, 33, 40, 0.985);
   /* No halo in the dark theme — any blue box-shadow reads as a glowing
      rectangle against night surfaces. The ring itself is the accent. */
@@ -1157,12 +1157,12 @@ body {
 :root[data-theme="dark"] .vw-ring-shell::before {
   background: conic-gradient(
     from 8deg,
-    rgba(92, 179, 255, 0.24) 0deg,
-    rgba(27, 142, 255, 0.6) 132deg,
-    rgba(126, 216, 255, 0.66) 236deg,
-    rgba(167, 232, 255, 0.58) 302deg,
-    rgba(27, 142, 255, 0.55) 342deg,
-    rgba(92, 179, 255, 0.24) 360deg
+    rgba(92, 179, 255, 0.12) 0deg,
+    rgba(27, 142, 255, 0.3) 132deg,
+    rgba(126, 216, 255, 0.34) 236deg,
+    rgba(167, 232, 255, 0.28) 302deg,
+    rgba(27, 142, 255, 0.26) 342deg,
+    rgba(92, 179, 255, 0.12) 360deg
   );
 }
 
