@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { StatsSummary } from "../types/voicewave";
@@ -17,7 +17,25 @@ const SUMMARY: StatsSummary = {
   timeSavedMsAllTime: Math.round((58316 / 40 - 439) * 60_000),
   timeSavedMsMonth: 42 * 60_000,
   typingBaselineWpm: 40,
-  activeDays: 49
+  activeDays: 49,
+  // plan 013 additions.
+  days: [
+    {
+      date: "2026-07-17",
+      words: 320,
+      dictations: 5,
+      appClasses: [{ name: "Slack", count: 3 }]
+    }
+  ],
+  longestStreakDays: 12,
+  currentStreakDays: 3,
+  topAppClasses: [
+    { name: "Slack", count: 3 },
+    { name: "VS Code", count: 2 }
+  ],
+  wordsCleanedUp: 412,
+  clarityScore: 87,
+  rangeDays: 30
 };
 
 const getStatsSummary = vi.fn();
@@ -72,5 +90,48 @@ describe("StatsSection hero tier", () => {
 
     expect(await screen.findByText("No numbers yet")).toBeInTheDocument();
     expect(screen.getByText("Dictate once and your numbers appear here.")).toBeInTheDocument();
+  });
+
+  it("renders the streak heatmap and insight panels", async () => {
+    const { StatsSection } = await import("./StatsSection");
+    render(<StatsSection />);
+
+    // Heatmap header + range selector.
+    expect(await screen.findByText("Activity")).toBeInTheDocument();
+    expect(screen.getByText("1 month")).toBeInTheDocument();
+    expect(screen.getByText("3 months")).toBeInTheDocument();
+    expect(screen.getByText("1 year")).toBeInTheDocument();
+    // Streak chips (current alive + longest).
+    expect(screen.getByText("3 day streak")).toBeInTheDocument();
+    expect(screen.getByText("Longest: 12 days")).toBeInTheDocument();
+
+    // Where you dictate (top app classes).
+    expect(screen.getByText("Where you dictate")).toBeInTheDocument();
+    expect(screen.getByText("Slack")).toBeInTheDocument();
+    expect(screen.getByText("VS Code")).toBeInTheDocument();
+
+    // Words cleaned up chip.
+    expect(screen.getByText("412 filler words never made it to the page")).toBeInTheDocument();
+
+    // Voice clarity (0-100).
+    expect(screen.getByText("Voice clarity")).toBeInTheDocument();
+    expect(screen.getByText(/87/)).toBeInTheDocument();
+  });
+
+  it("refetches with the selected range when the heatmap range changes", async () => {
+    const { StatsSection } = await import("./StatsSection");
+    render(<StatsSection />);
+
+    await screen.findByText("Activity");
+    expect(getStatsSummary).toHaveBeenLastCalledWith(30);
+
+    const yearButton = screen.getByRole("button", { name: "1 year" });
+    await act(() => {
+      yearButton.click();
+    });
+
+    await waitFor(() => {
+      expect(getStatsSummary).toHaveBeenLastCalledWith(365);
+    });
   });
 });

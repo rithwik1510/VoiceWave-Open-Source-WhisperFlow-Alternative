@@ -1106,8 +1106,16 @@ async fn get_history_retention(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-async fn get_stats_summary(runtime: State<'_, RuntimeContext>) -> Result<StatsSummary, String> {
-    Ok(runtime.controller.get_stats_summary().await)
+async fn get_stats_summary(
+    runtime: State<'_, RuntimeContext>,
+    range_days: Option<u32>,
+) -> Result<StatsSummary, String> {
+    // Normalize to a supported window (30/91/365, default 30).
+    let window = match range_days {
+        Some(d) if d == 30 || d == 91 || d == 365 => d,
+        _ => 30,
+    };
+    Ok(runtime.controller.get_stats_summary(window).await)
 }
 
 #[cfg(feature = "desktop")]

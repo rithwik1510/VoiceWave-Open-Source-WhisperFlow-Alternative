@@ -3078,8 +3078,14 @@ impl VoiceWaveController {
         self.history_manager.lock().await.retention_policy()
     }
 
-    pub async fn get_stats_summary(&self) -> StatsSummary {
-        self.stats_manager.lock().await.summary()
+    pub async fn get_stats_summary(&self, range_days: u32) -> StatsSummary {
+        self.stats_manager
+            .lock()
+            .await
+            .summary_for_window(
+                chrono::Local::now().date_naive(),
+                range_days,
+            )
     }
 
     pub async fn prune_history_now(&self, _app: AppHandle) -> Result<usize, ControllerError> {
@@ -4689,15 +4695,21 @@ impl VoiceWaveController {
         );
         // Always-on aggregate stats (counts and durations only, never text)
         // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
-        // diagnostics gates the detailed per-utterance records below.
-        if let Err(err) = self.stats_manager.lock().await.record_dictation(
-            now_utc_ms(),
-            asr_final_word_count,
-            asr_raw_word_count,
-            audio_duration_ms,
-            Some(insertion_target_class.as_str()),
-        ) {
-            eprintln!("stats record failed: {err}");
+        // diagnostics gates the detailed per-utterance records below. Only
+        // successful insertions feed these numbers so a decode that never
+        // landed does not inflate "words dictated / time saved".
+        if insertion_success {
+            if let Err(err) = self.stats_manager.lock().await.record_dictation(
+                now_utc_ms(),
+                asr_final_word_count,
+                asr_raw_word_count,
+                audio_duration_ms,
+                Some(insertion_target_class.as_str()),
+                decode_telemetry.fw_avg_logprob,
+                decode_telemetry.fw_no_speech_prob,
+            ) {
+                eprintln!("stats record failed: {err}");
+            }
         }
         if settings.diagnostics_opt_in {
             let _ = self

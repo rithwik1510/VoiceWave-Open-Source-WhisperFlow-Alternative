@@ -486,8 +486,11 @@ export async function getHistoryRetention(): Promise<RetentionPolicy> {
   return invokeVoicewave<RetentionPolicy>("get_history_retention");
 }
 
-export async function getStatsSummary(): Promise<StatsSummary> {
-  return invokeVoicewave<StatsSummary>("get_stats_summary");
+export async function getStatsSummary(rangeDays?: number): Promise<StatsSummary> {
+  return invokeVoicewave<StatsSummary>(
+    "get_stats_summary",
+    rangeDays === undefined ? {} : { rangeDays }
+  );
 }
 
 export async function pruneHistoryNow(): Promise<number> {

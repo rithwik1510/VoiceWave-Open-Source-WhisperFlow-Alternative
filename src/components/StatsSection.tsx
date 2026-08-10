@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { Clock, Gauge, TrendingDown, TrendingUp, Type } from "lucide-react";
+import {
+  AudioLines,
+  Clock,
+  Gauge,
+  MapPin,
+  Sparkles,
+  TrendingDown,
+  TrendingUp,
+  Type,
+} from "lucide-react";
 
 import { canUseTauri, getStatsSummary, listenVoicewaveHistoryUpdated } from "../lib/tauri";
 import type { StatsSummary } from "../types/voicewave";
+import { StreakHeatmap } from "./StreakHeatmap";
+
+/** Default heatmap / stats window. Backend normalizes to 30 | 91 | 365. */
+const DEFAULT_RANGE_DAYS = 30;
 
 /** Gauge scale ceiling. 200 WPM is very fast sustained speech; the arc caps
  * there so ordinary values (100-160) read as meaningful progress. */
@@ -123,6 +136,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
 export function StatsSection() {
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [unavailable, setUnavailable] = useState(!canUseTauri());
+  const [range, setRange] = useState(DEFAULT_RANGE_DAYS);
   const progress = useRiseProgress();
   const mountedRef = useRef(true);
 
@@ -133,7 +147,7 @@ export function StatsSection() {
     }
     const refresh = async () => {
       try {
-        const next = await getStatsSummary();
+        const next = await getStatsSummary(range);
         if (mountedRef.current) {
           setSummary(next);
         }
@@ -156,7 +170,13 @@ export function StatsSection() {
         unlisten();
       }
     };
-  }, []);
+  }, [range]);
+
+  const handleRangeChange = (next: number) => {
+    if (next !== range) {
+      setRange(next);
+    }
+  };
 
   const empty = !summary || summary.allTimeDictations === 0;
 
@@ -289,6 +309,89 @@ export function StatsSection() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Plan 013: heatmap + insight panels (streak, where you dictate,
+          words cleaned up, clarity). All styled to match the app design
+          language (brand-blue ramp, Onyx tokens, vw-* utilities). */}
+      <div className="mt-5 space-y-4">
+        <StreakHeatmap
+        days={summary.days}
+        currentStreak={summary.currentStreakDays}
+        longestStreak={summary.longestStreakDays}
+        rangeDays={summary.rangeDays}
+        onRangeChange={handleRangeChange}
+      />
+
+      {/* Insight: where you dictate (top app classes). */}
+      {summary.topAppClasses.length > 0 && (
+        <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
+            <MapPin size={13} className="text-[#1B8EFF]" />
+            Where you dictate
+          </p>
+          <div className="mt-4 space-y-3">
+            {summary.topAppClasses.map((app) => {
+              const max = summary.topAppClasses[0].count || 1;
+              const width = `${Math.max(6, Math.round((app.count / max) * 100))}%`;
+              return (
+                <div key={app.name} className="flex items-center gap-3">
+                  <span className="w-20 shrink-0 truncate text-xs font-medium text-[#09090B] capitalize">
+                    {app.name}
+                  </span>
+                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#E8E8EE]">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width,
+                        background:
+                          "linear-gradient(90deg,#0A2A8C,#1B8EFF)",
+                      }}
+                    />
+                  </div>
+                  <span className="w-10 shrink-0 text-right text-xs tabular-nums text-[#71717A]">
+                    {app.count.toLocaleString("en-US")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Insight: words cleaned up (raw − final). */}
+      {summary.wordsCleanedUp > 0 && (
+        <div className="vw-chip vw-chip-accent">
+          <Sparkles size={11} />
+          {formatWords(summary.wordsCleanedUp)} filler words never made it to the page
+        </div>
+      )}
+
+      {/* Insight: voice clarity (0–100, best-effort confidence estimate). */}
+      <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
+        <div className="flex items-center justify-between gap-2">
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
+            <AudioLines size={13} className="text-[#1B8EFF]" />
+            Voice clarity
+          </p>
+          <span className="text-2xl font-semibold tabular-nums text-[#09090B]">
+            {Math.round(summary.clarityScore)}
+            <span className="text-sm text-[#A1A1AA]">/100</span>
+          </span>
+        </div>
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-[#E8E8EE]">
+          <div
+            className="h-full rounded-full transition-all duration-700"
+            style={{
+              width: `${Math.max(0, Math.min(100, summary.clarityScore))}%`,
+              background: "linear-gradient(90deg,#0A2A8C,#1B8EFF)",
+            }}
+          />
+        </div>
+        <p className="mt-2 text-[11px] text-[#A1A1AA]">
+          Model-confidence estimate of how clearly VoiceWave hears you.
+        </p>
+      </div>
       </div>
 
       <p className="mt-4 text-xs text-[#A1A1AA]">

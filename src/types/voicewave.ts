@@ -241,8 +241,24 @@ export interface MicLevelEvent {
   error?: string | null;
 }
 
-/** Aggregate dictation statistics (hero tier). All values computed on-device
- * from anonymous per-day rollups — never transcript text. */
+/** Count of dictations for one insertion-target class ("editor", "browser", ...). */
+export interface AppClassCount {
+  name: string;
+  count: number;
+}
+
+/** One calendar day of dictation activity. `appClasses` is the top-3 for the
+ * heatmap hover tooltip; `date` is a local "YYYY-MM-DD" key. */
+export interface DayBucket {
+  date: string;
+  words: number;
+  dictations: number;
+  appClasses: AppClassCount[];
+}
+
+/** Aggregate dictation statistics. All values computed on-device from
+ * anonymous per-day rollups — never transcript text. Hero tier fields plus the
+ * streak / insight / heatmap additions from plan 013. */
 export interface StatsSummary {
   todayWords: number;
   weekWords: number;
@@ -257,6 +273,18 @@ export interface StatsSummary {
   timeSavedMsMonth: number;
   typingBaselineWpm: number;
   activeDays: number;
+  /** Ordered oldest → newest, only the requested window. */
+  days: DayBucket[];
+  longestStreakDays: number;
+  currentStreakDays: number;
+  /** Desc by count, top 4. */
+  topAppClasses: AppClassCount[];
+  /** Sum(raw − final), clamped ≥ 0. */
+  wordsCleanedUp: number;
+  /** 0–100 rolling average (best-effort model-confidence data). */
+  clarityScore: number;
+  /** 30 | 91 | 365 — the heatmap window the summary was computed for. */
+  rangeDays: number;
 }
 
 export type AudioQualityBand = "good" | "fair" | "poor";

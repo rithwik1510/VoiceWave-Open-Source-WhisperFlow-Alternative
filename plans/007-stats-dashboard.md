@@ -81,6 +81,7 @@ week →").
   (1,959 dictations / 58,316 words / 132.6 WPM / 16.97 h saved). Note: stats
   recording is unconditional (aggregates only) — diagnostics opt-in gates only
   the detailed per-utterance records; a dictation counts even if insertion
-  failed (verified zero such records in live data anyway).
-- Tier 2: TODO
-- Tier 3: TODO
+  failed (verified zero such records in live data anyway). Plan 013 added an
+  insertion-success gate + backfill success gate.
+- Tier 2 (streak heatmap, records/milestones): DONE via plan 013 (streak heatmap + chips) — 2026-08
+- Tier 3 (clarity score, words cleaned up, where you dictate): DONE via plan 013 — 2026-08
