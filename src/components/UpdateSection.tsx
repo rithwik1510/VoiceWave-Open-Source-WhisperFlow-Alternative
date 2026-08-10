@@ -118,24 +118,24 @@ export function UpdateSection() {
       {phase === "up-to-date" && (
         <div className="vw-set-row">
           <div className="flex items-center gap-2">
-            <span aria-hidden className="h-2 w-2 rounded-full bg-[#16A34A]" />
-            <p className="text-sm text-[#09090B]">You're up to date.</p>
+            <span aria-hidden className="h-2 w-2 rounded-full bg-status-success" />
+            <p className="text-sm text-ink-strong">You're up to date.</p>
           </div>
         </div>
       )}
 
       {phase === "error" && errorMessage && (
-        <div className="mt-3 rounded-2xl border border-[#f3c2c2] bg-[#fff1f1] px-4 py-3 text-sm text-[#a94444]">
+        <div className="mt-3 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
           {errorMessage}
         </div>
       )}
 
       {(phase === "available" || installing || (phase === "error" && update)) && update && (
-        <div className="mt-3 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
+        <div className="mt-3 rounded-2xl border border-edge bg-inset px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
               <span className="vw-chip vw-chip-accent">New v{update.version}</span>
-              <p className="text-sm text-[#09090B]">VoiceWave {update.version} is ready to install.</p>
+              <p className="text-sm text-ink-strong">VoiceWave {update.version} is ready to install.</p>
             </div>
             <button
               type="button"
@@ -147,19 +147,19 @@ export function UpdateSection() {
             </button>
           </div>
           {update.notes && !installing && (
-            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-sans text-xs text-[#52525B]">
+            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-sans text-xs text-quiet">
               {update.notes}
             </pre>
           )}
           {installing && (
             <div className="mt-3">
-              <div className="h-2 w-full overflow-hidden rounded-full bg-[#E4E4E7]">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-track">
                 <div
                   className="vw-progress-fill h-full rounded-full transition-all"
                   style={{ width: `${percent ?? 8}%` }}
                 />
               </div>
-              <p className="mt-2 text-xs text-[#71717A]">
+              <p className="mt-2 text-xs text-faint">
                 {progress?.phase === "finished"
                   ? "Installing and restarting…"
                   : percent !== null

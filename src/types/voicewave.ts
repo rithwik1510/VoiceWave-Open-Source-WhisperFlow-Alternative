@@ -1,3 +1,7 @@
+// Canonical definition lives with the resolver that consumes it.
+export type { ThemePreference } from "../lib/theme";
+import type { ThemePreference } from "../lib/theme";
+
 export type VoiceWaveHudState =
   | "idle"
   | "listening"
@@ -87,6 +91,9 @@ export interface VoiceWaveSettings {
   llmPolishEnabled?: boolean;
   /** True once the first-run onboarding flow finished (or was skipped). */
   onboardingCompleted?: boolean;
+  /** Main-window appearance (plan 014). Optional here since the backend
+   * supplies a `"system"` default when absent. */
+  theme?: ThemePreference;
   /** Active polish profile (plan 010). Optional here because backends older
    * than the DictationProfile module never send it — absence marks a legacy
    * config, and the UI falls back to inferring a profile from the old

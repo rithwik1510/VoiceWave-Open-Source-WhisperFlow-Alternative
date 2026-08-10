@@ -32,6 +32,7 @@ import {
   subscribeCloudAuth
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
+import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard } from "./lib/tauri";
 import { Onboarding } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
@@ -52,6 +53,7 @@ import type {
   PolishProfile,
   RetentionPolicy,
   SessionHistoryRecord,
+  ThemePreference,
   VoiceWaveSettings
 } from "./types/voicewave";
 
@@ -62,7 +64,7 @@ type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
 type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
-type SettingsSection = "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
+type SettingsSection = "general" | "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
 type DictionarySyncStatus = "device-local" | "syncing" | "synced" | "pending";
 type SnippetSyncStatus = DictionarySyncStatus | "limit-exceeded";
 
@@ -83,7 +85,14 @@ function snippetErrorMessage(error: unknown): string {
   return "Snippet operation failed.";
 }
 
+const THEME_OPTIONS: Array<{ value: ThemePreference; label: string }> = [
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+  { value: "system", label: "System" }
+];
+
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Mic }> = [
+  { id: "general", label: "General", icon: Palette },
   { id: "audio", label: "Audio", icon: Mic },
   { id: "dictation", label: "Dictation", icon: Keyboard },
   { id: "polish", label: "AI Polish", icon: Sparkles },
@@ -437,8 +446,8 @@ function OverlayModal({ title, subtitle, onClose, children, maxWidthClassName = 
       <section className={`vw-modal-card ${maxWidthClassName}`} role="dialog" aria-modal="true" aria-label={title}>
         <header className="vw-modal-header">
           <div>
-            <h3 className="vw-section-heading text-xl font-semibold text-[#09090B]">{title}</h3>
-            <p className="mt-1 text-sm text-[#71717A]">{subtitle}</p>
+            <h3 className="vw-section-heading text-xl font-semibold text-ink-strong">{title}</h3>
+            <p className="mt-1 text-sm text-faint">{subtitle}</p>
           </div>
           <button type="button" className="vw-modal-close" onClick={onClose} aria-label={`Close ${title}`}>
             <X size={16} />
@@ -454,7 +463,7 @@ function App() {
   const theme = THEMES.A;
   const [activeNav, setActiveNav] = useState("home");
   const [activeOverlay, setActiveOverlay] = useState<OverlayPanel | null>(null);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>("audio");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyTag, setHistoryTag] = useState("");
   const [copiedHistoryId, setCopiedHistoryId] = useState<string | null>(null);
@@ -564,6 +573,7 @@ function App() {
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
+    setTheme,
     setProPostProcessingEnabled,
     setSessionStarred,
     setVadThreshold,
@@ -801,18 +811,24 @@ function App() {
     })();
   }, [cloudUserId, snapshot.lastFinal]);
 
+  // Reconcile the pre-paint theme guess from index.html with the real setting,
+  // and re-resolve whenever it is saved.
+  useEffect(() => {
+    applyTheme(settings.theme ?? "system");
+  }, [settings.theme]);
+
   const isOverlayNav = (value: string): value is OverlayPanel =>
     value === "style" || value === "settings" || value === "help" || value === "profile" || value === "auth";
 
   const closeOverlay = () => {
     setActiveOverlay(null);
-    setSettingsSection("audio");
+    setSettingsSection("general");
   };
 
   const openOverlay = (panel: OverlayPanel) => {
     pressActiveRef.current = false;
     if (panel !== "settings") {
-      setSettingsSection("audio");
+      setSettingsSection("general");
     }
     setActiveOverlay(panel);
   };
@@ -1423,7 +1439,7 @@ function App() {
           {activeNav === "home" && (
             <>
               {!tauriAvailable && (
-                <div className="mb-6 rounded-2xl border border-[#f3c2c2] bg-[#fff1f1] px-4 py-3 text-sm text-[#a94444]">
+                <div className="mb-6 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
                   Desktop runtime is not connected. Run <span className="font-mono">npm run tauri:dev</span> to
                   enable real microphone dictation and model downloads.
                 </div>
@@ -1448,10 +1464,10 @@ function App() {
           {activeNav === "pro" && (
             <section className="vw-panel vw-panel-soft">
               <p className="vw-kicker">VoiceWave Pro</p>
-              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">
                 Power features for coders and students
               </h3>
-              <p className="mt-1 max-w-2xl text-sm text-[#71717A]">
+              <p className="mt-1 max-w-2xl text-sm text-faint">
                 Advanced formatting, domain packs, code mode, and power history tools.
               </p>
 
@@ -1463,11 +1479,11 @@ function App() {
                         <span className="vw-chip vw-chip-ink">Release Offer</span>
                         <span className="vw-chip vw-chip-accent">{proStatusLabel}</span>
                       </div>
-                      <p className="vw-section-heading mt-3 text-2xl font-semibold text-[#09090B]">
+                      <p className="vw-section-heading mt-3 text-2xl font-semibold text-ink-strong">
                         {releaseOfferHeadline}
                       </p>
-                      <p className="mt-2 text-sm text-[#3F3F46]">{releaseOfferLine}</p>
-                      <p className="mt-1 text-xs text-[#71717A]">{releaseOfferStateLine}</p>
+                      <p className="mt-2 text-sm text-label">{releaseOfferLine}</p>
+                      <p className="mt-1 text-xs text-faint">{releaseOfferStateLine}</p>
                     </div>
                     <button type="button" className="vw-btn-primary" onClick={() => setActiveNav("pro-tools")}>
                       Open Pro Tools
@@ -1485,18 +1501,18 @@ function App() {
                         <div className="vw-pro-minimal-icon">
                           <Icon size={15} />
                         </div>
-                        <p className="text-sm font-semibold text-[#09090B]">{item.title}</p>
-                        <p className="mt-1 text-xs text-[#71717A]">{item.subtitle}</p>
+                        <p className="text-sm font-semibold text-ink-strong">{item.title}</p>
+                        <p className="mt-1 text-xs text-faint">{item.subtitle}</p>
                       </article>
                     );
                   })}
                 </div>
               )}
 
-              <div className="mt-8 border-t border-[#F1F1F3] pt-4">
+              <div className="mt-8 border-t border-hairline pt-4">
                 <button
                   type="button"
-                  className="text-xs font-semibold text-[#A1A1AA] transition-colors hover:text-[#52525B]"
+                  className="text-xs font-semibold text-hint transition-colors hover:text-quiet"
                   onClick={() => setOwnerTapCount((count) => Math.min(count + 1, 5))}
                 >
                   Owner tools
@@ -1536,10 +1552,10 @@ function App() {
                 <div className="flex flex-wrap items-end justify-between gap-3">
                   <div>
                     <p className="vw-kicker">On-device Models</p>
-                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Model Manager</h3>
-                    <p className="mt-1 text-sm text-[#71717A]">
+                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Model Manager</h3>
+                    <p className="mt-1 text-sm text-faint">
                       {installedModels.length} of {modelCatalog.length} installed · active{" "}
-                      <span className="font-semibold text-[#09090B]">{settings.activeModel}</span>
+                      <span className="font-semibold text-ink-strong">{settings.activeModel}</span>
                     </p>
                   </div>
                   <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void refreshPhase3Data()}>
@@ -1559,18 +1575,18 @@ function App() {
                     const statusLabel = statusRow?.state ?? (isInstalled ? "installed" : "not installed");
                     const statusDotClass =
                       statusRow?.state === "downloading"
-                        ? "bg-[#1B8EFF]"
+                        ? "bg-accent"
                         : statusRow?.state === "failed" || statusRow?.state === "cancelled"
-                          ? "bg-[#EF4444]"
+                          ? "bg-state-error"
                           : isInstalled
-                            ? "bg-[#10B981]"
-                            : "bg-[#D4D4D8]";
+                            ? "bg-status-success"
+                            : "bg-edge-strong";
                     return (
                       <div key={model.modelId} className="px-5 py-4">
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <p className="text-sm font-semibold text-[#09090B]">{model.displayName}</p>
+                              <p className="text-sm font-semibold text-ink-strong">{model.displayName}</p>
                               {isActiveModel && <span className="vw-chip vw-chip-ink">Active</span>}
                               {!isActiveModel && model.modelId === "fw-small.en" && (
                                 <span className="vw-chip" title="Default model. Fast, accurate, works on any machine.">
@@ -1578,15 +1594,15 @@ function App() {
                                 </span>
                               )}
                             </div>
-                            <p className="mt-1 flex items-center gap-2 text-xs text-[#71717A]">
+                            <p className="mt-1 flex items-center gap-2 text-xs text-faint">
                               <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
                               <span className="capitalize">{statusLabel}</span>
-                              <span className="text-[#D4D4D8]">·</span>
+                              <span className="text-edge-strong">·</span>
                               <span>
                                 v{model.version} · {formatBytes(model.sizeBytes)} · {model.license}
                               </span>
                             </p>
-                            {statusRow?.message && <p className="mt-1 text-xs text-[#71717A]">{statusRow.message}</p>}
+                            {statusRow?.message && <p className="mt-1 text-xs text-faint">{statusRow.message}</p>}
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
                             {canInstall && (
@@ -1658,7 +1674,7 @@ function App() {
                                   }}
                                 />
                               </div>
-                              <p className="mt-1.5 text-[11px] text-[#71717A]">
+                              <p className="mt-1.5 text-[11px] text-faint">
                                 {formatBytes(statusRow.downloadedBytes)} / {formatBytes(statusRow.totalBytes)}
                                 {statusRow.state === "downloading" &&
                                   typeof modelSpeeds[model.modelId] === "number" && (
@@ -1682,8 +1698,8 @@ function App() {
                     aria-expanded={benchmarkPanelOpen}
                   >
                     <div>
-                      <p className="text-sm font-semibold text-[#09090B]">Benchmark Recommendation</p>
-                      <p className="mt-0.5 text-xs text-[#71717A]">
+                      <p className="text-sm font-semibold text-ink-strong">Benchmark Recommendation</p>
+                      <p className="mt-0.5 text-xs text-faint">
                         {modelRecommendation
                           ? `Recommended: ${modelRecommendation.modelId}`
                           : "Run a local benchmark to find the best model for this machine."}
@@ -1691,12 +1707,12 @@ function App() {
                     </div>
                     <ChevronDown
                       size={16}
-                      className={`shrink-0 text-[#71717A] transition-transform ${benchmarkPanelOpen ? "rotate-180" : ""}`}
+                      className={`shrink-0 text-faint transition-transform ${benchmarkPanelOpen ? "rotate-180" : ""}`}
                     />
                   </button>
 
                   {benchmarkPanelOpen && (
-                    <div className="border-t border-[#F1F1F3] px-5 py-4">
+                    <div className="border-t border-hairline px-5 py-4">
                       <button
                         type="button"
                         className="vw-btn-primary vw-btn-sm"
@@ -1706,17 +1722,17 @@ function App() {
                       </button>
 
                       {modelRecommendation && (
-                        <p className="mt-3 text-sm text-[#3F3F46]">
-                          <span className="font-semibold text-[#09090B]">Recommended: {modelRecommendation.modelId}</span>
+                        <p className="mt-3 text-sm text-label">
+                          <span className="font-semibold text-ink-strong">Recommended: {modelRecommendation.modelId}</span>
                           {" — "}
                           {modelRecommendation.reason}
                         </p>
                       )}
 
                       {benchmarkResults && (
-                        <div className="mt-4 overflow-x-auto rounded-xl border border-[#F1F1F3]">
+                        <div className="mt-4 overflow-x-auto rounded-xl border border-hairline">
                           <table className="w-full text-left text-sm">
-                            <thead className="text-xs uppercase tracking-wide text-[#A1A1AA]">
+                            <thead className="text-xs uppercase tracking-wide text-hint">
                               <tr>
                                 <th className="px-3 py-2 font-semibold">Model</th>
                                 <th className="px-3 py-2 font-semibold">P50</th>
@@ -1726,7 +1742,7 @@ function App() {
                             </thead>
                             <tbody>
                               {benchmarkResults.rows.map((row) => (
-                                <tr key={row.modelId} className="border-t border-[#F1F1F3] text-[#09090B]">
+                                <tr key={row.modelId} className="border-t border-hairline text-ink-strong">
                                   <td className="px-3 py-2">{row.modelId}</td>
                                   <td className="px-3 py-2 tabular-nums">{row.p50LatencyMs} ms</td>
                                   <td className="px-3 py-2 tabular-nums">{row.p95LatencyMs} ms</td>
@@ -1747,17 +1763,17 @@ function App() {
           {activeNav === "sessions" && (
             <section className="vw-panel vw-panel-soft">
               <p className="vw-kicker">Local Only</p>
-              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">History</h3>
-              <p className="mt-1 text-sm text-[#71717A]">
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">History</h3>
+              <p className="mt-1 text-sm text-faint">
                 Every dictation stays on this machine. Retention is under your control.
               </p>
 
               {historyPolicy === "off" && (
-                <div className="mt-4 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3">
+                <div className="mt-4 rounded-2xl border border-status-warn-border bg-status-warn-bg px-4 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold text-[#92400E]">History is off</p>
-                      <p className="mt-1 text-sm text-[#92400E]">
+                      <p className="text-sm font-semibold text-status-warn-text">History is off</p>
+                      <p className="mt-1 text-sm text-status-warn-text">
                         Dictations are not being saved. Turn retention on to see your transcripts here and on the dashboard.
                       </p>
                     </div>
@@ -1775,15 +1791,15 @@ function App() {
               <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
                 <div className="vw-stat-card">
                   <p className="vw-kicker">Retention</p>
-                  <p className="mt-1 text-lg font-semibold text-[#09090B]">{policyLabel(historyPolicy)}</p>
+                  <p className="mt-1 text-lg font-semibold text-ink-strong">{policyLabel(historyPolicy)}</p>
                 </div>
                 <div className="vw-stat-card">
                   <p className="vw-kicker">Records</p>
-                  <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">{sessionHistory.length}</p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-ink-strong">{sessionHistory.length}</p>
                 </div>
                 <div className="vw-stat-card">
                   <p className="vw-kicker">Success Ratio</p>
-                  <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-ink-strong">
                     {sessionHistory.length === 0
                       ? "—"
                       : `${Math.round(
@@ -1818,7 +1834,7 @@ function App() {
 
               <div className="vw-surface-base mt-5 px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#09090B]">Search &amp; Export</p>
+                  <p className="text-sm font-semibold text-ink-strong">Search &amp; Export</p>
                   <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>{isPro ? "Pro Unlocked" : "Pro"}</span>
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_200px_auto]">
@@ -1850,7 +1866,7 @@ function App() {
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-[#A1A1AA]">Export as</span>
+                  <span className="text-xs text-hint">Export as</span>
                   {(["plain", "markdownNotes", "studySummary"] as const).map((preset) => (
                     <button
                       key={preset}
@@ -1869,16 +1885,16 @@ function App() {
                   ))}
                 </div>
                 {!isPro && (
-                  <p className="mt-2 text-xs text-[#71717A]">
+                  <p className="mt-2 text-xs text-faint">
                     Search, tagging, starring, and exports are Pro features. Free keeps the full timeline and retention controls.
                   </p>
                 )}
                 {lastHistoryExport && (
-                  <div className="mt-3 rounded-xl border border-[#F1F1F3] bg-[#FAFAFA] px-3 py-2">
-                    <p className="text-xs font-semibold text-[#09090B]">
+                  <div className="mt-3 rounded-xl border border-hairline bg-inset px-3 py-2">
+                    <p className="text-xs font-semibold text-ink-strong">
                       Export ready: {lastHistoryExport.preset} ({lastHistoryExport.recordCount} records)
                     </p>
-                    <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-[#52525B]">
+                    <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-quiet">
                       {lastHistoryExport.content}
                     </pre>
                   </div>
@@ -1886,9 +1902,9 @@ function App() {
               </div>
 
               {sessionHistory.length === 0 ? (
-                <div className="mt-5 rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-10 text-center">
-                  <p className="text-sm font-medium text-[#09090B]">No sessions yet</p>
-                  <p className="mt-1 text-sm text-[#71717A]">Dictations will appear here as you use VoiceWave.</p>
+                <div className="mt-5 rounded-2xl border border-dashed border-edge px-6 py-10 text-center">
+                  <p className="text-sm font-medium text-ink-strong">No sessions yet</p>
+                  <p className="mt-1 text-sm text-faint">Dictations will appear here as you use VoiceWave.</p>
                 </div>
               ) : (
                 <div className="vw-row-list vw-list-stagger mt-5">
@@ -1902,20 +1918,20 @@ function App() {
                     <div key={record.recordId} className="vw-interactive-row px-5 py-3.5">
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
-                          <p className="truncate text-sm text-[#09090B]">{record.preview}</p>
-                          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#A1A1AA]">
+                          <p className="truncate text-sm text-ink-strong">{record.preview}</p>
+                          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-hint">
                             <span>{formatDate(record.timestampUtcMs)}</span>
-                            <span className="text-[#E4E4E7]">·</span>
+                            <span className="text-edge">·</span>
                             <span className="capitalize">{record.source}</span>
                             {record.method && (
                               <>
-                                <span className="text-[#E4E4E7]">·</span>
+                                <span className="text-edge">·</span>
                                 <span>{record.method}</span>
                               </>
                             )}
                             {record.selectedProfile && (
                               <>
-                                <span className="text-[#E4E4E7]">·</span>
+                                <span className="text-edge">·</span>
                                 <span>{POLISH_PROFILE_LABELS[record.selectedProfile]}</span>
                               </>
                             )}
@@ -1928,8 +1944,8 @@ function App() {
                             )}
                             {!record.success && (
                               <>
-                                <span className="text-[#E4E4E7]">·</span>
-                                <span className="font-semibold text-[#B3261E]">failed</span>
+                                <span className="text-edge">·</span>
+                                <span className="font-semibold text-status-danger-text">failed</span>
                               </>
                             )}
                             {record.tags.map((tag) => (
@@ -1988,7 +2004,7 @@ function App() {
                             }}
                           >
                             {copiedHistoryId === record.recordId ? (
-                              <Check size={15} className="text-[#16A34A]" />
+                              <Check size={15} className="text-status-success" />
                             ) : (
                               <Copy size={15} />
                             )}
@@ -2008,7 +2024,7 @@ function App() {
                           >
                             <Star
                               size={15}
-                              className={record.starred ? "fill-[#09090B] text-[#09090B]" : ""}
+                              className={record.starred ? "fill-ink-strong text-ink-strong" : ""}
                             />
                           </button>
                           <button
@@ -2032,23 +2048,23 @@ function App() {
                       </div>
                       {compareOpen && (
                         <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                          <div className="rounded-xl border border-[#F1F1F3] bg-[#FAFAFA] px-3 py-2">
-                            <p className="text-[10px] font-semibold uppercase tracking-wide text-[#A1A1AA]">
+                          <div className="rounded-xl border border-hairline bg-inset px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-hint">
                               Inserted
                             </p>
-                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-[#3F3F46]">
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-label">
                               {record.insertedText}
                             </p>
                           </div>
-                          <div className="rounded-xl border border-[#BFDBFE] bg-[#F5FAFF] px-3 py-2">
-                            <p className="text-[10px] font-semibold uppercase tracking-wide text-[#1B8EFF]">
+                          <div className="rounded-xl border border-status-info-border bg-status-info-bg px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-accent">
                               AI polish
                             </p>
-                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-[#3F3F46]">
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-label">
                               {record.polishedText}
                             </p>
                             {typeof record.polishLatencyMs === "number" && (
-                              <p className="mt-1.5 text-[10px] text-[#A1A1AA]">
+                              <p className="mt-1.5 text-[10px] text-hint">
                                 {(record.polishLatencyMs / 1000).toFixed(1)}s
                                 {record.polishRetried ? " · retried" : ""}
                               </p>
@@ -2088,8 +2104,8 @@ function App() {
                   </button>
                 )}
               </div>
-              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Personal Dictionary</h3>
-              <p className="mt-1 text-sm text-[#71717A]">
+              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Personal Dictionary</h3>
+              <p className="mt-1 text-sm text-faint">
                 {dictionaryTerms.length} approved {dictionaryTerms.length === 1 ? "term" : "terms"}
                 {dictionaryQueue.length > 0 ? ` · ${dictionaryQueue.length} pending review` : ""} — new suggestions
                 surface in the floating pill.
@@ -2113,7 +2129,7 @@ function App() {
                     Add
                   </button>
                 </div>
-                <p className="mt-2 text-xs text-[#71717A]">
+                <p className="mt-2 text-xs text-faint">
                   {cloudUserId
                     ? "Terms take effect on this device immediately and sync to your account when online."
                     : "Sign in to sync dictionary terms across devices."}
@@ -2123,8 +2139,8 @@ function App() {
               <div className="vw-surface-base mt-4 px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <p className="text-sm font-semibold text-[#09090B]">Domain packs</p>
-                    <p className="mt-0.5 text-xs text-[#71717A]">
+                    <p className="text-sm font-semibold text-ink-strong">Domain packs</p>
+                    <p className="mt-0.5 text-xs text-faint">
                       Curated vocabulary for your field, applied on top of your own terms.
                     </p>
                   </div>
@@ -2137,7 +2153,7 @@ function App() {
                       <button
                         key={pack}
                         type="button"
-                        className={`vw-seg-btn ${active ? "vw-seg-btn-active" : ""} border border-[#E4E4E7] capitalize`}
+                        className={`vw-seg-btn ${active ? "vw-seg-btn-active" : ""} border border-edge capitalize`}
                         aria-pressed={active}
                         onClick={() => {
                           if (!isPro) {
@@ -2159,11 +2175,11 @@ function App() {
 
               <div className="mt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2">
-                  <h4 className="text-sm font-semibold text-[#09090B]">Approved terms</h4>
-                  <span className="text-xs tabular-nums text-[#A1A1AA]">{dictionaryTerms.length} total</span>
+                  <h4 className="text-sm font-semibold text-ink-strong">Approved terms</h4>
+                  <span className="text-xs tabular-nums text-hint">{dictionaryTerms.length} total</span>
                 </div>
                 <div className="relative mb-2">
-                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#A1A1AA]" />
+                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-hint" />
                   <input
                     value={dictionarySearchQuery}
                     onChange={(event) => setDictionarySearchQuery(event.target.value)}
@@ -2173,9 +2189,9 @@ function App() {
                   />
                 </div>
                 {sortedDictionaryTerms.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-8 text-center">
-                    <p className="text-sm font-medium text-[#09090B]">No approved terms yet</p>
-                    <p className="mt-1 text-sm text-[#71717A]">
+                  <div className="rounded-2xl border border-dashed border-edge px-6 py-8 text-center">
+                    <p className="text-sm font-medium text-ink-strong">No approved terms yet</p>
+                    <p className="mt-1 text-sm text-faint">
                       Add one above, or approve suggestions from the pill after dictating.
                     </p>
                   </div>
@@ -2184,8 +2200,8 @@ function App() {
                     {sortedDictionaryTerms.map((term) => (
                       <div key={term.termId} className="vw-interactive-row flex items-center justify-between gap-3 px-4 py-2.5">
                         <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-[#09090B]">{term.term}</p>
-                          <p className="text-[11px] text-[#A1A1AA]">{term.source}</p>
+                          <p className="truncate text-sm font-medium text-ink-strong">{term.term}</p>
+                          <p className="text-[11px] text-hint">{term.source}</p>
                         </div>
                         <button
                           type="button"
@@ -2209,8 +2225,8 @@ function App() {
                   onClick={() => setDictionaryPendingOpen((open) => !open)}
                   aria-expanded={dictionaryPendingOpen}
                 >
-                  <p className="text-sm font-semibold text-[#09090B]">Pending review queue</p>
-                  <span className="flex items-center gap-2 text-xs text-[#71717A]">
+                  <p className="text-sm font-semibold text-ink-strong">Pending review queue</p>
+                  <span className="flex items-center gap-2 text-xs text-faint">
                     {dictionaryQueue.length} {dictionaryQueue.length === 1 ? "item" : "items"}
                     <ChevronDown
                       size={14}
@@ -2219,14 +2235,14 @@ function App() {
                   </span>
                 </button>
                 {dictionaryPendingOpen && (
-                  <div className="border-t border-[#F1F1F3]">
+                  <div className="border-t border-hairline">
                     {sortedDictionaryQueue.length === 0 && (
-                      <p className="px-5 py-4 text-sm text-[#71717A]">Queue is empty.</p>
+                      <p className="px-5 py-4 text-sm text-faint">Queue is empty.</p>
                     )}
                     {sortedDictionaryQueue.map((item) => (
                       <div
                         key={item.entryId}
-                        className="flex items-center justify-between gap-3 border-b border-[#F1F1F3] px-5 py-3 last:border-b-0"
+                        className="flex items-center justify-between gap-3 border-b border-hairline px-5 py-3 last:border-b-0"
                       >
                         <div className="min-w-0 flex-1">
                           <input
@@ -2240,7 +2256,7 @@ function App() {
                             }
                             aria-label={`Edit pending term ${item.term}`}
                           />
-                          <p className="mt-0.5 truncate text-xs text-[#A1A1AA]">{item.sourcePreview}</p>
+                          <p className="mt-0.5 truncate text-xs text-hint">{item.sourcePreview}</p>
                         </div>
                         <div className="flex shrink-0 gap-2">
                           <button
@@ -2265,7 +2281,7 @@ function App() {
               </div>
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-1">
-                <p className="text-xs text-[#A1A1AA]">
+                <p className="text-xs text-hint">
                   Back up approved terms as JSON, or restore them on a new install. Duplicates are skipped.
                 </p>
                 <div className="flex gap-2">
@@ -2288,7 +2304,7 @@ function App() {
                   />
                 </div>
               </div>
-              {dictionaryPortNotice && <p className="mt-2 px-1 text-xs text-[#71717A]">{dictionaryPortNotice}</p>}
+              {dictionaryPortNotice && <p className="mt-2 px-1 text-xs text-faint">{dictionaryPortNotice}</p>}
             </section>
           )}
 
@@ -2307,10 +2323,10 @@ function App() {
                             ? "Action needed"
                             : "On this device"}
                   </p>
-                  <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">
+                  <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">
                     Voice Snippets
                   </h3>
-                  <p className="mt-1 max-w-2xl text-sm text-[#71717A]">
+                  <p className="mt-1 max-w-2xl text-sm text-faint">
                     Say a memorable trigger and VoiceWave inserts the expansion exactly as saved — including casing,
                     links, symbols, and line breaks.
                   </p>
@@ -2334,7 +2350,7 @@ function App() {
 
               <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
                 <div className="relative min-w-[240px] flex-1">
-                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#A1A1AA]" />
+                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-hint" />
                   <input
                     ref={snippetSearchRef}
                     value={snippetSearchQuery}
@@ -2344,7 +2360,7 @@ function App() {
                     aria-label="Search voice snippets"
                   />
                 </div>
-                <span className="text-xs tabular-nums text-[#A1A1AA]">
+                <span className="text-xs tabular-nums text-hint">
                   {voiceSnippets.length} / 250
                 </span>
               </div>
@@ -2352,14 +2368,14 @@ function App() {
               {snippetFormOpen && (
                 <div className="vw-surface-base mt-4 px-5 py-4">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-[#09090B]">
+                    <p className="text-sm font-semibold text-ink-strong">
                       {snippetEditingId ? "Edit snippet" : "New snippet"}
                     </p>
                     <button type="button" className="vw-icon-btn" onClick={resetSnippetForm} aria-label="Cancel snippet form">
                       <X size={14} />
                     </button>
                   </div>
-                  <label className="mt-3 block text-xs font-semibold text-[#52525B]" htmlFor="snippet-trigger">
+                  <label className="mt-3 block text-xs font-semibold text-quiet" htmlFor="snippet-trigger">
                     Spoken trigger
                   </label>
                   <input
@@ -2370,7 +2386,7 @@ function App() {
                     placeholder="my support reply"
                     className="vw-field mt-1 w-full"
                   />
-                  <div className="mt-1 flex items-start justify-between gap-3 text-[11px] text-[#A1A1AA]">
+                  <div className="mt-1 flex items-start justify-between gap-3 text-[11px] text-hint">
                     <span>
                       {snippetTriggerDraft.trim() &&
                       (snippetTriggerDraft.trim().split(/\s+/u).length === 1 || snippetTriggerDraft.trim().length < 5)
@@ -2379,7 +2395,7 @@ function App() {
                     </span>
                     <span className="shrink-0 tabular-nums">{[...snippetTriggerDraft].length}/60</span>
                   </div>
-                  <label className="mt-4 block text-xs font-semibold text-[#52525B]" htmlFor="snippet-expansion">
+                  <label className="mt-4 block text-xs font-semibold text-quiet" htmlFor="snippet-expansion">
                     Exact expansion
                   </label>
                   <textarea
@@ -2389,7 +2405,7 @@ function App() {
                     placeholder={"Hello,\n\nThanks for reaching out. I'll get back to you shortly."}
                     className="vw-field mt-1 min-h-36 w-full resize-y whitespace-pre-wrap"
                   />
-                  <div className="mt-1 flex items-center justify-between text-[11px] text-[#A1A1AA]">
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-hint">
                     <span>Formatting and AI polish never rewrite this saved text.</span>
                     <span className="tabular-nums">{[...snippetExpansionDraft].length}/4,000</span>
                   </div>
@@ -2410,11 +2426,11 @@ function App() {
               )}
 
               {filteredVoiceSnippets.length === 0 ? (
-                <div className="mt-4 rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-10 text-center">
-                  <p className="text-sm font-medium text-[#09090B]">
+                <div className="mt-4 rounded-2xl border border-dashed border-edge px-6 py-10 text-center">
+                  <p className="text-sm font-medium text-ink-strong">
                     {voiceSnippets.length === 0 ? "Create your first voice snippet" : "No snippets match this search"}
                   </p>
-                  <p className="mx-auto mt-1 max-w-lg text-sm text-[#71717A]">
+                  <p className="mx-auto mt-1 max-w-lg text-sm text-faint">
                     Try “my work email” → “name@company.com”. The right side is inserted literally, not rewritten.
                   </p>
                 </div>
@@ -2424,8 +2440,8 @@ function App() {
                     <div key={snippet.snippetId} className="vw-interactive-row px-4 py-3">
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-[#09090B]">{snippet.trigger}</p>
-                          <p className="mt-1 max-h-24 overflow-hidden whitespace-pre-wrap break-words text-xs leading-relaxed text-[#52525B]">
+                          <p className="text-sm font-semibold text-ink-strong">{snippet.trigger}</p>
+                          <p className="mt-1 max-h-24 overflow-hidden whitespace-pre-wrap break-words text-xs leading-relaxed text-quiet">
                             {snippet.expansion}
                           </p>
                         </div>
@@ -2449,8 +2465,8 @@ function App() {
                         </div>
                       </div>
                       {snippetDeleteConfirmId === snippet.snippetId && (
-                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#F1F1F3] pt-3">
-                          <p className="text-xs text-[#71717A]">Delete this snippet from every synced device?</p>
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3">
+                          <p className="text-xs text-faint">Delete this snippet from every synced device?</p>
                           <div className="flex gap-2">
                             <button
                               type="button"
@@ -2476,12 +2492,12 @@ function App() {
               )}
 
               <div className="mt-4 space-y-1" role="status" aria-live="polite">
-                {snippetNotice && <p className="text-xs text-[#71717A]">{snippetNotice}</p>}
+                {snippetNotice && <p className="text-xs text-faint">{snippetNotice}</p>}
                 {snippetSyncError && (
-                  <p className="text-xs text-[#991B1B]">{snippetSyncError}</p>
+                  <p className="text-xs text-status-danger-text">{snippetSyncError}</p>
                 )}
                 {!cloudUserId && !snippetSyncError && (
-                  <p className="text-xs text-[#A1A1AA]">Sign in to sync snippets across devices. Local snippets remain available offline.</p>
+                  <p className="text-xs text-hint">Sign in to sync snippets across devices. Local snippets remain available offline.</p>
                 )}
               </div>
             </section>
@@ -2493,17 +2509,17 @@ function App() {
                 <div className="flex flex-wrap items-end justify-between gap-2">
                   <div>
                     <p className="vw-kicker">Dictation Style</p>
-                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Polish Profiles</h3>
-                    <p className="mt-1 text-sm text-[#71717A]">
+                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Polish Profiles</h3>
+                    <p className="mt-1 text-sm text-faint">
                       One dictation, four intentional shapes. Every card below uses the same sentence.
                     </p>
                   </div>
                   <span className="vw-chip vw-chip-ink">Pro Active</span>
                 </div>
 
-                <div className="mt-5 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-[#A1A1AA]">You say</p>
-                  <p className="mt-1 text-sm italic text-[#52525B]">"{POLISH_PROFILE_RAW_EXAMPLE}"</p>
+                <div className="mt-5 rounded-2xl border border-edge bg-inset px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-hint">You say</p>
+                  <p className="mt-1 text-sm italic text-quiet">"{POLISH_PROFILE_RAW_EXAMPLE}"</p>
                 </div>
 
                 <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -2531,10 +2547,10 @@ function App() {
                         aria-busy={isApplying ? "true" : "false"}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-base font-semibold text-[#09090B]">
+                          <p className="text-base font-semibold text-ink-strong">
                             {card.title}
                             {isActiveCard && profileCustomized && (
-                              <span className="font-normal text-[#71717A]"> · Customized</span>
+                              <span className="font-normal text-faint"> · Customized</span>
                             )}
                           </p>
                           <span className={`vw-chip vw-mode-status-chip ${isActiveCard ? "vw-mode-status-chip-active" : ""}`}>
@@ -2547,11 +2563,11 @@ function App() {
                                   : "Select"}
                           </span>
                         </div>
-                        <p className="mt-2 text-sm text-[#3F3F46]">{card.description}</p>
-                        <p className="mt-3 border-l-2 border-[#1B8EFF]/45 pl-3 text-sm leading-relaxed text-[#09090B]">
+                        <p className="mt-2 text-sm text-label">{card.description}</p>
+                        <p className="mt-3 border-l-2 border-accent-rule pl-3 text-sm leading-relaxed text-ink-strong">
                           {card.example}
                         </p>
-                        <p className="mt-2 text-xs text-[#71717A]">
+                        <p className="mt-2 text-xs text-faint">
                           {isPreparingAi
                             ? "Downloading the local polish model. Deterministic formatting stays available."
                             : card.note}
@@ -2562,12 +2578,12 @@ function App() {
                 </div>
 
                 {profileCustomized && (
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-edge bg-surface px-4 py-3">
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-[#09090B]">
+                      <p className="text-sm font-semibold text-ink-strong">
                         {POLISH_PROFILE_LABELS[activePolishProfile]} · Customized
                       </p>
-                      <p className="mt-0.5 text-xs text-[#71717A]">
+                      <p className="mt-0.5 text-xs text-faint">
                         Advanced settings differ from this profile's defaults. Resetting discards those edits.
                       </p>
                     </div>
@@ -2601,9 +2617,9 @@ function App() {
                 )}
 
                 {displayedPolishProfile === "coding" && (
-                  <div className="vw-surface-elevated mt-4 rounded-2xl border border-[#E4E4E7] bg-white px-4 py-3">
-                    <p className="text-sm font-semibold text-[#09090B]">How To Speak In Coding Profile</p>
-                    <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-[#52525B] md:grid-cols-2">
+                  <div className="vw-surface-elevated mt-4 rounded-2xl border border-edge bg-surface px-4 py-3">
+                    <p className="text-sm font-semibold text-ink-strong">How To Speak In Coding Profile</p>
+                    <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-quiet md:grid-cols-2">
                       <p><span className="font-semibold">Symbols:</span> open paren, open parenthesis, close paren, underscore, arrow, equals.</p>
                       <p><span className="font-semibold">Casing:</span> say plain words, then choose camelCase or snake_case in mode settings.</p>
                       <p><span className="font-semibold">Example speech:</span> open paren user id close paren arrow result</p>
@@ -2617,7 +2633,7 @@ function App() {
         </div>
 
         {displayError && (
-          <div className="mt-6 rounded-2xl border border-[#f3c2c2] bg-[#fff1f1] px-4 py-3 text-sm text-[#a94444]">
+          <div className="mt-6 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
             <p>{displayError}</p>
             {proRequiredFeature && (
               <button
@@ -2631,7 +2647,7 @@ function App() {
           </div>
         )}
         {cloudSyncError && (
-          <div className="mt-3 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-sm text-[#92400E]">
+          <div className="mt-3 rounded-2xl border border-status-warn-border bg-status-warn-bg px-4 py-3 text-sm text-status-warn-text">
             <p>Cloud sync warning: {cloudSyncError}</p>
           </div>
         )}
@@ -2656,7 +2672,7 @@ function App() {
                     aria-selected={settingsSection === section.id}
                     onClick={() => setSettingsSection(section.id)}
                   >
-                    <SectionIcon size={15} className={settingsSection === section.id ? "text-[#1B8EFF]" : "text-[#A1A1AA]"} />
+                    <SectionIcon size={15} className={settingsSection === section.id ? "text-accent" : "text-hint"} />
                     {section.label}
                   </button>
                 );
@@ -2664,6 +2680,33 @@ function App() {
             </nav>
 
             <div className="vw-settings-panel">
+              {settingsSection === "general" && (
+                <div>
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Appearance</p>
+                      <p className="vw-set-desc">
+                        {(settings.theme ?? "system") === "system"
+                          ? "Follows your Windows light/dark setting."
+                          : `Always use the ${settings.theme} theme.`}
+                      </p>
+                    </div>
+                    <div className="vw-seg" role="group" aria-label="Appearance">
+                      {THEME_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`vw-seg-btn ${(settings.theme ?? "system") === option.value ? "vw-seg-btn-active" : ""}`}
+                          onClick={() => void setTheme(option.value)}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {settingsSection === "audio" && (
                 <div>
                   <div className="vw-set-row">
@@ -2691,7 +2734,7 @@ function App() {
                     </div>
                   </div>
                   {inputDevices.length === 0 && (
-                    <p className="pb-3 text-xs text-[#B3261E]">No input devices detected.</p>
+                    <p className="pb-3 text-xs text-status-danger-text">No input devices detected.</p>
                   )}
 
                   <div className="vw-set-row">
@@ -2720,12 +2763,12 @@ function App() {
                   </div>
 
                   {micQualityWarning && (
-                    <div className="mt-4 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3">
-                      <p className="text-sm font-semibold text-[#92400E]">Microphone quality warning</p>
-                      <p className="mt-1 text-sm text-[#92400E]">{micQualityWarning.message}</p>
-                      <p className="mt-2 text-xs text-[#A16207]">Current input: {micQualityWarning.currentDevice}</p>
+                    <div className="mt-4 rounded-2xl border border-status-warn-border bg-status-warn-bg px-4 py-3">
+                      <p className="text-sm font-semibold text-status-warn-text">Microphone quality warning</p>
+                      <p className="mt-1 text-sm text-status-warn-text">{micQualityWarning.message}</p>
+                      <p className="mt-2 text-xs text-status-warn-text-soft">Current input: {micQualityWarning.currentDevice}</p>
                       {micQualityWarning.recommendedDevice && (
-                        <p className="mt-1 text-xs text-[#A16207]">Suggested input: {micQualityWarning.recommendedDevice}</p>
+                        <p className="mt-1 text-xs text-status-warn-text-soft">Suggested input: {micQualityWarning.recommendedDevice}</p>
                       )}
                       <div className="mt-3 flex flex-wrap gap-2">
                         {micQualityWarning.recommendedDevice && (
@@ -2834,7 +2877,7 @@ function App() {
                           }}
                         />
                       </div>
-                      <p className="mt-1.5 text-xs text-[#71717A]">
+                      <p className="mt-1.5 text-xs text-faint">
                         {polishModelProgress.total > 0
                           ? `Downloading AI polish model… ${Math.round(
                               (polishModelProgress.downloaded / polishModelProgress.total) * 100
@@ -2844,10 +2887,10 @@ function App() {
                     </div>
                   )}
                   {polishModelProgress?.done && (
-                    <p className="mt-2 text-xs font-medium text-[#15803D]">AI polish model ready.</p>
+                    <p className="mt-2 text-xs font-medium text-status-success-text">AI polish model ready.</p>
                   )}
                   {polishModelProgress?.error && (
-                    <p className="mt-2 text-xs text-[#B3261E]">Model download failed: {polishModelProgress.error}</p>
+                    <p className="mt-2 text-xs text-status-danger-text">Model download failed: {polishModelProgress.error}</p>
                   )}
                 </div>
               )}
@@ -2909,7 +2952,7 @@ function App() {
                   </div>
 
                   {lastDiagnosticsExport && (
-                    <div className="mt-2 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#52525B]">
+                    <div className="mt-2 rounded-xl border border-edge bg-inset px-3 py-2 text-xs text-quiet">
                       <p>
                         Export complete:{" "}
                         <span className="font-semibold">{formatDate(lastDiagnosticsExport.exportedAtUtcMs)}</span>
@@ -2929,7 +2972,7 @@ function App() {
                     </div>
                     <div className="flex w-56 flex-col items-end gap-1">
                       <input
-                        className="w-full accent-[#18181B]"
+                        className="w-full accent-ink"
                         type="range"
                         aria-label="VAD threshold"
                         min={0.005}
@@ -2939,7 +2982,7 @@ function App() {
                         onChange={(event) => void setVadThreshold(Number(event.target.value))}
                       />
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-[#09090B]">{settings.vadThreshold.toFixed(3)}</span>
+                        <span className="text-sm font-semibold text-ink-strong">{settings.vadThreshold.toFixed(3)}</span>
                         <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void resetVadThreshold()}>
                           Reset to {recommendedVadThreshold.toFixed(3)}
                         </button>
@@ -2954,7 +2997,7 @@ function App() {
                     </div>
                     <div className="flex w-56 flex-col items-end gap-1">
                       <input
-                        className="w-full accent-[#18181B]"
+                        className="w-full accent-ink"
                         type="range"
                         aria-label="Max utterance in milliseconds"
                         min={5000}
@@ -2963,7 +3006,7 @@ function App() {
                         value={settings.maxUtteranceMs}
                         onChange={(event) => void setMaxUtteranceMs(Number(event.target.value))}
                       />
-                      <span className="text-sm font-semibold text-[#09090B]">{settings.maxUtteranceMs}</span>
+                      <span className="text-sm font-semibold text-ink-strong">{settings.maxUtteranceMs}</span>
                     </div>
                   </div>
 
@@ -2974,7 +3017,7 @@ function App() {
                     </div>
                     <div className="flex w-56 flex-col items-end gap-1">
                       <input
-                        className="w-full accent-[#18181B]"
+                        className="w-full accent-ink"
                         type="range"
                         aria-label="Release tail in milliseconds"
                         min={120}
@@ -2983,7 +3026,7 @@ function App() {
                         value={settings.releaseTailMs}
                         onChange={(event) => void setReleaseTailMs(Number(event.target.value))}
                       />
-                      <span className="text-sm font-semibold text-[#09090B]">{settings.releaseTailMs}</span>
+                      <span className="text-sm font-semibold text-ink-strong">{settings.releaseTailMs}</span>
                     </div>
                   </div>
 
@@ -3002,7 +3045,7 @@ function App() {
                   </div>
 
                   {audioQualityReport ? (
-                    <div className="mt-2 space-y-1 rounded-xl border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#52525B]">
+                    <div className="mt-2 space-y-1 rounded-xl border border-edge bg-inset px-3 py-2 text-xs text-quiet">
                       <p>
                         Quality: <span className="font-semibold">{audioQualityReport.quality}</span> · Segments:{" "}
                         {audioQualityReport.segmentCount} · Duration: {(audioQualityReport.durationMs / 1000).toFixed(2)}s
@@ -3017,10 +3060,10 @@ function App() {
                       </p>
                     </div>
                   ) : (
-                    <p className="mt-2 text-xs text-[#A1A1AA]">No capture diagnostics yet.</p>
+                    <p className="mt-2 text-xs text-hint">No capture diagnostics yet.</p>
                   )}
                   {lastLatency && (
-                    <p className="mt-2 text-xs text-[#71717A]">
+                    <p className="mt-2 text-xs text-faint">
                       Latest latency: release-to-transcribing {lastLatency.releaseToTranscribingMs} ms, total{" "}
                       {lastLatency.totalMs} ms.
                     </p>
@@ -3041,17 +3084,17 @@ function App() {
           onClose={closeOverlay}
         >
           <div className="space-y-4">
-            <section className="rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+            <section className="rounded-2xl border border-edge bg-surface px-4 py-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="vw-profile-avatar">
                     {(demoProfile?.name ?? "Guest").slice(0, 1).toUpperCase()}
                   </div>
                   <div>
-                    <p className="text-sm font-semibold text-[#09090B]">
+                    <p className="text-sm font-semibold text-ink-strong">
                       {demoProfile?.name ?? "Guest Workspace"}
                     </p>
-                    <p className="mt-1 text-xs text-[#71717A]">
+                    <p className="mt-1 text-xs text-faint">
                       {demoProfile?.email ?? "No sign-in required yet"}
                     </p>
                   </div>
@@ -3060,7 +3103,7 @@ function App() {
                   {isPro ? "Pro Active" : "Free Plan"}
                 </span>
               </div>
-              <p className="mt-3 text-xs text-[#71717A]">
+              <p className="mt-3 text-xs text-faint">
                 {isDemoAuthenticated
                   ? cloudUserId
                     ? "Cloud account is active. Recent sentences and dictionary terms sync automatically."
@@ -3093,9 +3136,9 @@ function App() {
             </section>
 
             {isDemoAuthenticated && demoProfile && (
-              <section className="rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-4">
-                <p className="text-sm font-semibold text-[#09090B]">Workspace Role</p>
-                <p className="mt-1 text-sm text-[#3F3F46]">{demoProfile.workspaceRole}</p>
+              <section className="rounded-2xl border border-edge bg-inset px-4 py-4">
+                <p className="text-sm font-semibold text-ink-strong">Workspace Role</p>
+                <p className="mt-1 text-sm text-label">{demoProfile.workspaceRole}</p>
                 <button
                   type="button"
                   className="vw-btn-secondary mt-3"
@@ -3152,22 +3195,22 @@ function App() {
             </div>
 
             <div className="space-y-3">
-              <form className="vw-auth-form rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4" onSubmit={handleAuthSubmit}>
+              <form className="vw-auth-form rounded-2xl border border-edge bg-surface px-4 py-4" onSubmit={handleAuthSubmit}>
                 {authMode === "signup" && (
                   <div className="grid gap-3 md:grid-cols-2">
-                    <label className="text-sm text-[#09090B]">
-                      <span className="block text-xs text-[#71717A]">Name</span>
+                    <label className="text-sm text-ink-strong">
+                      <span className="block text-xs text-faint">Name</span>
                       <input
-                        className="vw-auth-input mt-1 w-full rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                        className="vw-auth-input mt-1 w-full rounded-xl border border-edge bg-surface px-3 py-2 text-sm text-ink-strong"
                         value={authName}
                         onChange={(event) => setAuthName(event.target.value)}
                         placeholder="Alex Rivera"
                       />
                     </label>
-                    <label className="text-sm text-[#09090B]">
-                      <span className="block text-xs text-[#71717A]">Workspace Role</span>
+                    <label className="text-sm text-ink-strong">
+                      <span className="block text-xs text-faint">Workspace Role</span>
                       <input
-                        className="vw-auth-input mt-1 w-full rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                        className="vw-auth-input mt-1 w-full rounded-xl border border-edge bg-surface px-3 py-2 text-sm text-ink-strong"
                         value={authWorkspaceRole}
                         onChange={(event) => setAuthWorkspaceRole(event.target.value)}
                         placeholder="Engineering"
@@ -3177,10 +3220,10 @@ function App() {
                 )}
 
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <label className="text-sm text-[#09090B]">
-                    <span className="block text-xs text-[#71717A]">Email</span>
+                  <label className="text-sm text-ink-strong">
+                    <span className="block text-xs text-faint">Email</span>
                     <input
-                      className="vw-auth-input mt-1 w-full rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                      className="vw-auth-input mt-1 w-full rounded-xl border border-edge bg-surface px-3 py-2 text-sm text-ink-strong"
                       value={authEmail}
                       onChange={(event) => setAuthEmail(event.target.value)}
                       placeholder="you@voicewave.app"
@@ -3188,10 +3231,10 @@ function App() {
                       required
                     />
                   </label>
-                  <label className="text-sm text-[#09090B]">
-                    <span className="block text-xs text-[#71717A]">Password</span>
+                  <label className="text-sm text-ink-strong">
+                    <span className="block text-xs text-faint">Password</span>
                     <input
-                      className="vw-auth-input mt-1 w-full rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                      className="vw-auth-input mt-1 w-full rounded-xl border border-edge bg-surface px-3 py-2 text-sm text-ink-strong"
                       value={authPassword}
                       onChange={(event) => setAuthPassword(event.target.value)}
                       placeholder="********"
@@ -3203,10 +3246,10 @@ function App() {
 
                 {authMode === "signup" && (
                   <div className="mt-3">
-                    <label className="text-sm text-[#09090B]">
-                      <span className="block text-xs text-[#71717A]">Confirm Password</span>
+                    <label className="text-sm text-ink-strong">
+                      <span className="block text-xs text-faint">Confirm Password</span>
                       <input
-                        className="vw-auth-input mt-1 w-full rounded-xl border border-[#E4E4E7] bg-white px-3 py-2 text-sm text-[#09090B]"
+                        className="vw-auth-input mt-1 w-full rounded-xl border border-edge bg-surface px-3 py-2 text-sm text-ink-strong"
                         value={authConfirmPassword}
                         onChange={(event) => setAuthConfirmPassword(event.target.value)}
                         placeholder="********"
@@ -3240,7 +3283,7 @@ function App() {
                   )}
                 </div>
 
-                <label className="mt-3 inline-flex items-center gap-2 text-xs text-[#52525B]">
+                <label className="mt-3 inline-flex items-center gap-2 text-xs text-quiet">
                   <input
                     type="checkbox"
                     checked={authRememberMe}
@@ -3260,21 +3303,21 @@ function App() {
               </form>
 
               {authNotice && (
-                <section className="rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] px-4 py-3 text-sm text-[#1E40AF]">
+                <section className="rounded-2xl border border-status-info-border bg-status-info-bg px-4 py-3 text-sm text-accent-text">
                   {authNotice}
                 </section>
               )}
 
               {authError && (
-                <section className="rounded-2xl border border-[#FED7D7] bg-[#FFF5F5] px-4 py-3 text-sm text-[#9B2C2C]">
+                <section className="rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
                   {authError}
                 </section>
               )}
 
               {isDemoAuthenticated && demoProfile && (
-                <section className="rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3 text-sm text-[#3F3F46]">
+                <section className="rounded-2xl border border-edge bg-inset px-4 py-3 text-sm text-label">
                   <p>
-                    Signed in as <span className="font-semibold text-[#09090B]">{demoProfile.email}</span>
+                    Signed in as <span className="font-semibold text-ink-strong">{demoProfile.email}</span>
                     {cloudUserId ? " with cloud sync enabled." : " on local demo mode."}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -3312,23 +3355,23 @@ function App() {
           onClose={closeOverlay}
         >
           <div className="space-y-4">
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+            <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <div className="flex items-start gap-3">
-                <div className="mt-0.5 rounded-full bg-[#F4F4F5] p-2 text-[#18181B]">
+                <div className="mt-0.5 rounded-full bg-inset p-2 text-ink">
                   <Palette size={16} />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-[#09090B]">Style Presets</p>
-                  <p className="mt-1 text-sm text-[#71717A]">
+                  <p className="text-sm font-semibold text-ink-strong">Style Presets</p>
+                  <p className="mt-1 text-sm text-faint">
                     Style customization is queued for a dedicated pass. The current theme is already
                     locked to match the production baseline.
                   </p>
                 </div>
               </div>
             </section>
-            <section className="vw-surface-elevated rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-4">
-              <p className="text-sm font-semibold text-[#09090B]">Current Theme</p>
-              <p className="mt-1 text-xs text-[#71717A]">
+            <section className="vw-surface-elevated rounded-2xl border border-edge bg-inset px-4 py-4">
+              <p className="text-sm font-semibold text-ink-strong">Current Theme</p>
+              <p className="mt-1 text-xs text-faint">
                 Harmonic v1.0 with high-contrast cards, neutral white surfaces, and focused action styling.
               </p>
             </section>
@@ -3343,32 +3386,32 @@ function App() {
           onClose={closeOverlay}
         >
           <div className="space-y-4">
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+            <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <div className="flex items-start gap-3">
-                <div className="mt-0.5 rounded-full bg-[#F4F4F5] p-2 text-[#18181B]">
+                <div className="mt-0.5 rounded-full bg-inset p-2 text-ink">
                   <CircleHelp size={16} />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-[#09090B]">Push-to-talk Best Practice</p>
-                  <p className="mt-1 text-sm text-[#71717A]">
+                  <p className="text-sm font-semibold text-ink-strong">Push-to-talk Best Practice</p>
+                  <p className="mt-1 text-sm text-faint">
                     Hold the key first, then speak naturally, then release to transcribe.
                   </p>
                 </div>
               </div>
             </section>
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
-              <p className="text-sm font-semibold text-[#09090B]">Troubleshooting Flow</p>
-              <ul className="mt-2 space-y-1 text-sm text-[#71717A]">
+            <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
+              <p className="text-sm font-semibold text-ink-strong">Troubleshooting Flow</p>
+              <ul className="mt-2 space-y-1 text-sm text-faint">
                 <li>1. Refresh microphone devices.</li>
                 <li>2. Switch away from headset hands-free profiles.</li>
                 <li>3. Run the 10s audio quality check in Settings Advanced.</li>
               </ul>
             </section>
-            <section className="vw-surface-base rounded-2xl border border-[#E4E4E7] bg-white px-4 py-4">
+            <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold text-[#09090B]">First-run setup</p>
-                  <p className="mt-1 text-sm text-[#71717A]">
+                  <p className="text-sm font-semibold text-ink-strong">First-run setup</p>
+                  <p className="mt-1 text-sm text-faint">
                     Replay the guided mic check and dictation rehearsal.
                   </p>
                 </div>
@@ -3405,8 +3448,8 @@ function App() {
         <div className="vw-model-gate-backdrop">
           <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Enable Dictation">
             <header>
-              <h3 className="vw-section-heading text-2xl font-semibold text-[#09090B]">Enable Dictation</h3>
-              <p className="mt-1 text-sm text-[#64748B]">Install a model to start transcription.</p>
+              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">Enable Dictation</h3>
+              <p className="mt-1 text-sm text-faint">Install a model to start transcription.</p>
             </header>
 
             <div className="vw-model-gate-tabs" role="tablist" aria-label="Model size selector">
@@ -3463,7 +3506,7 @@ function App() {
             </div>
 
             {(setupModelError || selectedSetupStatus?.message || displayError) && (
-              <section className="mt-4 rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3 text-sm text-[#3F3F46]">
+              <section className="mt-4 rounded-2xl border border-edge bg-inset px-4 py-3 text-sm text-label">
                 {setupModelError ?? selectedSetupStatus?.message ?? displayError}
               </section>
             )}

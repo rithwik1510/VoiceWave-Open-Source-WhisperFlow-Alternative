@@ -98,7 +98,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
       <path
         d={`M ${110 - radius} 110 A ${radius} ${radius} 0 0 1 ${110 + radius} 110`}
         fill="none"
-        stroke="#E8E8EE"
+        stroke="var(--vw-track-quiet)"
         strokeWidth={stroke}
         strokeLinecap="round"
       />
@@ -115,7 +115,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
         x="110"
         y="92"
         textAnchor="middle"
-        className="fill-[#09090B]"
+        className="fill-ink-strong"
         style={{ font: '600 40px "Manrope", sans-serif' }}
       >
         {Math.round(wpm * progress)}
@@ -124,7 +124,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
         x="110"
         y="112"
         textAnchor="middle"
-        className="fill-[#A1A1AA]"
+        className="fill-hint"
         style={{ font: "600 11px 'Manrope', sans-serif", letterSpacing: "0.14em" }}
       >
         WPM
@@ -184,10 +184,10 @@ export function StatsSection() {
     return (
       <section className="vw-panel vw-panel-soft">
         <p className="vw-kicker">On-Device</p>
-        <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Stats</h3>
-        <div className="mt-6 rounded-2xl border border-dashed border-[#E4E4E7] px-6 py-12 text-center">
-          <p className="text-sm font-medium text-[#09090B]">No numbers yet</p>
-          <p className="mt-1 text-sm text-[#71717A]">
+        <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Stats</h3>
+        <div className="mt-6 rounded-2xl border border-dashed border-edge px-6 py-12 text-center">
+          <p className="text-sm font-medium text-ink-strong">No numbers yet</p>
+          <p className="mt-1 text-sm text-faint">
             {unavailable
               ? "Stats are computed inside the desktop app."
               : "Dictate once and your numbers appear here."}
@@ -207,8 +207,8 @@ export function StatsSection() {
   return (
     <section className="vw-panel vw-panel-soft">
       <p className="vw-kicker">On-Device</p>
-      <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-[#09090B]">Stats</h3>
-      <p className="mt-1 text-sm text-[#71717A]">
+      <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Stats</h3>
+      <p className="mt-1 text-sm text-faint">
         Computed from anonymous daily totals on this machine — nothing leaves it.
       </p>
 
@@ -218,26 +218,26 @@ export function StatsSection() {
           <div className="vw-ring-inner px-7 py-6">
             <div className="flex flex-wrap items-end justify-between gap-6">
               <div>
-                <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-                  <Clock size={13} className="text-[#1B8EFF]" />
+                <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+                  <Clock size={13} className="text-accent" />
                   Time saved vs typing
                 </p>
-                <p className='mt-2 font-["Fraunces"] text-[54px] leading-none tracking-tight text-[#09090B]'>
+                <p className='mt-2 font-["Fraunces"] text-[54px] leading-none tracking-tight text-ink-strong'>
                   {formatDuration(summary.timeSavedMsAllTime * progress)}
                 </p>
-                <p className="mt-2 text-sm text-[#71717A]">
+                <p className="mt-2 text-sm text-faint">
                   {formatDuration(summary.timeSavedMsMonth)} this month ·{" "}
                   {formatDuration(summary.speakingMs)} spent speaking in total
                 </p>
               </div>
               <div className="text-right">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-faint">
                   Dictations
                 </p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums text-[#09090B]">
+                <p className="mt-1 text-2xl font-semibold tabular-nums text-ink-strong">
                   {formatWords(summary.allTimeDictations * progress)}
                 </p>
-                <p className="mt-1 text-xs text-[#A1A1AA]">
+                <p className="mt-1 text-xs text-hint">
                   across {summary.activeDays} active {summary.activeDays === 1 ? "day" : "days"}
                 </p>
               </div>
@@ -247,9 +247,9 @@ export function StatsSection() {
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {/* Speaking speed gauge. */}
-          <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
-            <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-              <Gauge size={13} className="text-[#1B8EFF]" />
+          <div className="rounded-3xl border border-edge bg-surface px-6 py-5 shadow-[var(--vw-shadow-card)]">
+            <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+              <Gauge size={13} className="text-accent" />
               Speaking speed
             </p>
             <div className="mt-3 flex justify-center">
@@ -268,16 +268,16 @@ export function StatsSection() {
           </div>
 
           {/* Words dictated. */}
-          <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
+          <div className="rounded-3xl border border-edge bg-surface px-6 py-5 shadow-[var(--vw-shadow-card)]">
             <div className="flex items-center justify-between gap-2">
-              <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-                <Type size={13} className="text-[#1B8EFF]" />
+              <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+                <Type size={13} className="text-accent" />
                 Words dictated
               </p>
               {monthDelta !== null && (
                 <span
                   className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                    monthDelta >= 0 ? "bg-[#E8F4FF] text-[#0A2A8C]" : "bg-[#F4F4F5] text-[#71717A]"
+                    monthDelta >= 0 ? "bg-status-info-bg text-accent-text" : "bg-inset text-faint"
                   }`}
                 >
                   {monthDelta >= 0 ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
@@ -285,24 +285,24 @@ export function StatsSection() {
                 </span>
               )}
             </div>
-            <p className='mt-4 font-["Fraunces"] text-[44px] leading-none tracking-tight text-[#09090B]'>
+            <p className='mt-4 font-["Fraunces"] text-[44px] leading-none tracking-tight text-ink-strong'>
               {formatWords(summary.allTimeWords * progress)}
             </p>
-            <p className="mt-1 text-xs text-[#A1A1AA]">all time</p>
+            <p className="mt-1 text-xs text-hint">all time</p>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <div className="rounded-2xl bg-[#FAFAFA] px-4 py-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#A1A1AA]">
+              <div className="rounded-2xl bg-inset px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-hint">
                   Today
                 </p>
-                <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">
+                <p className="mt-1 text-lg font-semibold tabular-nums text-ink-strong">
                   {formatWords(summary.todayWords)}
                 </p>
               </div>
-              <div className="rounded-2xl bg-[#FAFAFA] px-4 py-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#A1A1AA]">
+              <div className="rounded-2xl bg-inset px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-hint">
                   This week
                 </p>
-                <p className="mt-1 text-lg font-semibold tabular-nums text-[#09090B]">
+                <p className="mt-1 text-lg font-semibold tabular-nums text-ink-strong">
                   {formatWords(summary.weekWords)}
                 </p>
               </div>
@@ -325,9 +325,9 @@ export function StatsSection() {
 
       {/* Insight: where you dictate (top app classes). */}
       {summary.topAppClasses.length > 0 && (
-        <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
-          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-            <MapPin size={13} className="text-[#1B8EFF]" />
+        <div className="rounded-3xl border border-edge bg-surface px-6 py-5 shadow-[var(--vw-shadow-card)]">
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+            <MapPin size={13} className="text-accent" />
             Where you dictate
           </p>
           <div className="mt-4 space-y-3">
@@ -336,10 +336,10 @@ export function StatsSection() {
               const width = `${Math.max(6, Math.round((app.count / max) * 100))}%`;
               return (
                 <div key={app.name} className="flex items-center gap-3">
-                  <span className="w-20 shrink-0 truncate text-xs font-medium text-[#09090B] capitalize">
+                  <span className="w-20 shrink-0 truncate text-xs font-medium text-ink-strong capitalize">
                     {app.name}
                   </span>
-                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#E8E8EE]">
+                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-track">
                     <div
                       className="h-full rounded-full"
                       style={{
@@ -349,7 +349,7 @@ export function StatsSection() {
                       }}
                     />
                   </div>
-                  <span className="w-10 shrink-0 text-right text-xs tabular-nums text-[#71717A]">
+                  <span className="w-10 shrink-0 text-right text-xs tabular-nums text-faint">
                     {app.count.toLocaleString("en-US")}
                   </span>
                 </div>
@@ -368,18 +368,18 @@ export function StatsSection() {
       )}
 
       {/* Insight: voice clarity (0–100, best-effort confidence estimate). */}
-      <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
+      <div className="rounded-3xl border border-edge bg-surface px-6 py-5 shadow-[var(--vw-shadow-card)]">
         <div className="flex items-center justify-between gap-2">
-          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-            <AudioLines size={13} className="text-[#1B8EFF]" />
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+            <AudioLines size={13} className="text-accent" />
             Voice clarity
           </p>
-          <span className="text-2xl font-semibold tabular-nums text-[#09090B]">
+          <span className="text-2xl font-semibold tabular-nums text-ink-strong">
             {Math.round(summary.clarityScore)}
-            <span className="text-sm text-[#A1A1AA]">/100</span>
+            <span className="text-sm text-hint">/100</span>
           </span>
         </div>
-        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-[#E8E8EE]">
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-track">
           <div
             className="h-full rounded-full transition-all duration-700"
             style={{
@@ -388,13 +388,13 @@ export function StatsSection() {
             }}
           />
         </div>
-        <p className="mt-2 text-[11px] text-[#A1A1AA]">
+        <p className="mt-2 text-[11px] text-hint">
           Model-confidence estimate of how clearly VoiceWave hears you.
         </p>
       </div>
       </div>
 
-      <p className="mt-4 text-xs text-[#A1A1AA]">
+      <p className="mt-4 text-xs text-hint">
         Time saved compares your measured speaking speed with {summary.typingBaselineWpm} WPM
         average typing. Dictations under 2 seconds aren't counted.
       </p>

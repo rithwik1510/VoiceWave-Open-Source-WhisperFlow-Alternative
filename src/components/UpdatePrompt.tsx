@@ -126,10 +126,10 @@ export function UpdatePrompt() {
               <Download size={15} />
             </span>
             <div>
-              <h3 className="vw-section-heading text-lg font-semibold text-[#09090B]">
+              <h3 className="vw-section-heading text-lg font-semibold text-ink-strong">
                 Update available
               </h3>
-              <p className="mt-0.5 text-sm text-[#71717A]">
+              <p className="mt-0.5 text-sm text-faint">
                 VoiceWave {update.version} is ready to install.
               </p>
             </div>
@@ -153,29 +153,29 @@ export function UpdatePrompt() {
           </div>
 
           {update.notes && (
-            <div className="mt-3 max-h-40 overflow-auto rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-4 py-3">
-              <p className="text-xs font-semibold text-[#09090B]">What's new</p>
-              <pre className="mt-1 whitespace-pre-wrap font-sans text-xs text-[#52525B]">
+            <div className="mt-3 max-h-40 overflow-auto rounded-2xl border border-edge bg-inset px-4 py-3">
+              <p className="text-xs font-semibold text-ink-strong">What's new</p>
+              <pre className="mt-1 whitespace-pre-wrap font-sans text-xs text-quiet">
                 {update.notes}
               </pre>
             </div>
           )}
 
           {phase === "error" && errorMessage && (
-            <div className="mt-3 rounded-2xl border border-[#f3c2c2] bg-[#fff1f1] px-4 py-3 text-sm text-[#a94444]">
+            <div className="mt-3 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
               {errorMessage}
             </div>
           )}
 
           {installing && (
             <div className="mt-4">
-              <div className="h-2 w-full overflow-hidden rounded-full bg-[#E4E4E7]">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-track">
                 <div
                   className="vw-progress-fill h-full rounded-full transition-all"
                   style={{ width: `${percent ?? 8}%` }}
                 />
               </div>
-              <p className="mt-2 text-xs text-[#71717A]">
+              <p className="mt-2 text-xs text-faint">
                 {progress?.phase === "finished"
                   ? "Installing and restarting…"
                   : percent !== null

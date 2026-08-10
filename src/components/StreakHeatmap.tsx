@@ -18,13 +18,15 @@ function dayLevel(words: number): number {
   return 4;
 }
 
-/** Brand-blue ramp (not GitHub green). Level 0 is the quiet track reuse. */
+/** Brand-blue ramp (not GitHub green). Level 0 is the quiet track reuse.
+ * The values live in CSS so the ramp gets a dark floor for free — these are
+ * only ever used as `background-color`, where `var()` resolves normally. */
 const LEVEL_COLORS: string[] = [
-  "#E8E8EE", // 0 · inactive (quiet track, same as the WPM gauge arc)
-  "rgba(27,142,255,0.25)", // 1 · 1–49 words
-  "rgba(27,142,255,0.45)", // 2 · 50–199
-  "rgba(27,142,255,0.70)", // 3 · 200–499
-  "#1B8EFF", // 4 · 500+ · full brand accent
+  "var(--vw-heat-empty)", // 0 · inactive (quiet track, same as the WPM gauge arc)
+  "var(--vw-heat-1)", // 1 · 1–49 words
+  "var(--vw-heat-2)", // 2 · 50–199
+  "var(--vw-heat-3)", // 3 · 200–499
+  "var(--vw-heat-4)", // 4 · 500+ · full brand accent
 ];
 
 const WEEKDAY_LABELS = ["Mon", "Wed", "Fri"];
@@ -147,15 +149,15 @@ export function StreakHeatmap({
   };
 
   return (
-    <div className="rounded-3xl border border-[#E4E4E7] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(9,9,11,0.04)]">
+    <div className="rounded-3xl border border-edge bg-surface px-6 py-5 shadow-[var(--vw-shadow-card)]">
       {/* Header: title + range selector */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#71717A]">
-          <Flame size={13} className="text-[#1B8EFF]" />
+        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-faint">
+          <Flame size={13} className="text-accent" />
           Activity
         </p>
         <div
-          className="flex shrink-0 items-center gap-0.5 rounded-full border border-[#E4E4E7] bg-[#FAFAFA] p-0.5"
+          className="flex shrink-0 items-center gap-0.5 rounded-full border border-edge bg-inset p-0.5"
           aria-label="Activity date range"
         >
           {RANGES.map((r) => {
@@ -165,10 +167,10 @@ export function StreakHeatmap({
                 key={r.key}
                 type="button"
                 onClick={() => onRangeChange(r.days)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1B8EFF] ${
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
                   isActive
-                    ? "bg-[#0A2A8C] text-white shadow-[0_1px_2px_rgba(9,9,11,0.10)]"
-                    : "text-[#71717A] hover:bg-white hover:text-[#09090B]"
+                    ? "bg-accent-deep text-on-accent ring-1 ring-inset ring-accent-rule shadow-[var(--vw-shadow-card)]"
+                    : "text-faint hover:bg-surface hover:text-ink-strong"
                 }`}
               >
                 {r.label}
@@ -191,7 +193,7 @@ export function StreakHeatmap({
         {longestStreak > 0 && (
           <span className="vw-chip">Longest: {longestStreak} days</span>
         )}
-        <span className="ml-auto text-[11px] text-[#A1A1AA]">
+        <span className="ml-auto text-[11px] text-hint">
           {totalWords.toLocaleString("en-US")} words in view
         </span>
       </div>
@@ -206,7 +208,7 @@ export function StreakHeatmap({
             {WEEKDAY_LABELS.map((label) => (
               <span
                 key={label}
-                className="flex h-3 items-center text-[9px] font-medium uppercase tracking-wide text-[#A1A1AA]"
+                className="flex h-3 items-center text-[9px] font-medium uppercase tracking-wide text-hint"
               >
                 {label}
               </span>
@@ -255,7 +257,7 @@ export function StreakHeatmap({
                         height: CELL_PX,
                         backgroundColor: LEVEL_COLORS[level],
                         boxShadow: isStreakCell
-                          ? `0 0 0 1.5px ${"#1B8EFF"}`
+                          ? "0 0 0 1.5px var(--vw-accent-blue-600)"
                           : undefined,
                       }}
                       onMouseEnter={(e) => handleHover(bucket, e)}
@@ -274,7 +276,7 @@ export function StreakHeatmap({
 
       {/* Footnote */}
       <div className="ml-8 mt-3 flex items-center justify-start gap-1.5">
-        <span className="text-[10px] text-[#A1A1AA]">Less</span>
+        <span className="text-[10px] text-hint">Less</span>
         {LEVEL_COLORS.map((c, i) => (
           <span
             key={i}
@@ -282,7 +284,7 @@ export function StreakHeatmap({
             style={{ backgroundColor: c }}
           />
         ))}
-        <span className="text-[10px] text-[#A1A1AA]">More</span>
+        <span className="text-[10px] text-hint">More</span>
       </div>
 
       {/* Hover tooltip — rendered into <body> via a portal so nothing can clip
@@ -292,7 +294,7 @@ export function StreakHeatmap({
         hoverPos &&
         createPortal(
           <div
-            className="pointer-events-none fixed z-[999] px-3 py-2 text-xs text-white shadow-lg"
+            className="pointer-events-none fixed z-[999] bg-ink px-3 py-2 text-xs text-ink-contrast shadow-lg"
             style={{
               left: hoverPos.x,
               top: hoverPos.y,
@@ -300,7 +302,6 @@ export function StreakHeatmap({
                 hoverPos.side === "above"
                   ? "translate(-50%, -100%)"
                   : "translate(-50%, 0)",
-              backgroundColor: "#09090B",
               borderRadius: 8,
             }}
             role="tooltip"
@@ -311,12 +312,15 @@ export function StreakHeatmap({
               {hovered.words > 0 &&
                 ` · ${hovered.words.toLocaleString("en-US")} words`}
             </p>
+            {/* The tooltip fill inverts with the theme, so its secondary tiers
+                step down from the contrast color rather than using the
+                page-relative text tokens. */}
             {hovered.appClasses.length > 0 && (
-              <p className="mt-0.5 text-[#E4E4E7]">
+              <p className="mt-0.5 text-ink-contrast opacity-80">
                 Top: {hovered.appClasses[0].name}
               </p>
             )}
-            <p className="mt-0.5 text-[#A1A1AA]">{hovered.date}</p>
+            <p className="mt-0.5 text-ink-contrast opacity-60">{hovered.date}</p>
           </div>,
           document.body
         )}

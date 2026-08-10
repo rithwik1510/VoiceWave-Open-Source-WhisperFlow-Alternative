@@ -29,6 +29,7 @@ tests and migration work.
 | 006 | Live transcription history (dashboard + History page) | P1 | M | — | DONE (2026-07-06: full-text records, 200-cap, live refresh event, History page un-dead-ended, retention getter, record dedupe) |
 | 011 | Dictionary integrity + local-first cloud sync | P1 | L | — | DONE (shipped 0.5.6) |
 | 012 | Protected, local-first voice snippets | P1 | L | 011 | SHIPPED 0.5.6 — implementation complete and gated on 319 Rust + 67 frontend tests; the Step 9 desktop smoke test (7 checks) was consciously deferred past release, not passed. Run it and record the outcome before marking DONE. |
+| 014 | Complete dark mode ("Quiet Ink, Night") | P1 | L | — | IMPLEMENTED 2026-08-10 on branch `dark-mode-v1.2` — full token-driven theming (light/dark/system setting, no-flash boot, semantic Tailwind layer, zero raw neutral hexes in main-window TSX), AA-contrast audited; desktop visual smoke test pending. |
 | 013 | Stats depth, accuracy & GitHub-style streak heatmap | P2 | M | 007 | IMPLEMENTED 2026-08 — insertion-success gate, backfill success gate, day-bucket range windows (30/91/365), streak math, top-app-class / words-cleaned / clarity aggregates, brand-blue streak heatmap + insight panels. Rust stats tests 14/14, full Rust lib suite 343 pass, frontend 74 pass. Commit/review pending. |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).

@@ -111,6 +111,7 @@ import type {
   ProFeatureId,
   RecentInsertion,
   RetentionPolicy,
+  ThemePreference,
   FormatProfile,
   HistoryExportPreset,
   HistoryExportResult,
@@ -181,6 +182,7 @@ const fallbackSettings: VoiceWaveSettings = {
   // True in the pre-load fallback so the onboarding flow never flashes before
   // real settings arrive; the backend value replaces this immediately.
   onboardingCompleted: true,
+  theme: "system",
   polishProfile: "standard",
   polishProfileCustomized: false
 };
@@ -419,6 +421,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
     onboardingCompleted: settings.onboardingCompleted ?? false,
+    theme: settings.theme ?? "system",
     // polishProfile / polishProfileCustomized are deliberately NOT defaulted:
     // their absence is the "legacy backend" signal the UI uses to fall back
     // to inferring a profile from the old deterministic fields (plan 010).
@@ -1039,6 +1042,22 @@ export function useVoiceWave() {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
       } catch (persistErr) {
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save mic volume guard");
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  const setTheme = useCallback(
+    async (preference: ThemePreference) => {
+      const nextSettings = normalizeSettings({ ...settings, theme: preference });
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save theme");
       }
     },
     [settings, tauriAvailable]
@@ -2411,6 +2430,7 @@ export function useVoiceWave() {
     setReleaseTailMs,
     setDecodeMode,
     setMicVolumeGuard,
+    setTheme,
     setFormatProfile,
     setDomainPacks,
     setAppProfiles,

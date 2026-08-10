@@ -20,6 +20,17 @@ pub enum DecodeMode {
     Quality,
 }
 
+/// Main-window appearance. `System` follows the OS preference; the frontend
+/// resolves it to a concrete light/dark theme.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum FormatProfile {
@@ -182,6 +193,10 @@ pub struct VoiceWaveSettings {
     /// see it exactly once.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Main-window appearance. Defaults to `System` so existing installs keep
+    /// following the OS until the user picks a side.
+    #[serde(default)]
+    pub theme: ThemePreference,
     /// Persisted polish profile (plan 010) — the single authority for how a
     /// dictation is shaped. FIELD-level `serde(default)` on purpose: it makes
     /// a missing `polishProfile` deserialize to `None` (legacy config marker
@@ -233,6 +248,7 @@ impl Default for VoiceWaveSettings {
             pill_action_suggestions: false,
             llm_polish_enabled: false,
             onboarding_completed: false,
+            theme: ThemePreference::System,
             polish_profile: Some(PolishProfile::Standard),
             polish_profile_customized: false,
         }
@@ -556,6 +572,26 @@ mod tests {
 
         let loaded = store.load().expect("load should succeed");
         assert!(!loaded.prefer_clipboard_only_for_terminals);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_round_trips() {
+        assert_eq!(VoiceWaveSettings::default().theme, ThemePreference::System);
+
+        let path = temp_settings_path();
+        let store = SettingsStore::from_path(path.clone());
+        let settings = VoiceWaveSettings {
+            theme: ThemePreference::Dark,
+            ..VoiceWaveSettings::default()
+        };
+        store.save(&settings).expect("save should succeed");
+
+        let raw = std::fs::read_to_string(&path).expect("read should succeed");
+        assert!(raw.contains("\"theme\": \"dark\""), "{raw}");
+        let loaded = store.load().expect("load should succeed");
+        assert_eq!(loaded.theme, ThemePreference::Dark);
 
         let _ = std::fs::remove_file(path);
     }

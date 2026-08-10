@@ -55,6 +55,8 @@ interface Particle {
   rect: boolean;
 }
 
+/** Canvas `fillStyle` needs resolved colors, so these stay literal — they are
+ * the brand blue family, which is theme-invariant by design (plan 014). */
 const PARTICLE_COLORS = ["#1B8EFF", "#7ED8FF", "#0A2A8C", "#A7E8FF", "#FFFFFF"];
 
 /** Lightweight canvas confetti scoped to the onboarding card. `burst(x, y)`
@@ -441,19 +443,19 @@ export function Onboarding({
             {step === "welcome" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">VOICEWAVE</p>
-                <h1 className='mt-3 font-["Fraunces"] text-[44px] leading-[1.06] tracking-tight text-[#09090B]'>
+                <h1 className='mt-3 font-["Fraunces"] text-[44px] leading-[1.06] tracking-tight text-ink-strong'>
                   Your voice,
                   <br />
                   everywhere.
                 </h1>
-                <p className="mt-4 max-w-[26rem] text-[15px] leading-relaxed text-[#71717A]">
+                <p className="mt-4 max-w-[26rem] text-[15px] leading-relaxed text-faint">
                   A quick setup, then dictation in every app on this PC.
                   Private, offline, and yours — audio never leaves this machine.
                 </p>
 
                 {!modelReady && (
                   <div className="mt-6">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#A1A1AA]">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-hint">
                       Speech model
                     </p>
                     <div className="vw-seg mt-2 inline-flex" role="group" aria-label="Speech model choice">
@@ -473,7 +475,7 @@ export function Onboarding({
                       </button>
                     </div>
                     {catalogRow && (
-                      <p className="mt-2 text-xs text-[#A1A1AA]">
+                      <p className="mt-2 text-xs text-hint">
                         {catalogRow.displayName} · {formatSize(catalogRow.sizeBytes)} · downloads in the background while you finish setup
                       </p>
                     )}
@@ -492,10 +494,10 @@ export function Onboarding({
             {step === "mic" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">MICROPHONE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-[#09090B]'>
+                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Say something.
                 </h2>
-                <p className="mt-2 text-[15px] text-[#71717A]">
+                <p className="mt-2 text-[15px] text-faint">
                   {micHeard
                     ? "Your microphone sounds great."
                     : "Read this aloud: “The quick brown fox jumps over the lazy dog.”"}
@@ -506,7 +508,7 @@ export function Onboarding({
                 </div>
 
                 {!micHeard && micHintVisible && (
-                  <p className="text-center text-xs text-[#B45309]">
+                  <p className="text-center text-xs text-status-warn-text">
                     Not hearing anything — check that your mic isn't muted and its Windows input volume is up.
                   </p>
                 )}
@@ -527,13 +529,13 @@ export function Onboarding({
             {step === "speak" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">THE ONE GESTURE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-[#09090B]'>
+                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Hold the key. Speak. Let go.
                 </h2>
 
                 {modelReady ? (
                   <>
-                    <p className="mt-3 flex flex-wrap items-center gap-2 text-[15px] text-[#71717A]">
+                    <p className="mt-3 flex flex-wrap items-center gap-2 text-[15px] text-faint">
                       <span>Hold</span>
                       <kbd className={`vw-onb-kbd ${listening ? "vw-onb-kbd-pressed" : ""}`}>
                         {hotkeyLabel}
@@ -559,7 +561,7 @@ export function Onboarding({
                       />
                     </div>
 
-                    <p className="mt-3 text-sm text-[#71717A]" aria-live="polite">
+                    <p className="mt-3 text-sm text-faint" aria-live="polite">
                       {spokeDone
                         ? "That's the whole trick — it works exactly like this in every app."
                         : listening
@@ -571,9 +573,9 @@ export function Onboarding({
                   </>
                 ) : (
                   <div className="mt-6 flex flex-1 flex-col justify-center">
-                    <div className="rounded-2xl border border-[#E4E4E7] bg-[#FAFAFA] px-5 py-5">
+                    <div className="rounded-2xl border border-edge bg-inset px-5 py-5">
                       <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-[#09090B]">
+                        <p className="text-sm font-semibold text-ink-strong">
                           {downloadFailed
                             ? "The model download hit a snag."
                             : "Finishing the speech model download…"}
@@ -590,7 +592,7 @@ export function Onboarding({
                             Retry
                           </button>
                         ) : (
-                          <span className="text-sm tabular-nums text-[#0A2A8C]">{progress}%</span>
+                          <span className="text-sm tabular-nums text-accent-text">{progress}%</span>
                         )}
                       </div>
                       {!downloadFailed && (
@@ -599,13 +601,13 @@ export function Onboarding({
                         </div>
                       )}
                       {!downloadFailed && downloadedLabel && (
-                        <p className="mt-2 text-xs tabular-nums text-[#A1A1AA]">{downloadedLabel}</p>
+                        <p className="mt-2 text-xs tabular-nums text-hint">{downloadedLabel}</p>
                       )}
                       {downloadFailed && status?.message && (
-                        <p className="mt-2 text-xs text-[#A94444]">{status.message}</p>
+                        <p className="mt-2 text-xs text-status-danger-text">{status.message}</p>
                       )}
                     </div>
-                    <p className="mt-3 text-xs text-[#A1A1AA]">
+                    <p className="mt-3 text-xs text-hint">
                       This is the one-time download — dictation is fully offline after it lands.
                     </p>
                   </div>
@@ -630,10 +632,10 @@ export function Onboarding({
                 <div className="vw-onb-done-orb">
                   <Check size={40} strokeWidth={3} />
                 </div>
-                <h2 className='mt-6 font-["Fraunces"] text-[38px] leading-tight tracking-tight text-[#09090B]'>
+                <h2 className='mt-6 font-["Fraunces"] text-[38px] leading-tight tracking-tight text-ink-strong'>
                   You're set.
                 </h2>
-                <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-[#71717A]">
+                <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-faint">
                   VoiceWave works in every app — try your email or notes next.
                   Say “new line” or “bullet point” to add structure as you speak.
                 </p>
@@ -669,7 +671,7 @@ export function Onboarding({
                 </div>
                 <button
                   type="button"
-                  className="text-xs font-medium text-[#A1A1AA] transition-colors hover:text-[#52525B]"
+                  className="text-xs font-medium text-hint transition-colors hover:text-quiet"
                   onClick={onComplete}
                 >
                   Skip setup

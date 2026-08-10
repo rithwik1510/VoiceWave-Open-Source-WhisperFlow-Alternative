@@ -13,6 +13,7 @@
 --------------------------------------------------------------------------- */
 
 :root {
+  color-scheme: light;
   color: #09090b;
   background-color: #fafafa;
 
@@ -20,28 +21,51 @@
   --vw-ink: #18181b;
   --vw-ink-strong: #09090b;
   --vw-ink-hover: #27272a;
+  /* Text/marks that sit ON an --vw-ink fill (inverts with the ink). */
+  --vw-ink-contrast: #fafafa;
+  /* Text/marks that sit ON a brand-blue fill (never inverts). */
+  --vw-on-accent: #ffffff;
   --vw-color-text-primary: #09090b;
   --vw-color-text-secondary: #475569;
   --vw-color-text-muted: #71717a;
+  --vw-color-text-label: #3f3f46;
+  --vw-color-text-quiet: #52525b;
+  /* Weakest text tier: unit suffixes, axis labels, footnotes. */
+  --vw-color-text-hint: #a1a1aa;
   --vw-color-surface: #ffffff;
   --vw-color-surface-soft: #fafafa;
   --vw-color-surface-subtle: #f4f4f5;
+  --vw-color-surface-hover: #f8f8f8;
+  --vw-color-row-hover: #fcfcfd;
   --vw-color-border: #e4e4e7;
   --vw-color-border-strong: #d4d4d8;
   --vw-color-divider: #f1f1f3;
+  /* Unfilled part of progress bars / gauge arcs. */
+  --vw-track-quiet: #e8e8ee;
+  --vw-scrim: rgba(9, 9, 11, 0.32);
+  --vw-scrim-strong: rgba(9, 9, 11, 0.45);
 
   /* Brand accents — the VoiceWave blue family (matches the website). */
   --vw-accent-navy-900: #0a2a8c;
   --vw-accent-blue-700: #0032b8;
   --vw-accent-blue-600: #1b8eff;
+  --vw-accent-blue-300: #9cc9ff;
   --vw-accent-cyan-500: #7ed8ff;
   --vw-accent-cyan-400: #a7e8ff;
   --vw-action-blue: var(--vw-accent-blue-600);
+  /* Brand blue used as TEXT/ICON on a neutral surface — the one blue that has
+     to shift per theme, because deep navy is unreadable on a dark page. */
+  --vw-accent-text: #0032b8;
+  /* Brand blue as a hairline rule / quote bar on a neutral surface. */
+  --vw-accent-rule: rgba(27, 142, 255, 0.45);
   --vw-ai-gradient: linear-gradient(110deg, #0a2a8c 8%, #1b8eff 48%, #6fd4ff 82%, #a7e8ff 100%);
   --vw-cta-gradient: linear-gradient(110deg, #0a2a8c 0%, #0f5fd7 42%, #1b8eff 100%);
   --vw-cta-gradient-hover: linear-gradient(110deg, #0d34a4 0%, #146ce8 42%, #35a0ff 100%);
+  --vw-cta-gradient-active: linear-gradient(110deg, #092575 0%, #0d54c4 42%, #1780ec 100%);
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.1) 8%, rgba(27, 142, 255, 0.16) 54%, rgba(126, 216, 255, 0.2) 82%, rgba(167, 232, 255, 0.18) 100%);
   --vw-glow-blue: 0 8px 20px -10px rgba(27, 142, 255, 0.55);
+  --vw-ring-shell-bg: linear-gradient(180deg, rgba(229, 242, 255, 0.68) 0%, rgba(231, 246, 255, 0.62) 100%);
+  --vw-ring-inner-bg: rgba(255, 255, 255, 0.985);
 
   /* Radii */
   --vw-radius-lg: 16px;
@@ -68,6 +92,119 @@
   --vw-state-error-border: #fda4af;
   --vw-state-error-accent: #ef4444;
   --vw-state-error-accent-soft: #fdba74;
+
+  /* Status banners (warn / danger / info) */
+  --vw-status-warn-text: #92400e;
+  /* Secondary detail line inside a warn banner. */
+  --vw-status-warn-text-soft: #a16207;
+  --vw-status-warn-bg: #fffbeb;
+  --vw-status-warn-border: #fde68a;
+  --vw-status-danger-text: #b3261e;
+  --vw-status-danger-bg: #fff1f1;
+  --vw-status-danger-border: #f3c2c2;
+  --vw-status-info-bg: #eff6ff;
+  --vw-status-info-border: #bfdbfe;
+  --vw-status-success: #16a34a;
+  /* Success as body text (needs AA), vs --vw-status-success as a dot/mark. */
+  --vw-status-success-text: #15803d;
+
+  /* Streak heatmap ramp (level 0 → 4) */
+  --vw-heat-empty: #e8e8ee;
+  --vw-heat-1: rgba(27, 142, 255, 0.25);
+  --vw-heat-2: rgba(27, 142, 255, 0.45);
+  --vw-heat-3: rgba(27, 142, 255, 0.7);
+  --vw-heat-4: #1b8eff;
+
+  /* Onboarding canvas — its own surfaces, framed rather than paper-flat. */
+  --vw-onb-canvas: #eff0f4;
+  --vw-onb-dot-idle: #d9d9e0;
+  --vw-onb-key-border: #e0e0e6;
+  --vw-onb-dock-bg: rgba(255, 255, 255, 0.9);
+  --vw-onb-dock-track: #e4eaf5;
+}
+
+/* ---------------------------------------------------------------------------
+   "Quiet Ink, Night" — the same system with the paper inverted (plan 014).
+   Only the tokens that change are redefined; the blue family, radii and the
+   on-accent literals inherit from :root. Elevation runs page → card → inset
+   (darkest to lightest) and cards keep their 1px border, because shadows
+   carry almost no signal on a dark ground.
+--------------------------------------------------------------------------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #f4f4f5;
+  background-color: #0b0b0e;
+
+  --vw-ink: #e4e4e7;
+  --vw-ink-strong: #fafafa;
+  --vw-ink-hover: #d4d4d8;
+  --vw-ink-contrast: #09090b;
+  --vw-color-text-primary: #f4f4f5;
+  --vw-color-text-secondary: #a3adbb;
+  --vw-color-text-muted: #8b8b94;
+  --vw-color-text-label: #d4d4d8;
+  --vw-color-text-quiet: #a1a1aa;
+  --vw-color-text-hint: #84848e;
+  --vw-color-surface: #17171b;
+  --vw-color-surface-soft: #0b0b0e;
+  --vw-color-surface-subtle: #212127;
+  --vw-color-surface-hover: #22222a;
+  --vw-color-row-hover: #1c1c22;
+  --vw-color-border: #26262c;
+  --vw-color-border-strong: #34343c;
+  --vw-color-divider: #1e1e24;
+  --vw-track-quiet: #26262c;
+  --vw-scrim: rgba(0, 0, 0, 0.6);
+  --vw-scrim-strong: rgba(0, 0, 0, 0.72);
+
+  --vw-accent-text: #5cb3ff;
+  --vw-accent-rule: rgba(27, 142, 255, 0.55);
+  --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
+  --vw-ring-shell-bg: linear-gradient(180deg, rgba(27, 142, 255, 0.16) 0%, rgba(126, 216, 255, 0.12) 100%);
+  --vw-ring-inner-bg: rgba(23, 23, 27, 0.985);
+
+  --vw-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --vw-shadow-float: 0 16px 40px rgba(0, 0, 0, 0.6);
+
+  --vw-state-idle-border: #2e323a;
+  --vw-state-idle-accent: #8b98a8;
+  --vw-state-idle-accent-soft: #454e5c;
+  --vw-state-listening-border: #2f9dff;
+  --vw-state-listening-accent: #4db2ff;
+  --vw-state-listening-accent-soft: #1d5c96;
+  --vw-state-transcribing-border: #4da9ff;
+  --vw-state-transcribing-accent: #8fceff;
+  --vw-state-transcribing-accent-soft: #23528f;
+  --vw-state-inserted-border: #4f84e8;
+  --vw-state-inserted-accent: #bcd3ff;
+  --vw-state-inserted-accent-soft: #2d69dd;
+  --vw-state-error-border: #8b3a3a;
+  --vw-state-error-accent: #f87171;
+  --vw-state-error-accent-soft: #b45309;
+
+  --vw-status-warn-text: #fbbf24;
+  --vw-status-warn-text-soft: #d9a441;
+  --vw-status-warn-bg: rgba(146, 64, 14, 0.16);
+  --vw-status-warn-border: #78350f;
+  --vw-status-danger-text: #f87171;
+  --vw-status-danger-bg: rgba(239, 68, 68, 0.1);
+  --vw-status-danger-border: #7f1d1d;
+  --vw-status-info-bg: rgba(27, 142, 255, 0.1);
+  --vw-status-info-border: #1e3a8a;
+  --vw-status-success: #4ade80;
+  --vw-status-success-text: #4ade80;
+
+  --vw-heat-empty: #1e242e;
+  --vw-heat-1: #173157;
+  --vw-heat-2: #1e4f96;
+  --vw-heat-3: #1b8eff;
+  --vw-heat-4: #7ed8ff;
+
+  --vw-onb-canvas: #0a0a0d;
+  --vw-onb-dot-idle: #3a3a44;
+  --vw-onb-key-border: #34343c;
+  --vw-onb-dock-bg: rgba(23, 23, 27, 0.9);
+  --vw-onb-dock-track: #1d2a3d;
 }
 
 * {
@@ -187,14 +324,14 @@ body {
 .vw-sidebar-pro-panel {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-lg);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-card);
 }
 
 /* ------------------------------------------------------------- typography */
 
 .vw-kicker {
-  @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-[#71717A];
+  @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-[color:var(--vw-color-text-muted)];
   font-family: "Fraunces", "Times New Roman", serif;
 }
 
@@ -217,21 +354,21 @@ body {
 .vw-surface-elevated {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-lg);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-card);
 }
 
 .vw-surface-base-sm {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-md);
-  background: #ffffff;
+  background: var(--vw-color-surface);
 }
 
 /* A card that holds a stack of rows divided by hairlines. */
 .vw-row-list {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-lg);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-card);
   overflow: hidden;
 }
@@ -241,7 +378,8 @@ body {
 }
 
 .vw-stat-card {
-  @apply border bg-white px-4 py-3;
+  @apply border px-4 py-3;
+  background: var(--vw-color-surface);
   border-radius: var(--vw-radius-lg);
   border-color: var(--vw-color-border);
   box-shadow: var(--vw-shadow-card);
@@ -259,14 +397,14 @@ body {
   padding: 0.2rem 0.62rem;
   font-size: 11px;
   font-weight: 600;
-  color: #52525b;
+  color: var(--vw-color-text-quiet);
   white-space: nowrap;
 }
 
 .vw-chip-ink {
   border-color: rgba(27, 142, 255, 0.55);
   background: var(--vw-cta-gradient);
-  color: #ffffff;
+  color: var(--vw-on-accent);
 }
 
 .vw-chip-accent {
@@ -287,7 +425,7 @@ body {
   border: 1px solid rgba(15, 95, 215, 0.85);
   border-radius: var(--vw-radius-sm);
   background: var(--vw-cta-gradient);
-  color: #ffffff;
+  color: var(--vw-on-accent);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
   font-weight: 600;
@@ -306,7 +444,7 @@ body {
 .vw-btn-primary:active,
 .vw-action-button:active,
 .vw-accent-button:active {
-  background: linear-gradient(110deg, #092575 0%, #0d54c4 42%, #1780ec 100%);
+  background: var(--vw-cta-gradient-active);
 }
 
 .vw-btn-primary:focus-visible,
@@ -325,7 +463,7 @@ body {
   gap: 0.4rem;
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-sm);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   color: var(--vw-ink);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
@@ -335,7 +473,7 @@ body {
 }
 
 .vw-btn-secondary:hover {
-  background: #f8f8f8;
+  background: var(--vw-color-surface-hover);
   border-color: var(--vw-color-border-strong);
 }
 
@@ -346,7 +484,7 @@ body {
   border: 1px solid transparent;
   border-radius: var(--vw-radius-sm);
   background: transparent;
-  color: #b3261e;
+  color: var(--vw-status-danger-text);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
   font-weight: 600;
@@ -354,7 +492,7 @@ body {
 }
 
 .vw-btn-danger:hover {
-  background: #fef2f2;
+  background: var(--vw-status-danger-bg);
 }
 
 /* Compact size modifier — append after any vw-btn-* class. */
@@ -372,7 +510,7 @@ body {
   height: 2rem;
   width: 2rem;
   border-radius: 8px;
-  color: #71717a;
+  color: var(--vw-color-text-muted);
   transition: background-color 150ms ease, color 150ms ease;
 }
 
@@ -386,7 +524,7 @@ body {
 .vw-field {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-sm);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   padding: 0.5rem 0.75rem;
   font-size: 0.875rem;
   color: var(--vw-ink-strong);
@@ -435,7 +573,7 @@ body {
   height: 16px;
   width: 16px;
   border-radius: 999px;
-  background: #ffffff;
+  background: var(--vw-on-accent);
   box-shadow: 0 1px 2px rgba(9, 9, 11, 0.22);
   transition: transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -471,7 +609,7 @@ body {
   padding: 0.32rem 0.75rem;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #52525b;
+  color: var(--vw-color-text-quiet);
   transition: color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
   white-space: nowrap;
 }
@@ -481,7 +619,7 @@ body {
 }
 
 .vw-seg-btn-active {
-  background: #ffffff;
+  background: var(--vw-color-surface);
   color: var(--vw-ink-strong);
   box-shadow: 0 1px 2px rgba(9, 9, 11, 0.08), 0 0 0 1px rgba(27, 142, 255, 0.38);
 }
@@ -511,19 +649,19 @@ body {
 
 .vw-modal-backdrop {
   @apply fixed inset-0 z-[120] flex items-center justify-center p-4;
-  background: rgba(9, 9, 11, 0.32);
+  background: var(--vw-scrim);
   animation: vw-modal-backdrop-in 180ms ease-out;
 }
 
 .vw-modal-card {
-  @apply flex w-full max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-[#E4E4E7] bg-white;
+  @apply flex w-full max-h-[88vh] flex-col overflow-hidden rounded-2xl border border-[color:var(--vw-color-border)] bg-[color:var(--vw-color-surface)];
   box-shadow: var(--vw-shadow-float);
   will-change: transform, opacity;
   animation: vw-modal-card-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .vw-modal-header {
-  @apply flex items-start justify-between gap-4 border-b border-[#E4E4E7] px-6 py-5;
+  @apply flex items-start justify-between gap-4 border-b border-[color:var(--vw-color-border)] px-6 py-5;
 }
 
 .vw-modal-body {
@@ -531,7 +669,7 @@ body {
 }
 
 .vw-modal-close {
-  @apply inline-flex h-9 w-9 items-center justify-center rounded-full border border-[#E4E4E7] text-[#52525B] transition hover:bg-[#F4F4F5] hover:text-[#09090B];
+  @apply inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--vw-color-border)] text-[color:var(--vw-color-text-quiet)] transition hover:bg-[color:var(--vw-color-surface-subtle)] hover:text-[color:var(--vw-color-text-primary)];
 }
 
 /* --------------------------------------------------------- settings modal */
@@ -559,7 +697,7 @@ body {
   padding: 0.48rem 0.7rem;
   font-size: 0.84rem;
   font-weight: 600;
-  color: #52525b;
+  color: var(--vw-color-text-quiet);
   text-align: left;
   transition: background-color 150ms ease, color 150ms ease;
 }
@@ -636,7 +774,7 @@ body {
   min-width: 190px;
   border-radius: var(--vw-radius-md);
   border: 1px solid var(--vw-color-border);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-float);
   padding: 0.4rem;
 }
@@ -681,7 +819,7 @@ body {
 .vw-profile-quick-action {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-md);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   padding: 0.62rem 0.78rem;
   font-size: 0.8rem;
   font-weight: 600;
@@ -691,7 +829,7 @@ body {
 }
 
 .vw-profile-quick-action:hover {
-  background: #f8f8f8;
+  background: var(--vw-color-surface-hover);
   border-color: var(--vw-color-border-strong);
 }
 
@@ -716,7 +854,7 @@ body {
   padding: 0.4rem 1rem;
   font-size: 0.78rem;
   font-weight: 700;
-  color: #52525b;
+  color: var(--vw-color-text-quiet);
   transition: color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
 }
 
@@ -725,14 +863,14 @@ body {
 }
 
 .vw-auth-tab-active {
-  background: #ffffff;
+  background: var(--vw-color-surface);
   color: var(--vw-ink-strong);
   box-shadow: 0 1px 2px rgba(9, 9, 11, 0.08), 0 0 0 1px rgba(9, 9, 11, 0.04);
 }
 
 .vw-auth-form {
   border-color: var(--vw-color-border);
-  background: #ffffff;
+  background: var(--vw-color-surface);
 }
 
 .vw-auth-input {
@@ -771,14 +909,14 @@ body {
   align-items: center;
   justify-content: center;
   padding: 1.2rem;
-  background: rgba(9, 9, 11, 0.45);
+  background: var(--vw-scrim-strong);
 }
 
 .vw-model-gate-card {
   width: min(560px, 100%);
   border-radius: 20px;
   border: 1px solid var(--vw-color-border);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-float);
   padding: 1.5rem;
 }
@@ -799,7 +937,7 @@ body {
   gap: 0.15rem;
   border-radius: var(--vw-radius-lg);
   border: 1px solid var(--vw-color-border);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   padding: 0.85rem;
   text-align: left;
   transition: border-color 150ms ease, box-shadow 150ms ease;
@@ -825,7 +963,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #fafafa;
+  color: var(--vw-ink-contrast);
 }
 
 .vw-model-gate-tab-title {
@@ -909,12 +1047,12 @@ body {
 }
 
 .vw-interactive-row:hover {
-  background: #fcfcfd;
+  background: var(--vw-color-row-hover);
 }
 
 .vw-mode-card {
   border-color: var(--vw-color-border);
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-card);
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
@@ -940,7 +1078,7 @@ body {
 .vw-mode-status-chip-active {
   border-color: rgba(27, 142, 255, 0.55);
   background: var(--vw-cta-gradient);
-  color: #ffffff;
+  color: var(--vw-on-accent);
 }
 
 /* Brand fill for hero elements (logo tile, idle mic button). */
@@ -962,7 +1100,7 @@ body {
   --vw-ring-speed: 20s;
   padding: var(--vw-ring-size);
   border-radius: var(--vw-ring-radius);
-  background: linear-gradient(180deg, rgba(229, 242, 255, 0.68) 0%, rgba(231, 246, 255, 0.62) 100%);
+  background: var(--vw-ring-shell-bg);
   box-shadow: 0 10px 26px -14px rgba(27, 142, 255, 0.4);
 }
 
@@ -1004,7 +1142,7 @@ body {
   overflow: hidden;
   border: 0 !important;
   border-color: transparent !important;
-  background: rgba(255, 255, 255, 0.985) !important;
+  background: var(--vw-ring-inner-bg) !important;
   box-shadow: 0 1px 2px rgba(9, 9, 11, 0.04);
 }
 
@@ -1059,7 +1197,7 @@ body {
   align-items: center;
   border-radius: 999px;
   border: 1px solid var(--vw-state-border, var(--vw-state-idle-border));
-  background: color-mix(in srgb, var(--vw-state-accent, var(--vw-state-idle-accent)) 10%, #ffffff);
+  background: color-mix(in srgb, var(--vw-state-accent, var(--vw-state-idle-accent)) 10%, var(--vw-color-surface));
   padding: 0.22rem 0.52rem;
   font-size: 0.62rem;
   font-weight: 700;
@@ -1090,7 +1228,7 @@ body {
 
 .vw-home-mode-chip {
   border-color: var(--vw-state-border, var(--vw-state-idle-border)) !important;
-  background: color-mix(in srgb, var(--vw-state-accent-soft, var(--vw-state-idle-accent-soft)) 18%, #ffffff);
+  background: color-mix(in srgb, var(--vw-state-accent-soft, var(--vw-state-idle-accent-soft)) 18%, var(--vw-color-surface));
   color: var(--vw-color-text-muted) !important;
 }
 
@@ -1102,12 +1240,12 @@ body {
 .vw-home-secondary-card,
 .vw-home-transcript-card {
   border-color: var(--vw-color-border) !important;
-  background: #ffffff !important;
+  background: var(--vw-color-surface) !important;
   box-shadow: var(--vw-shadow-card) !important;
 }
 
 .vw-home-row-latest {
-  background: #fafafa;
+  background: var(--vw-color-surface-soft);
 }
 
 .vw-status-dot {
@@ -1120,13 +1258,13 @@ body {
 .vw-pro-badge {
   border: 1px solid var(--vw-color-border);
   background: var(--vw-color-surface-subtle);
-  color: #3f3f46;
+  color: var(--vw-color-text-label);
 }
 
 .vw-pro-badge-active {
   border: 1px solid rgba(27, 142, 255, 0.55);
   background: var(--vw-cta-gradient);
-  color: #ffffff;
+  color: var(--vw-on-accent);
 }
 
 .vw-pro-minimal-grid {
@@ -1155,7 +1293,7 @@ body {
   border: 1px solid var(--vw-color-border);
   border-radius: var(--vw-radius-lg);
   padding: 0.9rem;
-  background: #ffffff;
+  background: var(--vw-color-surface);
   box-shadow: var(--vw-shadow-card);
 }
 
@@ -1263,7 +1401,7 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: #eff0f4;
+  background: var(--vw-onb-canvas);
   animation: vw-modal-backdrop-in 420ms ease both;
 }
 
@@ -1367,7 +1505,7 @@ body {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.22em;
-  color: #1b8eff;
+  color: var(--vw-accent-blue-600);
 }
 
 /* Step indicator dots: active dot stretches into a gradient pill. */
@@ -1381,12 +1519,12 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #d9d9e0;
+  background: var(--vw-onb-dot-idle);
   transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1), background 320ms ease;
 }
 
 .vw-onb-dot-done {
-  background: #9cc9ff;
+  background: var(--vw-accent-blue-300);
 }
 
 .vw-onb-dot-active {
@@ -1413,7 +1551,7 @@ body {
   height: 12px;
   margin: -2px;
   border-radius: 999px;
-  background: linear-gradient(180deg, #1b8eff 0%, #7ed8ff 100%);
+  background: linear-gradient(180deg, var(--vw-accent-blue-600) 0%, var(--vw-accent-cyan-500) 100%);
   opacity: 0.85;
   transform-origin: center;
   will-change: height;
@@ -1430,7 +1568,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--vw-on-accent);
   background: var(--vw-cta-gradient);
   box-shadow: var(--vw-glow-blue), 0 0 0 0 rgba(27, 142, 255, 0.22);
   will-change: box-shadow;
@@ -1468,13 +1606,13 @@ body {
   gap: 6px;
   padding: 10px 18px;
   border-radius: 14px;
-  border: 1px solid #e0e0e6;
+  border: 1px solid var(--vw-onb-key-border);
   border-bottom-width: 3px;
-  background: #fff;
+  background: var(--vw-color-surface);
   font-family: "Manrope", sans-serif;
   font-size: 15px;
   font-weight: 700;
-  color: #09090b;
+  color: var(--vw-color-text-primary);
   box-shadow: 0 2px 0 rgba(9, 9, 11, 0.05), 0 10px 22px -14px rgba(9, 9, 11, 0.28);
   transition: transform 130ms ease, border-bottom-width 130ms ease, box-shadow 130ms ease, border-color 130ms ease;
 }
@@ -1482,7 +1620,7 @@ body {
 .vw-onb-kbd-pressed {
   transform: translateY(2px);
   border-bottom-width: 1px;
-  border-color: #1b8eff;
+  border-color: var(--vw-accent-blue-600);
   box-shadow: 0 0 0 3px rgba(27, 142, 255, 0.18), 0 4px 12px -8px rgba(27, 142, 255, 0.5);
 }
 
@@ -1490,14 +1628,14 @@ body {
 .vw-onb-stage {
   position: relative;
   border-radius: 18px;
-  border: 1px solid #e4e4e7;
-  background: #fafafa;
+  border: 1px solid var(--vw-color-border);
+  background: var(--vw-color-surface-soft);
   transition: border-color 240ms ease, box-shadow 240ms ease, background 240ms ease;
 }
 
 .vw-onb-stage-live {
   border-color: rgba(27, 142, 255, 0.55);
-  background: #fff;
+  background: var(--vw-color-surface);
   box-shadow: 0 0 0 3px rgba(27, 142, 255, 0.14), var(--vw-glow-blue);
 }
 
@@ -1506,8 +1644,8 @@ body {
 }
 
 @keyframes vw-onb-stage-flash {
-  0% { box-shadow: 0 0 0 0 rgba(27, 142, 255, 0); border-color: #e4e4e7; }
-  22% { box-shadow: 0 0 0 5px rgba(27, 142, 255, 0.28), 0 14px 34px -14px rgba(27, 142, 255, 0.55); border-color: #1b8eff; }
+  0% { box-shadow: 0 0 0 0 rgba(27, 142, 255, 0); border-color: var(--vw-color-border); }
+  22% { box-shadow: 0 0 0 5px rgba(27, 142, 255, 0.28), 0 14px 34px -14px rgba(27, 142, 255, 0.55); border-color: var(--vw-accent-blue-600); }
   100% { box-shadow: 0 0 0 0 rgba(27, 142, 255, 0); border-color: rgba(27, 142, 255, 0.4); }
 }
 
@@ -1521,7 +1659,7 @@ body {
   padding: 18px 20px;
   font-size: 16px;
   line-height: 1.65;
-  color: #09090b;
+  color: var(--vw-color-text-primary);
 }
 
 /* Download progress: gradient fill with a soft light sweeping across it. */
@@ -1529,7 +1667,7 @@ body {
   position: relative;
   height: 8px;
   border-radius: 999px;
-  background: #e8e8ee;
+  background: var(--vw-track-quiet);
   overflow: hidden;
 }
 
@@ -1568,12 +1706,12 @@ body {
   padding: 9px 16px;
   border-radius: 999px;
   border: 1px solid rgba(27, 142, 255, 0.28);
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--vw-onb-dock-bg);
   backdrop-filter: blur(10px);
   box-shadow: 0 12px 30px -16px rgba(27, 142, 255, 0.45);
   font-size: 12.5px;
   font-weight: 600;
-  color: #0a2a8c;
+  color: var(--vw-accent-text);
   animation: vw-onb-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -1581,7 +1719,7 @@ body {
   width: 90px;
   height: 5px;
   border-radius: 999px;
-  background: #e4eaf5;
+  background: var(--vw-onb-dock-track);
   overflow: hidden;
 }
 
@@ -1600,7 +1738,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--vw-on-accent);
   background: var(--vw-cta-gradient);
   box-shadow: var(--vw-glow-blue);
   animation: vw-onb-tick-pop 640ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
