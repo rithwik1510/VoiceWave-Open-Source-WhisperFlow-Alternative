@@ -173,7 +173,9 @@
   --vw-accent-rule: rgba(27, 142, 255, 0.55);
   --vw-accent-soft-gradient: linear-gradient(135deg, rgba(10, 42, 140, 0.13) 8%, rgba(27, 142, 255, 0.21) 54%, rgba(126, 216, 255, 0.26) 82%, rgba(167, 232, 255, 0.23) 100%);
   --vw-ring-shell-bg: rgba(92, 179, 255, 0.12);
-  --vw-ring-inner-bg: rgba(30, 33, 40, 0.985);
+  /* Fully opaque in dark: the light theme's 1.5% translucency lets the
+     bright comet bleed through the card face as a ghost shape at night. */
+  --vw-ring-inner-bg: #1e2128;
   /* No halo in the dark theme — any blue box-shadow reads as a glowing
      rectangle against night surfaces. The ring itself is the accent. */
   --vw-ring-glow: none;
@@ -1160,16 +1162,14 @@ body {
   background: conic-gradient(
     from 0deg,
     transparent 0deg,
-    transparent 118deg,
-    rgba(10, 42, 140, 0.0) 128deg,
-    rgba(27, 142, 255, 0.35) 152deg,
-    rgba(126, 216, 255, 0.7) 168deg,
+    transparent 108deg,
+    rgba(27, 142, 255, 0.5) 140deg,
+    rgba(126, 216, 255, 0.9) 166deg,
     transparent 178deg,
-    transparent 298deg,
-    rgba(10, 42, 140, 0.0) 306deg,
-    rgba(27, 142, 255, 0.55) 330deg,
-    rgba(126, 216, 255, 0.95) 348deg,
-    rgba(196, 236, 255, 1) 356deg,
+    transparent 272deg,
+    rgba(27, 142, 255, 0.8) 316deg,
+    rgba(126, 216, 255, 1) 344deg,
+    rgba(224, 244, 255, 1) 356deg,
     transparent 360deg
   );
 }
