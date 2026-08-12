@@ -61,6 +61,19 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.6.0
+
+**Hands-free dictation, dark mode, and deeper insights**
+
+1. Double-tap the push-to-talk shortcut to dictate hands-free. Pause when you
+   are done or press the shortcut again; Escape cancels the active dictation.
+1. Hands-free capture keeps a short release tail when stopped manually, so
+   quiet final syllables are not clipped.
+1. VoiceWave now has complete Light, Dark, and System themes across the app
+   shell, dashboard, settings, and floating recording pill.
+1. Statistics now include insertion-success-aware totals, a GitHub-style
+   streak heatmap, and richer insight panels.
+
 ## What's New in 0.5.9
 
 **Usage visibility and dashboard polish**

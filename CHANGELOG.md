@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.6.0] – 2026-08-12
+
+Hands-free dictation, full dark mode, and deeper usage insights.
+
+### Added
+
+- **Hands-free dictation.** Double-tap the push-to-talk shortcut to keep
+  listening without holding the keys. Pause when finished or press the
+  shortcut again; Escape cancels the active dictation.
+- Hands-free capture ends automatically after the configured silence period
+  while retaining the release tail when stopped manually, so quiet final
+  syllables are not clipped.
+- **Complete light, dark, and system theme support.** The application shell,
+  dashboard, floating pill, settings, and supporting surfaces now share the
+  same dark design language and follow the selected Windows theme without a
+  startup flash.
+- **Deeper statistics.** Insertion-success-aware totals, a GitHub-style streak
+  heatmap, and insight panels make activity and reliability trends easier to
+  understand.
+
+### Changed
+
+- The recording pill and dashboard now expose the active hands-free state and
+  explain both pause-to-finish and shortcut-to-finish behavior.
+- Theme controls are available in Settings with Light, Dark, and System
+  choices.
+
 ## [0.5.9] – 2026-07-31
 
 Usage visibility and small dashboard-polish release.
