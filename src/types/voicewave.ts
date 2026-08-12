@@ -10,6 +10,7 @@ export type VoiceWaveHudState =
   | "error";
 
 export type DictationMode = "microphone" | "fixture";
+export type DictationControlMode = "holdToTalk" | "handsFree";
 export type DecodeMode = "balanced" | "fast" | "quality";
 export type FormatProfile = "default" | "academic" | "technical" | "concise" | "code-doc";
 export type DomainPackId = "coding" | "student" | "productivity";
@@ -110,6 +111,9 @@ export interface VoiceWaveSnapshot {
   lastPartial: string | null;
   lastFinal: string | null;
   activeModel: string;
+  /** Present while a capture is active. Optional for compatibility with
+   * desktop runtimes released before hands-free mode. */
+  controlMode?: DictationControlMode | null;
 }
 
 /** A typed one-tap action carried by a pill notice. The frontend switches on
@@ -145,6 +149,7 @@ export interface TranscriptEvent {
 export interface VoiceWaveStateEvent {
   state: VoiceWaveHudState;
   message?: string | null;
+  controlMode?: DictationControlMode | null;
 }
 
 export interface LatencyBreakdownEvent {

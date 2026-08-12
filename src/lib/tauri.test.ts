@@ -115,7 +115,7 @@ describe("tauri bridge", () => {
     await tauri.insertText({} as never);
     await tauri.undoLastInsertion();
     await tauri.getRecentInsertions(7);
-    await tauri.startDictation("microphone");
+    await tauri.startDictation("microphone", "handsFree");
     await tauri.cancelDictation();
     await tauri.stopDictation();
     await tauri.showMainWindow();
@@ -178,6 +178,10 @@ describe("tauri bridge", () => {
     });
     expect(coreMocks.invoke).toHaveBeenCalledWith("run_audio_quality_diagnostic", { durationMs: 1200 });
     expect(coreMocks.invoke).toHaveBeenCalledWith("get_recent_insertions", { limit: 7 });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("start_dictation", {
+      mode: "microphone",
+      controlMode: "handsFree"
+    });
     expect(coreMocks.invoke).toHaveBeenCalledWith("search_session_history", {
       query: "hello",
       tags: ["tag"],

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    sync::{Mutex as StdMutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, OnceLock,
+    },
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -35,6 +38,7 @@ pub struct HotkeySnapshot {
 pub enum HotkeyAction {
     ToggleDictation,
     PushToTalk,
+    CancelDictation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +84,14 @@ struct HotkeyEdgeTracker {
     toggle: ParsedHotkey,
     push_to_talk: ParsedHotkey,
     keys_down: HashSet<u16>,
+    escape_down: bool,
+    escape_owned: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HotkeyEventOutcome {
+    signals: Vec<HotkeySignal>,
+    consume: bool,
 }
 
 impl HotkeyEdgeTracker {
@@ -88,19 +100,66 @@ impl HotkeyEdgeTracker {
             toggle: parse_combo("toggle", &config.toggle)?,
             push_to_talk: parse_combo("pushToTalk", &config.push_to_talk)?,
             keys_down: HashSet::new(),
+            escape_down: false,
+            escape_owned: false,
         })
     }
 
     fn key_event(&mut self, vk: u16, pressed: bool) -> Vec<HotkeySignal> {
+        self.handle_key_event(vk, pressed, false).signals
+    }
+
+    fn handle_key_event(
+        &mut self,
+        vk: u16,
+        pressed: bool,
+        dictation_active: bool,
+    ) -> HotkeyEventOutcome {
+        if vk == VK_ESCAPE_ {
+            if pressed {
+                if self.escape_down {
+                    return HotkeyEventOutcome {
+                        consume: self.escape_owned,
+                        ..HotkeyEventOutcome::default()
+                    };
+                }
+
+                self.escape_down = true;
+                self.escape_owned = dictation_active;
+                if self.escape_owned {
+                    return HotkeyEventOutcome {
+                        signals: vec![HotkeySignal {
+                            action: HotkeyAction::CancelDictation,
+                            phase: HotkeyPhase::Triggered,
+                        }],
+                        consume: true,
+                    };
+                }
+            } else {
+                if !self.escape_down {
+                    return HotkeyEventOutcome::default();
+                }
+                self.escape_down = false;
+                let consume = self.escape_owned;
+                self.escape_owned = false;
+                return HotkeyEventOutcome {
+                    consume,
+                    ..HotkeyEventOutcome::default()
+                };
+            }
+
+            return HotkeyEventOutcome::default();
+        }
+
         let push_was_active = parsed_is_active(&self.push_to_talk, &self.keys_down);
 
         if pressed {
             // Auto-repeat must not produce additional toggle or push edges.
             if !self.keys_down.insert(vk) {
-                return Vec::new();
+                return HotkeyEventOutcome::default();
             }
         } else if !self.keys_down.remove(&vk) {
-            return Vec::new();
+            return HotkeyEventOutcome::default();
         }
 
         let mut signals = Vec::with_capacity(2);
@@ -127,7 +186,10 @@ impl HotkeyEdgeTracker {
                 phase: HotkeyPhase::Released,
             });
         }
-        signals
+        HotkeyEventOutcome {
+            signals,
+            consume: false,
+        }
     }
 }
 
@@ -164,8 +226,10 @@ const VK_LMENU_: u16 = 0xA4;
 const VK_RMENU_: u16 = 0xA5;
 const VK_LWIN_: u16 = 0x5B;
 const VK_RWIN_: u16 = 0x5C;
+const VK_ESCAPE_: u16 = 0x1B;
 
 pub struct HotkeyRuntime {
+    dictation_active: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
     thread_id: u32,
     #[cfg(target_os = "windows")]
@@ -190,6 +254,15 @@ impl HotkeyRuntime {
             ))
         }
     }
+
+    /// Controls whether Escape is owned by VoiceWave's global keyboard hook.
+    ///
+    /// An Escape press that begins while active is consumed through its
+    /// matching key-up, even if cancellation clears this flag first. Presses
+    /// that begin while inactive are always passed through unchanged.
+    pub fn set_dictation_active(&self, active: bool) {
+        self.dictation_active.store(active, Ordering::Release);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -209,6 +282,7 @@ impl Drop for HotkeyRuntime {
 struct HookDispatch {
     tracker: HotkeyEdgeTracker,
     sender: UnboundedSender<HotkeySignal>,
+    dictation_active: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "windows")]
@@ -223,14 +297,17 @@ fn start_windows_hotkey_runtime(
     use std::time::Duration;
 
     let tracker = HotkeyEdgeTracker::new(&config)?;
+    let dictation_active = Arc::new(AtomicBool::new(false));
+    let hook_dictation_active = Arc::clone(&dictation_active);
     let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
     let thread = std::thread::Builder::new()
         .name("voicewave-hotkey-events".to_string())
-        .spawn(move || windows_hotkey_thread(tracker, sender, ready_tx))
+        .spawn(move || windows_hotkey_thread(tracker, sender, hook_dictation_active, ready_tx))
         .map_err(|err| HotkeyError::Runtime(format!("failed to spawn hook thread: {err}")))?;
 
     match ready_rx.recv_timeout(Duration::from_secs(3)) {
         Ok(Ok(thread_id)) => Ok(HotkeyRuntime {
+            dictation_active,
             thread_id,
             thread: Some(thread),
         }),
@@ -248,6 +325,7 @@ fn start_windows_hotkey_runtime(
 fn windows_hotkey_thread(
     tracker: HotkeyEdgeTracker,
     sender: UnboundedSender<HotkeySignal>,
+    dictation_active: Arc<AtomicBool>,
     ready: std::sync::mpsc::SyncSender<Result<u32, String>>,
 ) {
     use windows_sys::Win32::{
@@ -271,14 +349,8 @@ fn windows_hotkey_thread(
         let _ = ready.send(Err("GetModuleHandleW failed for hotkey hook".to_string()));
         return;
     }
-    let hook = unsafe {
-        SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(low_level_keyboard_proc),
-            module,
-            0,
-        )
-    };
+    let hook =
+        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), module, 0) };
     if hook.is_null() {
         let _ = ready.send(Err("SetWindowsHookExW(WH_KEYBOARD_LL) failed".to_string()));
         return;
@@ -300,7 +372,11 @@ fn windows_hotkey_thread(
             let _ = ready.send(Err("a hotkey hook is already running".to_string()));
             return;
         }
-        *slot = Some(HookDispatch { tracker, sender });
+        *slot = Some(HookDispatch {
+            tracker,
+            sender,
+            dictation_active,
+        });
     }
     let _ = ready.send(Ok(thread_id));
 
@@ -341,8 +417,17 @@ unsafe extern "system" fn low_level_keyboard_proc(
             if let Some(dispatch) = HOOK_DISPATCH.get() {
                 if let Ok(mut state) = dispatch.lock() {
                     if let Some(state) = state.as_mut() {
-                        for signal in state.tracker.key_event(event.vkCode as u16, pressed) {
+                        let dictation_active = state.dictation_active.load(Ordering::Acquire);
+                        let outcome = state.tracker.handle_key_event(
+                            event.vkCode as u16,
+                            pressed,
+                            dictation_active,
+                        );
+                        for signal in outcome.signals {
                             let _ = state.sender.send(signal);
+                        }
+                        if outcome.consume {
+                            return 1;
                         }
                     }
                 }
@@ -404,6 +489,7 @@ impl HotkeyManager {
         match action {
             HotkeyAction::ToggleDictation => is_parsed_pressed(&self.parsed_toggle),
             HotkeyAction::PushToTalk => is_parsed_pressed(&self.parsed_push_to_talk),
+            HotkeyAction::CancelDictation => false,
         }
     }
 }
@@ -725,6 +811,75 @@ mod tests {
         );
         assert!(tracker.key_event(b'X' as u16, true).is_empty());
         assert!(tracker.key_event(b'X' as u16, false).is_empty());
+    }
+
+    #[test]
+    fn escape_passes_through_unchanged_when_dictation_is_idle() {
+        let mut tracker = tracker();
+
+        let down = tracker.handle_key_event(VK_ESCAPE_, true, false);
+        assert!(down.signals.is_empty());
+        assert!(!down.consume);
+
+        let repeat = tracker.handle_key_event(VK_ESCAPE_, true, false);
+        assert!(repeat.signals.is_empty());
+        assert!(!repeat.consume);
+
+        let up = tracker.handle_key_event(VK_ESCAPE_, false, false);
+        assert!(up.signals.is_empty());
+        assert!(!up.consume);
+    }
+
+    #[test]
+    fn active_escape_emits_once_and_consumes_auto_repeat() {
+        let mut tracker = tracker();
+
+        assert_eq!(
+            tracker.handle_key_event(VK_ESCAPE_, true, true),
+            HotkeyEventOutcome {
+                signals: vec![HotkeySignal {
+                    action: HotkeyAction::CancelDictation,
+                    phase: HotkeyPhase::Triggered,
+                }],
+                consume: true,
+            }
+        );
+        assert_eq!(
+            tracker.handle_key_event(VK_ESCAPE_, true, true),
+            HotkeyEventOutcome {
+                signals: Vec::new(),
+                consume: true,
+            }
+        );
+    }
+
+    #[test]
+    fn escape_release_preserves_press_ownership_across_state_changes() {
+        let mut tracker = tracker();
+
+        let down = tracker.handle_key_event(VK_ESCAPE_, true, true);
+        assert!(down.consume);
+
+        // The cancellation handler may clear active state before key-up. The
+        // application must still not receive a release for a consumed press.
+        let up_after_cancel = tracker.handle_key_event(VK_ESCAPE_, false, false);
+        assert!(up_after_cancel.signals.is_empty());
+        assert!(up_after_cancel.consume);
+
+        // A subsequent idle press is not owned by VoiceWave.
+        let idle_down = tracker.handle_key_event(VK_ESCAPE_, true, false);
+        let idle_up = tracker.handle_key_event(VK_ESCAPE_, false, false);
+        assert!(!idle_down.consume);
+        assert!(!idle_up.consume);
+    }
+
+    #[test]
+    fn escape_press_that_begins_idle_stays_pass_through_if_dictation_activates() {
+        let mut tracker = tracker();
+
+        assert!(!tracker.handle_key_event(VK_ESCAPE_, true, false).consume);
+        assert!(!tracker.handle_key_event(VK_ESCAPE_, true, true).consume);
+        assert!(!tracker.handle_key_event(VK_ESCAPE_, false, true).consume);
     }
 
     #[test]

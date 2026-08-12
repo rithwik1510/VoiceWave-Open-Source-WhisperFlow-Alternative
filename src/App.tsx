@@ -838,7 +838,7 @@ function App() {
       return;
     }
     pressActiveRef.current = true;
-    void runDictation(tauriAvailable ? "microphone" : "fixture");
+    void runDictation(tauriAvailable ? "microphone" : "fixture", "holdToTalk");
   };
 
   const handlePressEnd = () => {
@@ -1454,6 +1454,7 @@ function App() {
                 finalTranscript={snapshot.lastFinal}
                 recentSentences={recentSentences}
                 pushToTalkHotkey={settings.pushToTalkHotkey}
+                controlMode={snapshot.controlMode}
                 userName={demoProfile?.name}
                 isPro={isPro}
                 historyOff={historyPolicy === "off"}

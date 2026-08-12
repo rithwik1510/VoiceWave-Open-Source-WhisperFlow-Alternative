@@ -91,6 +91,7 @@ import type {
   DecodeMode,
   DiagnosticsExportResult,
   DiagnosticsStatus,
+  DictationControlMode,
   DictationMode,
   DictionaryExport,
   DictionaryImportSummary,
@@ -553,7 +554,6 @@ export function useVoiceWave() {
   const [error, setError] = useState<string | null>(null);
   const timeoutHandles = useRef<number[]>([]);
   const pushToTalkLatchedRef = useRef(false);
-  const autoModelSelectionTriggeredRef = useRef(false);
 
   const clearWebTimers = useCallback(() => {
     timeoutHandles.current.forEach((timeoutId) => {
@@ -788,11 +788,11 @@ export function useVoiceWave() {
     }
   }, [tauriAvailable]);
 
-  const runWebFixtureDemo = useCallback(() => {
+  const runWebFixtureDemo = useCallback((controlMode: DictationControlMode) => {
     clearWebTimers();
     setError(null);
     setIsBusy(true);
-    setSnapshot((prev) => ({ ...prev, state: "listening", lastPartial: null, lastFinal: null }));
+    setSnapshot((prev) => ({ ...prev, state: "listening", lastPartial: null, lastFinal: null, controlMode }));
 
     timeoutHandles.current.push(
       window.setTimeout(() => {
@@ -813,7 +813,7 @@ export function useVoiceWave() {
 
     timeoutHandles.current.push(
       window.setTimeout(() => {
-        setSnapshot((prev) => ({ ...prev, state: "idle" }));
+        setSnapshot((prev) => ({ ...prev, state: "idle", controlMode: null }));
         setIsBusy(false);
       }, 2400)
     );
@@ -872,9 +872,12 @@ export function useVoiceWave() {
   }, [installedModels, modelCatalog, refreshPhase3Data, settings.activeModel]);
 
   const runDictation = useCallback(
-    async (mode: DictationMode = "microphone") => {
+    async (
+      mode: DictationMode = "microphone",
+      controlMode: DictationControlMode = "holdToTalk"
+    ) => {
       if (!tauriAvailable) {
-        runWebFixtureDemo();
+        runWebFixtureDemo(controlMode);
         return;
       }
 
@@ -895,7 +898,7 @@ export function useVoiceWave() {
         await ensureDictationModelReady();
         setError(null);
         setIsBusy(true);
-        await startDictation(mode);
+        await startDictation(mode, controlMode);
       } catch (runErr) {
         const message = runErr instanceof Error ? runErr.message : "Unable to start dictation";
         if (message.includes("not installed as a local model artifact")) {
@@ -2066,8 +2069,12 @@ export function useVoiceWave() {
         setError(loadErr instanceof Error ? loadErr.message : "Failed to initialize VoiceWave runtime.");
       }
 
-      stateUnlisten = await listenVoicewaveState(({ message, state }) => {
-        setSnapshot((prev) => ({ ...prev, state }));
+      stateUnlisten = await listenVoicewaveState(({ controlMode, message, state }) => {
+        setSnapshot((prev) => ({
+          ...prev,
+          state,
+          controlMode: controlMode ?? (state === "idle" ? null : prev.controlMode)
+        }));
         if (state === "error" && message) {
           setError(message);
         } else if (state !== "error") {
@@ -2329,34 +2336,6 @@ export function useVoiceWave() {
       pushToTalkLatchedRef.current = false;
     };
   }, [applyHotkeyAction, hotkeys.config.pushToTalk, hotkeys.config.toggle, tauriAvailable]);
-
-  useEffect(() => {
-    if (!tauriAvailable) {
-      return;
-    }
-    if (autoModelSelectionTriggeredRef.current) {
-      return;
-    }
-    if (benchmarkResults) {
-      autoModelSelectionTriggeredRef.current = true;
-      return;
-    }
-    if (installedModels.length < 2) {
-      return;
-    }
-    if (snapshot.state !== "idle") {
-      return;
-    }
-
-    autoModelSelectionTriggeredRef.current = true;
-    void runBenchmarkAndRecommend();
-  }, [
-    benchmarkResults,
-    installedModels.length,
-    runBenchmarkAndRecommend,
-    snapshot.state,
-    tauriAvailable
-  ]);
 
   const activeState: VoiceWaveHudState = useMemo(() => snapshot.state, [snapshot.state]);
   const isPro = useMemo(() => entitlement.isPro, [entitlement.isPro]);

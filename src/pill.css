@@ -167,6 +167,27 @@ body,
     transform 200ms ease;
 }
 
+.vw-pill-control-indicator {
+  grid-area: 1 / 1;
+  justify-self: end;
+  align-self: center;
+  margin-right: 10px;
+  display: grid;
+  place-items: center;
+  color: var(--vw-brand-cyan-soft);
+  opacity: 0;
+  transform: scale(0.82);
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 200ms ease;
+}
+
+.vw-pill-control-hands-free:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-control-indicator {
+  opacity: 0.96;
+  transform: scale(1);
+}
+
 .vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-profile {
   opacity: 0.92;
   transform: scale(1);
@@ -337,6 +358,10 @@ body,
     0 14px 30px rgba(0, 0, 0, 0.4),
     inset 0 0 0 1px rgba(228, 228, 231, 0.24),
     inset 0 -9px 18px rgba(9, 9, 11, 0.3);
+}
+
+.vw-pill-state-listening.vw-pill-control-hands-free:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-surface {
+  width: 112px;
 }
 
 .vw-pill-state-listening:not(.vw-pill-mode-review):not(.vw-pill-mode-notice) .vw-pill-wave {

@@ -51,6 +51,7 @@ import type {
   VoiceSnippetReconcileResult,
   VoiceSnippetSyncRecord,
   VoiceWaveSnapshot,
+  DictationControlMode,
   VoiceWaveStateEvent
 } from "../types/voicewave";
 
@@ -367,8 +368,11 @@ export async function getRecentInsertions(limit = 10): Promise<RecentInsertion[]
   return invokeVoicewave<RecentInsertion[]>("get_recent_insertions", { limit });
 }
 
-export async function startDictation(mode: DictationMode = "microphone"): Promise<void> {
-  await invokeVoicewave<void>("start_dictation", { mode });
+export async function startDictation(
+  mode: DictationMode = "microphone",
+  controlMode: DictationControlMode = "holdToTalk"
+): Promise<void> {
+  await invokeVoicewave<void>("start_dictation", { mode, controlMode });
 }
 
 export async function cancelDictation(): Promise<void> {

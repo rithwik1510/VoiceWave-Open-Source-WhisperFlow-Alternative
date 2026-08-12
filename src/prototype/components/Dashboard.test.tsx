@@ -64,4 +64,40 @@ describe("Dashboard", () => {
     expect(onPressStart).toHaveBeenCalledTimes(1);
     expect(onPressEnd).toHaveBeenCalledTimes(1);
   });
+
+  it("explains the shared double-tap shortcut and hands-free finish gesture", () => {
+    const { rerender } = render(
+      <Dashboard
+        theme={THEME}
+        status="idle"
+        onPressStart={vi.fn()}
+        onPressEnd={vi.fn()}
+        currentModel="fw-small.en"
+        partialTranscript={null}
+        finalTranscript={null}
+        pushToTalkHotkey="Ctrl+Windows"
+      />
+    );
+
+    expect(screen.getByText("Double-tap for hands-free")).toBeInTheDocument();
+    expect(screen.queryByText("Ctrl+Alt+X")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /hands-free/i })).not.toBeInTheDocument();
+
+    rerender(
+      <Dashboard
+        theme={THEME}
+        status="listening"
+        controlMode="handsFree"
+        onPressStart={vi.fn()}
+        onPressEnd={vi.fn()}
+        currentModel="fw-small.en"
+        partialTranscript={null}
+        finalTranscript={null}
+        pushToTalkHotkey="Ctrl+Windows"
+      />
+    );
+
+    expect(screen.getByText("Hands-free listening...")).toBeInTheDocument();
+    expect(screen.getByText("Pause when done, or press Ctrl+Windows again.")).toBeInTheDocument();
+  });
 });

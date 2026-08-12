@@ -2,8 +2,8 @@ use crate::{
     audio::{
         analyze_captured_segments,
         input_volume::{self, MicGuardPlan},
-        AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureOptions,
-        VadConfig,
+        AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureEndPolicy,
+        CaptureOptions, VadConfig,
     },
     benchmark::{
         self, BenchmarkRequest, BenchmarkRun, ModelRecommendation, RecommendationConstraints,
@@ -89,6 +89,14 @@ pub enum VoiceWaveHudState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DictationControlMode {
+    #[default]
+    HoldToTalk,
+    HandsFree,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceWaveSnapshot {
@@ -96,6 +104,7 @@ pub struct VoiceWaveSnapshot {
     pub last_partial: Option<String>,
     pub last_final: Option<String>,
     pub active_model: String,
+    pub control_mode: Option<DictationControlMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +112,7 @@ pub struct VoiceWaveSnapshot {
 struct VoiceWaveStateEvent {
     state: VoiceWaveHudState,
     message: Option<String>,
+    control_mode: Option<DictationControlMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -921,8 +931,29 @@ fn classify_insertion_target(target_app: Option<&str>) -> &'static str {
     "desktop"
 }
 
-fn push_release_allowed(trigger: DictationStartTrigger, _session_age: Duration) -> bool {
-    trigger == DictationStartTrigger::PushToTalk
+const HANDS_FREE_DOUBLE_TAP_MAX_HOLD: Duration = Duration::from_millis(420);
+const HANDS_FREE_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushPressDecision {
+    Start,
+    LockHandsFree,
+    FinishHandsFree,
+    Ignore,
+}
+
+fn push_to_talk_press_decision(
+    active_control_mode: Option<DictationControlMode>,
+    pending_push_release: bool,
+) -> PushPressDecision {
+    match active_control_mode {
+        None => PushPressDecision::Start,
+        Some(DictationControlMode::HandsFree) => PushPressDecision::FinishHandsFree,
+        Some(DictationControlMode::HoldToTalk) if pending_push_release => {
+            PushPressDecision::LockHandsFree
+        }
+        Some(DictationControlMode::HoldToTalk) => PushPressDecision::Ignore,
+    }
 }
 
 /// Decision emitted by `trigger_hotkey_action` for a PushToTalk Release event.
@@ -930,9 +961,28 @@ fn push_release_allowed(trigger: DictationStartTrigger, _session_age: Duration) 
 enum PushReleaseDecision {
     /// Stop the active dictation session.
     Stop,
+    /// Keep the current capture open briefly so a second press can lock it.
+    DeferForDoubleTap,
     /// No eligible push session — ignore the event (probably a duplicate
     /// release, or the active session was started by a different trigger).
     IgnoreNoEligibleSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandsFreeToggleDecision {
+    Start,
+    Finish,
+    IgnoreHoldToTalk,
+}
+
+fn hands_free_toggle_decision(
+    active_control_mode: Option<DictationControlMode>,
+) -> HandsFreeToggleDecision {
+    match active_control_mode {
+        None => HandsFreeToggleDecision::Start,
+        Some(DictationControlMode::HandsFree) => HandsFreeToggleDecision::Finish,
+        Some(DictationControlMode::HoldToTalk) => HandsFreeToggleDecision::IgnoreHoldToTalk,
+    }
 }
 
 /// Decide what to do with a push-to-talk Release hotkey event.
@@ -949,11 +999,21 @@ enum PushReleaseDecision {
 /// release. If the user genuinely re-pressed immediately after releasing,
 /// it emits a subsequent Pressed edge for the new session — we don't lose
 /// anything by acting on the Released event already received.
-fn push_to_talk_release_decision(session_eligible: bool) -> PushReleaseDecision {
-    if session_eligible {
-        PushReleaseDecision::Stop
+fn push_to_talk_release_decision(
+    trigger: DictationStartTrigger,
+    control_mode: DictationControlMode,
+    session_age: Duration,
+) -> PushReleaseDecision {
+    if trigger != DictationStartTrigger::PushToTalk
+        || control_mode != DictationControlMode::HoldToTalk
+    {
+        return PushReleaseDecision::IgnoreNoEligibleSession;
+    }
+
+    if session_age <= HANDS_FREE_DOUBLE_TAP_MAX_HOLD {
+        PushReleaseDecision::DeferForDoubleTap
     } else {
-        PushReleaseDecision::IgnoreNoEligibleSession
+        PushReleaseDecision::Stop
     }
 }
 
@@ -1121,16 +1181,59 @@ enum DictationLifecycleState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationStartTrigger {
     Manual,
-    ToggleHotkey,
+    HandsFreeHotkey,
     PushToTalk,
+}
+
+impl DictationStartTrigger {
+    fn default_control_mode(self) -> DictationControlMode {
+        match self {
+            Self::HandsFreeHotkey => DictationControlMode::HandsFree,
+            Self::Manual | Self::PushToTalk => DictationControlMode::HoldToTalk,
+        }
+    }
+}
+
+fn dictation_retry_instruction(control_mode: DictationControlMode) -> &'static str {
+    match control_mode {
+        DictationControlMode::HoldToTalk => {
+            "Hold push-to-talk while speaking, then release when done."
+        }
+        DictationControlMode::HandsFree => {
+            "Press the hands-free shortcut, speak, then pause or press it again to finish."
+        }
+    }
+}
+
+fn capture_end_policy(
+    control_mode: DictationControlMode,
+    trailing_silence: Duration,
+    release_tail: Duration,
+) -> CaptureEndPolicy {
+    match control_mode {
+        DictationControlMode::HoldToTalk => CaptureEndPolicy::ExplicitStop { release_tail },
+        DictationControlMode::HandsFree => CaptureEndPolicy::EndOnSilence {
+            trailing_silence,
+            release_tail,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationFinishCause {
+    ManualUi,
+    HandsFreeToggle,
+    PushToTalkRelease,
 }
 
 #[derive(Debug, Clone)]
 struct DictationSession {
     session_id: u64,
     trigger: DictationStartTrigger,
+    control_mode: DictationControlMode,
     started_at: Instant,
     state: DictationLifecycleState,
+    pending_push_release: bool,
     release_requested_at: Option<Instant>,
     release_requested_at_utc_ms: Option<u64>,
 }
@@ -1280,6 +1383,7 @@ impl VoiceWaveController {
                 last_partial: None,
                 last_final: None,
                 active_model: settings.active_model.clone(),
+                control_mode: None,
             }),
             settings: Mutex::new(settings),
             hotkey_manager: Mutex::new(hotkey_manager),
@@ -1599,8 +1703,9 @@ impl VoiceWaveController {
         self: &Arc<Self>,
         app: AppHandle,
         mode: DictationMode,
+        control_mode: DictationControlMode,
     ) -> Result<(), ControllerError> {
-        self.start_dictation_with_trigger(app, mode, DictationStartTrigger::Manual)
+        self.start_dictation_with_trigger(app, mode, DictationStartTrigger::Manual, control_mode)
             .await
     }
 
@@ -1609,10 +1714,11 @@ impl VoiceWaveController {
         app: AppHandle,
         mode: DictationMode,
         trigger: DictationStartTrigger,
+        control_mode: DictationControlMode,
     ) -> Result<(), ControllerError> {
         eprintln!(
-            "voicewave: start_dictation requested (trigger={:?}, mode={:?})",
-            trigger, mode
+            "voicewave: start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
+            trigger, control_mode, mode
         );
         let cancel_token = {
             let mut token_slot = self.cancel_token.lock().await;
@@ -1641,12 +1747,15 @@ impl VoiceWaveController {
             *active = Some(DictationSession {
                 session_id,
                 trigger,
+                control_mode,
                 started_at: Instant::now(),
                 state: DictationLifecycleState::Listening,
+                pending_push_release: false,
                 release_requested_at: None,
                 release_requested_at_utc_ms: None,
             });
         }
+        self.set_hotkey_dictation_active(true).await;
 
         let stop_flag = {
             let flag = Arc::new(AtomicBool::new(false));
@@ -1680,7 +1789,7 @@ impl VoiceWaveController {
                     app.clone(),
                     mode,
                     session_id,
-                    trigger,
+                    control_mode,
                     cancel_token,
                     stop_flag,
                 )
@@ -1700,6 +1809,7 @@ impl VoiceWaveController {
             // A cancelled session may be replaced immediately. Never let the
             // old task clear the replacement session's token or stop flag.
             if still_owns_session {
+                controller.set_hotkey_dictation_active(false).await;
                 let mut token_slot = controller.cancel_token.lock().await;
                 *token_slot = None;
                 drop(token_slot);
@@ -1739,20 +1849,38 @@ impl VoiceWaveController {
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
-        if let Some(token) = self.cancel_token.lock().await.clone() {
-            // Close cue on the physical cancel action (not the later state
-            // transition), and only when a session was actually running.
-            if !token.is_cancelled() {
-                play_cue_without_blocking(crate::cue::CueSound::Close);
+        let cancelled_session = {
+            let mut active = self.active_session.lock().await;
+            match active.as_mut() {
+                Some(session)
+                    if !matches!(
+                        session.state,
+                        DictationLifecycleState::Idle
+                            | DictationLifecycleState::Inserted
+                            | DictationLifecycleState::Error
+                    ) =>
+                {
+                    session.state = DictationLifecycleState::Idle;
+                    Some(session.session_id)
+                }
+                _ => None,
             }
+        };
+        let Some(session_id) = cancelled_session else {
+            eprintln!("voicewave: cancel_dictation ignored (no cancellable session)");
+            return;
+        };
+
+        eprintln!("voicewave: cancel_dictation accepted (session={session_id})");
+        self.set_hotkey_dictation_active(false).await;
+        if let Some(token) = self.cancel_token.lock().await.clone() {
             token.cancel();
         }
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
         }
+        play_cue_without_blocking(crate::cue::CueSound::Close);
         self.stop_mic_level_monitor().await;
-        self.set_any_active_session_state(DictationLifecycleState::Idle, None, None)
-            .await;
         self.update_state(
             &app,
             VoiceWaveHudState::Idle,
@@ -1762,46 +1890,56 @@ impl VoiceWaveController {
     }
 
     pub async fn stop_dictation(&self, app: AppHandle) {
+        self.request_finish_dictation(app, DictationFinishCause::ManualUi)
+            .await;
+    }
+
+    async fn request_finish_dictation(&self, app: AppHandle, cause: DictationFinishCause) {
+        let release_now = Instant::now();
+        let release_now_utc_ms = now_utc_ms();
+        let finished_session = {
+            let mut active = self.active_session.lock().await;
+            match active.as_mut() {
+                Some(session) if session.state == DictationLifecycleState::Listening => {
+                    session.state = DictationLifecycleState::ReleasePending;
+                    session.release_requested_at = Some(release_now);
+                    session.release_requested_at_utc_ms = Some(release_now_utc_ms);
+                    Some((session.session_id, session.trigger, session.control_mode))
+                }
+                _ => None,
+            }
+        };
+        let Some((session_id, trigger, control_mode)) = finished_session else {
+            eprintln!("voicewave: finish ignored (cause={cause:?}, no listening session)");
+            return;
+        };
+
+        eprintln!(
+            "voicewave: finish accepted (session={session_id}, trigger={trigger:?}, control_mode={control_mode:?}, cause={cause:?})"
+        );
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
         }
         self.stop_mic_level_monitor().await;
-        if let Some(session) = self.active_session.lock().await.clone() {
-            eprintln!(
-                "voicewave: stop_dictation requested (session={}, trigger={:?}, state={:?})",
-                session.session_id, session.trigger, session.state
-            );
-            // Close cue on the physical release action — immediate feedback,
-            // independent of how long transcription takes afterwards.
-            play_cue_without_blocking(crate::cue::CueSound::Close);
-        } else {
-            eprintln!("voicewave: stop_dictation requested with no active session");
-        }
-
-        let release_now = Instant::now();
-        let release_now_utc_ms = now_utc_ms();
-        self.set_any_active_session_state(
-            DictationLifecycleState::ReleasePending,
-            Some(release_now),
-            Some(release_now_utc_ms),
+        // Close cue on the accepted finish edge. The idempotent state claim
+        // above ensures rapid/repeated shortcuts cannot play it twice.
+        play_cue_without_blocking(crate::cue::CueSound::Close);
+        self.update_state(
+            &app,
+            VoiceWaveHudState::Transcribing,
+            Some("Finishing dictation...".to_string()),
         )
         .await;
-        let should_transition = {
-            let current_state = self.snapshot.lock().await.state.clone();
-            matches!(current_state, VoiceWaveHudState::Listening)
-        };
-        if should_transition {
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Transcribing,
-                Some("Finishing dictation...".to_string()),
-            )
-            .await;
-        }
     }
 
     pub async fn hotkey_snapshot(&self) -> HotkeySnapshot {
         self.hotkey_manager.lock().await.snapshot()
+    }
+
+    async fn set_hotkey_dictation_active(&self, active: bool) {
+        if let Some(runtime) = self.hotkey_runtime.lock().await.as_ref() {
+            runtime.set_dictation_active(active);
+        }
     }
 
     pub async fn ensure_hotkey_runtime_monitor(self: Arc<Self>, app: AppHandle) {
@@ -2052,8 +2190,11 @@ impl VoiceWaveController {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(max_capture_ms),
-            silence_timeout: Duration::from_millis(silence_timeout_ms),
-            release_tail: Duration::from_millis(0),
+            initial_speech_timeout: Duration::from_millis(silence_timeout_ms),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence: Duration::from_millis(silence_timeout_ms),
+                release_tail: Duration::ZERO,
+            },
             preserve_full_capture: false,
             // The audio-quality diagnostic doesn't use VAD warmup; inherit the
             // disabled defaults so this stays in sync with CaptureOptions fields.
@@ -2199,29 +2340,59 @@ impl VoiceWaveController {
 
         match (&action, &phase) {
             (HotkeyAction::ToggleDictation, HotkeyPhase::Triggered) => {
-                if self.is_dictation_active().await {
-                    play_hotkey_phase_cue(&HotkeyAction::ToggleDictation, &HotkeyPhase::Triggered);
-                    self.stop_dictation(app).await;
-                    Ok(())
-                } else {
-                    self.start_dictation_with_trigger(
-                        app,
-                        DictationMode::Microphone,
-                        DictationStartTrigger::ToggleHotkey,
-                    )
-                    .await
+                match hands_free_toggle_decision(self.active_control_mode().await) {
+                    HandsFreeToggleDecision::Finish => {
+                        self.request_finish_dictation(app, DictationFinishCause::HandsFreeToggle)
+                            .await;
+                        Ok(())
+                    }
+                    HandsFreeToggleDecision::IgnoreHoldToTalk => {
+                        eprintln!(
+                            "voicewave: ignored hands-free shortcut while hold-to-talk is active"
+                        );
+                        Ok(())
+                    }
+                    HandsFreeToggleDecision::Start => {
+                        let trigger = DictationStartTrigger::HandsFreeHotkey;
+                        self.start_dictation_with_trigger(
+                            app,
+                            DictationMode::Microphone,
+                            trigger,
+                            trigger.default_control_mode(),
+                        )
+                        .await
+                    }
                 }
             }
             (HotkeyAction::PushToTalk, HotkeyPhase::Pressed) => {
-                if self.is_dictation_active().await {
-                    Ok(())
-                } else {
-                    self.start_dictation_with_trigger(
-                        app,
-                        DictationMode::Microphone,
-                        DictationStartTrigger::PushToTalk,
-                    )
-                    .await
+                match self.claim_push_to_talk_press().await {
+                    PushPressDecision::Start => {
+                        self.start_dictation_with_trigger(
+                            app,
+                            DictationMode::Microphone,
+                            DictationStartTrigger::PushToTalk,
+                            DictationControlMode::HoldToTalk,
+                        )
+                        .await
+                    }
+                    PushPressDecision::LockHandsFree => {
+                        self.update_state(
+                            &app,
+                            VoiceWaveHudState::Listening,
+                            Some(
+                                "Hands-free listening. Pause when you're done, or press the shortcut again."
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    PushPressDecision::FinishHandsFree => {
+                        self.request_finish_dictation(app, DictationFinishCause::HandsFreeToggle)
+                            .await;
+                        Ok(())
+                    }
+                    PushPressDecision::Ignore => Ok(()),
                 }
             }
             (HotkeyAction::PushToTalk, HotkeyPhase::Released) => {
@@ -2230,10 +2401,20 @@ impl VoiceWaveController {
                 // caught a transient re-press, leaving capture running until
                 // the 12 s max timeout. See push_to_talk_release_decision for
                 // full rationale.
-                let session_eligible = self.active_push_session_ready_for_release().await;
-                match push_to_talk_release_decision(session_eligible) {
+                let (decision, session_id) = self.claim_push_to_talk_release().await;
+                match decision {
                     PushReleaseDecision::Stop => {
-                        self.stop_dictation(app).await;
+                        self.request_finish_dictation(app, DictationFinishCause::PushToTalkRelease)
+                            .await;
+                    }
+                    PushReleaseDecision::DeferForDoubleTap => {
+                        let controller = Arc::clone(self);
+                        tauri::async_runtime::spawn(async move {
+                            sleep(HANDS_FREE_DOUBLE_TAP_WINDOW).await;
+                            controller
+                                .finish_deferred_push_release(app, session_id)
+                                .await;
+                        });
                     }
                     PushReleaseDecision::IgnoreNoEligibleSession => {
                         eprintln!(
@@ -2241,6 +2422,10 @@ impl VoiceWaveController {
                         );
                     }
                 }
+                Ok(())
+            }
+            (HotkeyAction::CancelDictation, HotkeyPhase::Triggered) => {
+                self.cancel_dictation(app).await;
                 Ok(())
             }
             _ => {
@@ -2789,8 +2974,16 @@ impl VoiceWaveController {
         *self.settings.lock().await = settings.clone();
         self.snapshot.lock().await.active_model = model_id.clone();
 
-        let state = self.snapshot.lock().await.state.clone();
-        self.emit_state(&app, state, Some("Active model updated.".to_string()));
+        let (state, control_mode) = {
+            let snapshot = self.snapshot.lock().await;
+            (snapshot.state.clone(), snapshot.control_mode)
+        };
+        self.emit_state(
+            &app,
+            state,
+            Some("Active model updated.".to_string()),
+            control_mode,
+        );
 
         if is_faster_whisper_model(&model_id) {
             tauri::async_runtime::spawn(async {
@@ -3264,7 +3457,7 @@ impl VoiceWaveController {
         app: AppHandle,
         mode: DictationMode,
         session_id: u64,
-        _trigger: DictationStartTrigger,
+        control_mode: DictationControlMode,
         cancel_token: CancellationToken,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<(), ControllerError> {
@@ -3453,8 +3646,12 @@ impl VoiceWaveController {
                         ..VadConfig::default()
                     },
                     max_capture_duration: Duration::from_millis(max_capture_ms),
-                    silence_timeout: Duration::from_millis(silence_timeout_ms),
-                    release_tail: Duration::from_millis(release_tail_ms),
+                    initial_speech_timeout: Duration::from_millis(silence_timeout_ms),
+                    end_policy: capture_end_policy(
+                        control_mode,
+                        Duration::from_millis(silence_timeout_ms),
+                        Duration::from_millis(release_tail_ms),
+                    ),
                     preserve_full_capture: use_faster_whisper,
                     // Adaptive VAD warmup: for the first 2 seconds, use a
                     // lower threshold (60% of normal) so quiet speakers and
@@ -3573,8 +3770,10 @@ impl VoiceWaveController {
                             &app,
                             VoiceWaveHudState::Idle,
                             Some(format!(
-                                "No speech on '{}'{}. Hold push-to-talk and speak. Try lowering VAD threshold in Settings if this persists.",
-                                device_label, warmup_peak_msg
+                                "No speech on '{}'{}. {} Try lowering VAD threshold in Settings if this persists.",
+                                device_label,
+                                warmup_peak_msg,
+                                dictation_retry_instruction(control_mode)
                             )),
                         )
                         .await;
@@ -3582,7 +3781,7 @@ impl VoiceWaveController {
                             &app,
                             "info",
                             "Didn't catch that",
-                            Some("Speak while holding the hotkey — release when done.".to_string()),
+                            Some(dictation_retry_instruction(control_mode).to_string()),
                             3_800,
                         );
                         return Ok(());
@@ -3623,17 +3822,17 @@ impl VoiceWaveController {
             self.update_state(
                 &app,
                 VoiceWaveHudState::Idle,
-                Some(
-                    "No speech captured yet. Hold push-to-talk while speaking, then release."
-                        .to_string(),
-                ),
+                Some(format!(
+                    "No speech captured yet. {}",
+                    dictation_retry_instruction(control_mode)
+                )),
             )
             .await;
             emit_pill_notice(
                 &app,
                 "info",
                 "Didn't catch that",
-                Some("Speak while holding the hotkey — release when done.".to_string()),
+                Some(dictation_retry_instruction(control_mode).to_string()),
                 3_800,
             );
             return Ok(());
@@ -3879,10 +4078,10 @@ impl VoiceWaveController {
                 self.update_state(
                     &app,
                     VoiceWaveHudState::Idle,
-                    Some(
-                        "Capture was too short to transcribe reliably. Hold push-to-talk slightly longer and speak, then release."
-                            .to_string(),
-                    ),
+                    Some(format!(
+                        "Capture was too short to transcribe reliably. {}",
+                        dictation_retry_instruction(control_mode)
+                    )),
                 )
                 .await;
                 return Ok(());
@@ -4154,10 +4353,10 @@ impl VoiceWaveController {
             self.update_state(
                 &app,
                 VoiceWaveHudState::Idle,
-                Some(
-                    "No speech detected. Hold push-to-talk while speaking, then release."
-                        .to_string(),
-                ),
+                Some(format!(
+                    "No speech detected. {}",
+                    dictation_retry_instruction(control_mode)
+                )),
             )
             .await;
             return Ok(());
@@ -4844,11 +5043,88 @@ impl VoiceWaveController {
         )
     }
 
-    async fn active_push_session_ready_for_release(&self) -> bool {
-        let active = self.active_session.lock().await;
-        active.as_ref().is_some_and(|session| {
-            push_release_allowed(session.trigger, session.started_at.elapsed())
-        })
+    async fn active_control_mode(&self) -> Option<DictationControlMode> {
+        self.active_session
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|session| {
+                (!matches!(
+                    session.state,
+                    DictationLifecycleState::Idle
+                        | DictationLifecycleState::Inserted
+                        | DictationLifecycleState::Error
+                ))
+                .then_some(session.control_mode)
+            })
+    }
+
+    async fn claim_push_to_talk_press(&self) -> PushPressDecision {
+        let mut active = self.active_session.lock().await;
+        let Some(session) = active.as_mut() else {
+            return PushPressDecision::Start;
+        };
+
+        if session.state != DictationLifecycleState::Listening {
+            return PushPressDecision::Ignore;
+        }
+
+        let decision = push_to_talk_press_decision(
+            Some(session.control_mode),
+            session.pending_push_release,
+        );
+        if decision == PushPressDecision::LockHandsFree {
+            session.pending_push_release = false;
+            session.control_mode = DictationControlMode::HandsFree;
+        }
+        decision
+    }
+
+    async fn claim_push_to_talk_release(&self) -> (PushReleaseDecision, u64) {
+        let mut active = self.active_session.lock().await;
+        let Some(session) = active.as_mut() else {
+            return (PushReleaseDecision::IgnoreNoEligibleSession, 0);
+        };
+
+        if session.state != DictationLifecycleState::Listening || session.pending_push_release {
+            return (
+                PushReleaseDecision::IgnoreNoEligibleSession,
+                session.session_id,
+            );
+        }
+
+        let decision = push_to_talk_release_decision(
+            session.trigger,
+            session.control_mode,
+            session.started_at.elapsed(),
+        );
+        if decision == PushReleaseDecision::DeferForDoubleTap {
+            session.pending_push_release = true;
+        }
+        (decision, session.session_id)
+    }
+
+    async fn finish_deferred_push_release(self: Arc<Self>, app: AppHandle, session_id: u64) {
+        let should_finish = {
+            let mut active = self.active_session.lock().await;
+            active.as_mut().is_some_and(|session| {
+                if session.session_id == session_id
+                    && session.state == DictationLifecycleState::Listening
+                    && session.control_mode == DictationControlMode::HoldToTalk
+                    && session.pending_push_release
+                {
+                    session.pending_push_release = false;
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+
+        if should_finish {
+            self.request_finish_dictation(app, DictationFinishCause::PushToTalkRelease)
+                .await;
+        }
     }
 
     async fn set_session_state(
@@ -4863,24 +5139,6 @@ impl VoiceWaveController {
             if session.session_id != session_id {
                 return;
             }
-            session.state = state;
-            if let Some(released_at) = release_requested_at {
-                session.release_requested_at = Some(released_at);
-            }
-            if let Some(released_at_utc_ms) = release_requested_at_utc_ms {
-                session.release_requested_at_utc_ms = Some(released_at_utc_ms);
-            }
-        }
-    }
-
-    async fn set_any_active_session_state(
-        &self,
-        state: DictationLifecycleState,
-        release_requested_at: Option<Instant>,
-        release_requested_at_utc_ms: Option<u64>,
-    ) {
-        let mut active = self.active_session.lock().await;
-        if let Some(session) = active.as_mut() {
             session.state = state;
             if let Some(released_at) = release_requested_at {
                 session.release_requested_at = Some(released_at);
@@ -4925,29 +5183,53 @@ impl VoiceWaveController {
         state: VoiceWaveHudState,
         message: Option<String>,
     ) {
-        let previous_state = {
+        let active_control_mode = self.active_control_mode().await;
+        let (previous_state, control_mode) = {
             let mut snapshot = self.snapshot.lock().await;
             let prev = snapshot.state.clone();
             snapshot.state = state.clone();
-            if matches!(
+            let control_mode = if matches!(
                 state,
                 VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
             ) {
                 snapshot.last_partial = None;
-            }
-            prev
+                None
+            } else {
+                active_control_mode
+            };
+            snapshot.control_mode = control_mode;
+            (prev, control_mode)
         };
 
         let _ = previous_state;
+        if matches!(
+            state,
+            VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
+        ) {
+            self.set_hotkey_dictation_active(false).await;
+        }
         // Hotkey cues intentionally do NOT play here: state transitions lag
         // the physical key action (mic-stream setup before Listening,
         // decode+insert before Inserted). Cues fire at the dictation entry
         // points instead — see start_dictation_with_trigger / stop_dictation.
-        self.emit_state(app, state, message);
+        self.emit_state(app, state, message, control_mode);
     }
 
-    fn emit_state(&self, app: &AppHandle, state: VoiceWaveHudState, message: Option<String>) {
-        let _ = app.emit("voicewave://state", VoiceWaveStateEvent { state, message });
+    fn emit_state(
+        &self,
+        app: &AppHandle,
+        state: VoiceWaveHudState,
+        message: Option<String>,
+        control_mode: Option<DictationControlMode>,
+    ) {
+        let _ = app.emit(
+            "voicewave://state",
+            VoiceWaveStateEvent {
+                state,
+                message,
+                control_mode,
+            },
+        );
     }
 
     fn emit_model_status(&self, app: &AppHandle, status: &ModelStatus) {
@@ -5230,17 +5512,18 @@ fn percentile_index(len: usize, percentile: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        asr_integrity_metrics, build_terminology_hint_from_texts, clamp_vad_threshold,
-        classify_insertion_target, decode_mode_key, decode_mode_rank, derive_correction_candidates,
-        effective_release_watchdog_threshold_ms, faster_whisper_download_percent, floor_decode_mode,
-        insertion_method_key,
-        is_likely_low_quality_input_name, now_utc_ms, release_watchdog_recovered,
-        push_release_allowed, push_to_talk_release_decision,
-        should_reject_low_confidence_transcript_as_no_speech, DictationStartTrigger, PillAction,
-        PillNoticePayload, PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
+        asr_integrity_metrics, build_terminology_hint_from_texts, capture_end_policy,
+        clamp_vad_threshold, classify_insertion_target, decode_mode_key, decode_mode_rank,
+        derive_correction_candidates, effective_release_watchdog_threshold_ms,
+        faster_whisper_download_percent, floor_decode_mode, hands_free_toggle_decision,
+        insertion_method_key, is_likely_low_quality_input_name, now_utc_ms,
+        push_to_talk_press_decision, push_to_talk_release_decision, release_watchdog_recovered,
+        should_reject_low_confidence_transcript_as_no_speech, DictationControlMode,
+        DictationStartTrigger, HandsFreeToggleDecision, PillAction, PillNoticePayload,
+        PushPressDecision, PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
         RECOMMENDED_VAD_THRESHOLD,
     };
-    use crate::audio::AudioQualityBand;
+    use crate::audio::{AudioQualityBand, CaptureEndPolicy};
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
@@ -5311,23 +5594,121 @@ mod tests {
     }
 
     #[test]
-    fn push_release_requires_push_trigger() {
-        assert!(!push_release_allowed(
-            DictationStartTrigger::Manual,
-            Duration::from_millis(1)
-        ));
-        assert!(!push_release_allowed(
-            DictationStartTrigger::ToggleHotkey,
-            Duration::from_millis(1)
-        ));
+    fn push_press_decision_covers_start_lock_finish_and_ignore() {
+        assert_eq!(
+            push_to_talk_press_decision(None, false),
+            PushPressDecision::Start
+        );
+        assert_eq!(
+            push_to_talk_press_decision(Some(DictationControlMode::HoldToTalk), true),
+            PushPressDecision::LockHandsFree
+        );
+        assert_eq!(
+            push_to_talk_press_decision(Some(DictationControlMode::HandsFree), false),
+            PushPressDecision::FinishHandsFree
+        );
+        assert_eq!(
+            push_to_talk_press_decision(Some(DictationControlMode::HoldToTalk), false),
+            PushPressDecision::Ignore
+        );
     }
 
     #[test]
-    fn push_release_allows_immediate_push_to_talk_release() {
-        assert!(push_release_allowed(
-            DictationStartTrigger::PushToTalk,
-            Duration::from_millis(0)
-        ));
+    fn push_release_requires_hold_to_talk_push_session() {
+        assert_eq!(
+            push_to_talk_release_decision(
+                DictationStartTrigger::Manual,
+                DictationControlMode::HoldToTalk,
+                Duration::from_millis(1)
+            ),
+            PushReleaseDecision::IgnoreNoEligibleSession
+        );
+        assert_eq!(
+            push_to_talk_release_decision(
+                DictationStartTrigger::PushToTalk,
+                DictationControlMode::HandsFree,
+                Duration::from_millis(1)
+            ),
+            PushReleaseDecision::IgnoreNoEligibleSession
+        );
+    }
+
+    #[test]
+    fn quick_push_release_waits_for_a_possible_double_tap() {
+        assert_eq!(
+            push_to_talk_release_decision(
+                DictationStartTrigger::PushToTalk,
+                DictationControlMode::HoldToTalk,
+                Duration::from_millis(100),
+            ),
+            PushReleaseDecision::DeferForDoubleTap
+        );
+    }
+
+    #[test]
+    fn normal_push_release_stops_immediately() {
+        assert_eq!(
+            push_to_talk_release_decision(
+                DictationStartTrigger::PushToTalk,
+                DictationControlMode::HoldToTalk,
+                Duration::from_millis(800),
+            ),
+            PushReleaseDecision::Stop
+        );
+    }
+
+    #[test]
+    fn hands_free_toggle_only_finishes_a_hands_free_session() {
+        assert_eq!(
+            hands_free_toggle_decision(None),
+            HandsFreeToggleDecision::Start
+        );
+        assert_eq!(
+            hands_free_toggle_decision(Some(DictationControlMode::HandsFree)),
+            HandsFreeToggleDecision::Finish
+        );
+        assert_eq!(
+            hands_free_toggle_decision(Some(DictationControlMode::HoldToTalk)),
+            HandsFreeToggleDecision::IgnoreHoldToTalk
+        );
+    }
+
+    #[test]
+    fn dictation_control_mode_uses_camel_case_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&DictationControlMode::HandsFree).unwrap(),
+            "\"handsFree\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DictationControlMode::HoldToTalk).unwrap(),
+            "\"holdToTalk\""
+        );
+    }
+
+    #[test]
+    fn hands_free_capture_auto_finishes_without_dropping_manual_release_tail() {
+        let trailing_silence = Duration::from_millis(1_500);
+        let release_tail = Duration::from_millis(300);
+
+        assert_eq!(
+            capture_end_policy(
+                DictationControlMode::HoldToTalk,
+                trailing_silence,
+                release_tail,
+            ),
+            CaptureEndPolicy::ExplicitStop { release_tail }
+        );
+        assert_eq!(
+            capture_end_policy(
+                DictationControlMode::HandsFree,
+                trailing_silence,
+                release_tail,
+            ),
+            CaptureEndPolicy::EndOnSilence {
+                trailing_silence,
+                release_tail,
+            }
+        );
     }
 
     #[test]
@@ -5337,7 +5718,11 @@ mod tests {
         // reach push_to_talk_release_decision the release is already
         // confirmed — we should trust it and stop the dictation.
         assert_eq!(
-            push_to_talk_release_decision(true),
+            push_to_talk_release_decision(
+                DictationStartTrigger::PushToTalk,
+                DictationControlMode::HoldToTalk,
+                Duration::from_millis(800),
+            ),
             PushReleaseDecision::Stop
         );
     }
@@ -5349,7 +5734,11 @@ mod tests {
         // release must not tear down whatever is running. This also guards
         // against duplicate Released events.
         assert_eq!(
-            push_to_talk_release_decision(false),
+            push_to_talk_release_decision(
+                DictationStartTrigger::Manual,
+                DictationControlMode::HoldToTalk,
+                Duration::from_millis(800),
+            ),
             PushReleaseDecision::IgnoreNoEligibleSession
         );
     }
@@ -5361,9 +5750,10 @@ mod tests {
         // already debounced the release and silently dropped the event if
         // the key happened to read as pressed (bounce / fast re-press),
         // leaving capture running until the 12 s max timeout. The decision
-        // function now takes only `session_eligible` — key state cannot
-        // sneak back into its signature without breaking this test.
-        let _: fn(bool) -> PushReleaseDecision = push_to_talk_release_decision;
+        // The decision is derived only from session metadata — live key state
+        // cannot sneak back into its signature without breaking this test.
+        let _: fn(DictationStartTrigger, DictationControlMode, Duration) -> PushReleaseDecision =
+            push_to_talk_release_decision;
     }
 
     #[test]

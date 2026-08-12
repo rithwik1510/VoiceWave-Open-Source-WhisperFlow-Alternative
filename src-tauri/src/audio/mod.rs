@@ -77,12 +77,28 @@ pub struct AudioQualityReport {
     pub recommendations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureEndPolicy {
+    /// Keep capturing after speech until the caller explicitly requests a stop,
+    /// then retain a short tail so soft word endings are not clipped.
+    ExplicitStop { release_tail: Duration },
+    /// Finish automatically once confirmed speech is followed by this much
+    /// silence. An explicit stop still retains the configured release tail so
+    /// a manual finish cannot clip soft word endings.
+    EndOnSilence {
+        trailing_silence: Duration,
+        release_tail: Duration,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureOptions {
     pub vad_config: VadConfig,
     pub max_capture_duration: Duration,
-    pub silence_timeout: Duration,
-    pub release_tail: Duration,
+    /// Maximum time to wait for confirmed speech before returning an empty
+    /// capture. This is independent of how a capture ends after speech.
+    pub initial_speech_timeout: Duration,
+    pub end_policy: CaptureEndPolicy,
     pub preserve_full_capture: bool,
     /// During the first `vad_warmup_duration` of capture, use this lower
     /// threshold instead of `vad_config.threshold`. Prevents the system
@@ -97,8 +113,11 @@ impl Default for CaptureOptions {
         Self {
             vad_config: VadConfig::default(),
             max_capture_duration: Duration::from_secs(12),
-            silence_timeout: Duration::from_millis(750),
-            release_tail: Duration::from_millis(0),
+            initial_speech_timeout: Duration::from_millis(750),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence: Duration::from_millis(750),
+                release_tail: Duration::ZERO,
+            },
             preserve_full_capture: false,
             vad_warmup_threshold: None,
             vad_warmup_duration: Duration::from_millis(0),
@@ -354,6 +373,10 @@ impl AudioCaptureService {
         let mut post_release_last_voiced_at: Option<Instant> = None;
         let mut voiced_frame_count = 0usize;
         let mut speech_detected = false;
+        let release_tail = match options.end_policy {
+            CaptureEndPolicy::ExplicitStop { release_tail }
+            | CaptureEndPolicy::EndOnSilence { release_tail, .. } => release_tail,
+        };
 
         while started.elapsed() <= options.max_capture_duration {
             if should_cancel() {
@@ -368,26 +391,25 @@ impl AudioCaptureService {
                 released_after_silence = last_voice_at.is_none_or(|at| {
                     at.elapsed() >= Duration::from_millis(PRE_RELEASE_SILENCE_PAD_MS)
                 });
-                if options.release_tail.is_zero() {
+                if release_tail.is_zero() {
                     break;
                 }
             }
             if let Some(released_at) = stop_requested_at {
                 let elapsed = released_at.elapsed();
-                if elapsed >= options.release_tail {
+                if elapsed >= release_tail {
                     break;
                 }
                 // Fast path only while NOTHING voiced has arrived after the
                 // release; any post-release speech falls back to the full
                 // minimum wait so resumed words keep their tail pad.
-                let fast_exit_ok =
-                    released_after_silence && post_release_last_voiced_at.is_none();
+                let fast_exit_ok = released_after_silence && post_release_last_voiced_at.is_none();
                 let min_wait_ms = if fast_exit_ok {
                     RELEASE_TAIL_FAST_EXIT_MS
                 } else {
                     RELEASE_TAIL_MIN_WAIT_MS
                 }
-                .min(options.release_tail.as_millis() as u64);
+                .min(release_tail.as_millis() as u64);
                 let min_wait = Duration::from_millis(min_wait_ms);
                 if elapsed >= min_wait {
                     let recent_post_release_voice = post_release_last_voiced_at.is_some_and(|at| {
@@ -442,17 +464,18 @@ impl AudioCaptureService {
                         continue;
                     }
                     if !speech_detected {
-                        if started.elapsed() >= options.silence_timeout {
+                        if started.elapsed() >= options.initial_speech_timeout {
                             break;
                         }
                         continue;
                     }
 
-                    // For push-to-talk flows (release_tail > 0), never auto-finish
-                    // once speech is heard; wait for explicit stop/release.
-                    if options.release_tail.is_zero() {
+                    if let CaptureEndPolicy::EndOnSilence {
+                        trailing_silence, ..
+                    } = options.end_policy
+                    {
                         if let Some(last_voice_at) = last_voice_at {
-                            if last_voice_at.elapsed() >= options.silence_timeout {
+                            if last_voice_at.elapsed() >= trailing_silence {
                                 break;
                             }
                         }
@@ -856,7 +879,9 @@ pub fn adaptive_preserve_threshold(samples: &[f32], vad_threshold: f32) -> f32 {
     let global = rms(samples);
     let adaptive = global * 0.15;
     let vad_derived = vad_threshold * 0.55;
-    adaptive.min(vad_derived).clamp(MIN_THRESHOLD, MAX_THRESHOLD)
+    adaptive
+        .min(vad_derived)
+        .clamp(MIN_THRESHOLD, MAX_THRESHOLD)
 }
 
 fn trim_capture_edges(samples: &[f32], frame_size: usize, threshold: f32) -> Vec<f32> {
@@ -1236,8 +1261,7 @@ mod tests {
         let last_voiced_frame = 4; // frames 2..=4 are voiced (0-indexed)
         let min_tail_frames = 15;
         let min_expected_len = (last_voiced_frame + 1 + min_tail_frames) * frame_size;
-        let actual_tail_frames = (trimmed.len() / frame_size)
-            .saturating_sub(last_voiced_frame + 1);
+        let actual_tail_frames = (trimmed.len() / frame_size).saturating_sub(last_voiced_frame + 1);
         assert!(
             trimmed.len() >= min_expected_len,
             "capture-layer tail pad too aggressive: kept only {actual_tail_frames} frames \
@@ -1288,10 +1312,10 @@ mod tests {
 
         let resampled = resample_linear(&high_freq, 48_000, 16_000);
 
-        let input_rms = (high_freq.iter().map(|s| s * s).sum::<f32>() / high_freq.len() as f32)
-            .sqrt();
-        let output_rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32)
-            .sqrt();
+        let input_rms =
+            (high_freq.iter().map(|s| s * s).sum::<f32>() / high_freq.len() as f32).sqrt();
+        let output_rms =
+            (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
 
         assert!(
             output_rms < input_rms * 0.35,
@@ -1311,11 +1335,10 @@ mod tests {
 
         let resampled = resample_linear(&speech_tone, 48_000, 16_000);
 
-        let input_rms = (speech_tone.iter().map(|s| s * s).sum::<f32>()
-            / speech_tone.len() as f32)
-            .sqrt();
-        let output_rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32)
-            .sqrt();
+        let input_rms =
+            (speech_tone.iter().map(|s| s * s).sum::<f32>() / speech_tone.len() as f32).sqrt();
+        let output_rms =
+            (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
 
         assert!(
             output_rms > input_rms * 0.75,
@@ -1368,8 +1391,15 @@ mod tests {
     fn capture_options_default_is_phase_one_sane() {
         let options = CaptureOptions::default();
         assert!(options.max_capture_duration >= Duration::from_secs(10));
-        assert!(options.silence_timeout >= Duration::from_millis(500));
-        assert!(options.release_tail <= Duration::from_millis(100));
+        assert!(options.initial_speech_timeout >= Duration::from_millis(500));
+        assert!(matches!(
+            options.end_policy,
+            CaptureEndPolicy::EndOnSilence {
+                trailing_silence,
+                ..
+            }
+                if trailing_silence >= Duration::from_millis(500)
+        ));
     }
 
     #[test]
@@ -1383,8 +1413,10 @@ mod tests {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(140),
-            silence_timeout: Duration::from_millis(25),
-            release_tail: Duration::from_millis(120),
+            initial_speech_timeout: Duration::from_millis(25),
+            end_policy: CaptureEndPolicy::ExplicitStop {
+                release_tail: Duration::from_millis(120),
+            },
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1415,6 +1447,106 @@ mod tests {
     }
 
     #[test]
+    fn end_on_silence_finishes_after_confirmed_speech_and_trailing_silence() {
+        let service = AudioCaptureService::default();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let trailing_silence = Duration::from_millis(40);
+        let options = CaptureOptions {
+            vad_config: VadConfig {
+                threshold: 0.01,
+                ..VadConfig::default()
+            },
+            max_capture_duration: Duration::from_millis(1_000),
+            initial_speech_timeout: Duration::from_millis(150),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence,
+                release_tail: Duration::ZERO,
+            },
+            preserve_full_capture: false,
+            ..CaptureOptions::default()
+        };
+
+        audio_tx
+            .send(vec![0.08_f32; FRAME_SIZE * 3])
+            .expect("test frame should be queued");
+
+        let started = Instant::now();
+        let segments = service
+            .collect_segments_from_stream(
+                service.target_sample_rate,
+                1,
+                audio_rx,
+                error_rx,
+                options,
+                || false,
+                || false,
+                |_normalized_chunk, _voiced_chunk| {},
+            )
+            .expect("capture should complete");
+        let elapsed = started.elapsed();
+
+        assert!(elapsed >= trailing_silence);
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "end-on-silence capture should finish before its max duration (got {elapsed:?})"
+        );
+        assert!(!segments.is_empty());
+    }
+
+    #[test]
+    fn end_on_silence_manual_stop_still_keeps_release_tail() {
+        let service = AudioCaptureService::default();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (_error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let release_tail = Duration::from_millis(180);
+        let options = CaptureOptions {
+            vad_config: VadConfig {
+                threshold: 0.01,
+                ..VadConfig::default()
+            },
+            max_capture_duration: Duration::from_millis(1_000),
+            initial_speech_timeout: Duration::from_millis(300),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence: Duration::from_millis(700),
+                release_tail,
+            },
+            preserve_full_capture: false,
+            ..CaptureOptions::default()
+        };
+
+        audio_tx
+            .send(vec![0.08_f32; FRAME_SIZE * 3])
+            .expect("test frame should be queued");
+
+        let started = Instant::now();
+        let stop_clock = started;
+        let segments = service
+            .collect_segments_from_stream(
+                service.target_sample_rate,
+                1,
+                audio_rx,
+                error_rx,
+                options,
+                || false,
+                move || stop_clock.elapsed() >= Duration::from_millis(60),
+                |_normalized_chunk, _voiced_chunk| {},
+            )
+            .expect("capture should complete");
+        let elapsed = started.elapsed();
+
+        assert!(!segments.is_empty());
+        assert!(
+            elapsed >= Duration::from_millis(220),
+            "manual hands-free finish clipped the release tail (got {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_millis(650),
+            "manual hands-free finish waited for auto-silence instead (got {elapsed:?})"
+        );
+    }
+
+    #[test]
     fn release_tail_exits_fast_when_user_released_after_silence() {
         let service = AudioCaptureService::default();
         let (audio_tx, audio_rx) = std::sync::mpsc::channel::<Vec<f32>>();
@@ -1425,8 +1557,10 @@ mod tests {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(2_000),
-            silence_timeout: Duration::from_millis(1_500),
-            release_tail: Duration::from_millis(600),
+            initial_speech_timeout: Duration::from_millis(1_500),
+            end_policy: CaptureEndPolicy::ExplicitStop {
+                release_tail: Duration::from_millis(600),
+            },
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1477,8 +1611,10 @@ mod tests {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(2_000),
-            silence_timeout: Duration::from_millis(1_500),
-            release_tail: Duration::from_millis(600),
+            initial_speech_timeout: Duration::from_millis(1_500),
+            end_policy: CaptureEndPolicy::ExplicitStop {
+                release_tail: Duration::from_millis(600),
+            },
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1533,8 +1669,11 @@ mod tests {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(200),
-            silence_timeout: Duration::from_millis(40),
-            release_tail: Duration::from_millis(0),
+            initial_speech_timeout: Duration::from_millis(40),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence: Duration::from_millis(40),
+                release_tail: Duration::ZERO,
+            },
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };
@@ -1571,8 +1710,11 @@ mod tests {
                 ..VadConfig::default()
             },
             max_capture_duration: Duration::from_millis(200),
-            silence_timeout: Duration::from_millis(40),
-            release_tail: Duration::from_millis(0),
+            initial_speech_timeout: Duration::from_millis(40),
+            end_policy: CaptureEndPolicy::EndOnSilence {
+                trailing_silence: Duration::from_millis(40),
+                release_tail: Duration::ZERO,
+            },
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };

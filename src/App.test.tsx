@@ -180,6 +180,19 @@ afterEach(() => {
 });
 
 describe("App navigation and phase three panels", () => {
+  it("advertises hands-free on the existing push-to-talk shortcut", () => {
+    const runDictation = vi.fn();
+    vi.spyOn(hookModule, "useVoiceWave").mockReturnValue(
+      buildHookMock({ runDictation }) as unknown as ReturnType<typeof hookModule.useVoiceWave>
+    );
+
+    render(<App />);
+
+    expect(screen.getByText("Double-tap for hands-free")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start hands-free/i })).not.toBeInTheDocument();
+    expect(runDictation).not.toHaveBeenCalled();
+  });
+
   it("shows Pro Tools navigation by default during the release offer", async () => {
     render(<App />);
     expect(screen.getByRole("button", { name: "Pro Tools" })).toBeInTheDocument();

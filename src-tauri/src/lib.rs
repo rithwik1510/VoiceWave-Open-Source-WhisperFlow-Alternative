@@ -1,3 +1,4 @@
+mod atomic_file;
 pub mod audio;
 pub mod benchmark;
 pub mod billing;
@@ -11,12 +12,11 @@ pub mod insertion;
 pub mod model_manager;
 pub mod permissions;
 pub mod phase1;
+mod secure_store;
 pub mod settings;
 pub mod snippet;
 pub mod stats;
 pub mod transcript;
-mod atomic_file;
-mod secure_store;
 
 #[cfg(feature = "desktop")]
 pub mod state;
@@ -54,11 +54,9 @@ use settings::{
     AppProfileOverrides, CodeModeSettings, DomainPackId, FormatProfile, VoiceWaveSettings,
 };
 #[cfg(feature = "desktop")]
-use snippet::{
-    SnippetError, VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord,
-};
+use snippet::{SnippetError, VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord};
 #[cfg(feature = "desktop")]
-use state::{DictationMode, VoiceWaveController, VoiceWaveSnapshot};
+use state::{DictationControlMode, DictationMode, VoiceWaveController, VoiceWaveSnapshot};
 #[cfg(feature = "desktop")]
 use stats::StatsSummary;
 #[cfg(feature = "desktop")]
@@ -713,10 +711,15 @@ async fn start_dictation(
     app: tauri::AppHandle,
     runtime: State<'_, RuntimeContext>,
     mode: Option<DictationMode>,
+    control_mode: Option<DictationControlMode>,
 ) -> Result<(), String> {
     runtime
         .controller
-        .start_dictation(app, mode.unwrap_or_default())
+        .start_dictation(
+            app,
+            mode.unwrap_or_default(),
+            control_mode.unwrap_or_default(),
+        )
         .await
         .map_err(|err| AppError::Controller(err).into())
 }
@@ -1222,9 +1225,7 @@ async fn add_dictionary_term(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-async fn export_dictionary(
-    runtime: State<'_, RuntimeContext>,
-) -> Result<DictionaryExport, String> {
+async fn export_dictionary(runtime: State<'_, RuntimeContext>) -> Result<DictionaryExport, String> {
     Ok(runtime.controller.export_dictionary().await)
 }
 
@@ -1466,9 +1467,7 @@ pub fn run() {
                 // Warm the optional formatter only after ASR is ready. Running
                 // both model preloads concurrently causes avoidable CPU, disk,
                 // and memory contention on budget machines.
-                controller_for_prewarm
-                    .prewarm_active_polish_profile()
-                    .await;
+                controller_for_prewarm.prewarm_active_polish_profile().await;
             });
 
             let controller_for_pill_state = controller.clone();

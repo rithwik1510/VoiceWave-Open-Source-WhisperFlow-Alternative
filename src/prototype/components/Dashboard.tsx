@@ -1,6 +1,7 @@
 import type React from "react";
 import { Cpu, Mic, Pause, Zap } from "lucide-react";
 import type { DictationState, ThemeConfig } from "../types";
+import type { DictationControlMode } from "../../types/voicewave";
 import { useEffect, useRef, useState } from "react";
 
 interface DashboardProps {
@@ -12,6 +13,7 @@ interface DashboardProps {
   partialTranscript: string | null;
   finalTranscript: string | null;
   pushToTalkHotkey: string;
+  controlMode?: DictationControlMode | null;
   userName?: string;
   isPro?: boolean;
   recentSentences?: Array<{
@@ -81,6 +83,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   partialTranscript,
   finalTranscript,
   pushToTalkHotkey,
+  controlMode,
   userName,
   recentSentences = [],
   historyOff = false
@@ -104,8 +107,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
   }, [status]);
 
   const isRecording = visualStatus === "listening" || visualStatus === "transcribing";
-  const idleHint = finalTranscript ?? partialTranscript ?? `Hold ${pushToTalkHotkey} to start capturing`;
-  const statusMeta = STATUS_META[visualStatus];
+  const isHandsFree = controlMode === "handsFree" && isRecording;
+  const idleHint = finalTranscript ?? partialTranscript ?? `Hold ${pushToTalkHotkey} to dictate. Double-tap to go hands-free.`;
+  const statusMeta = isHandsFree
+    ? {
+        ...STATUS_META[visualStatus],
+        title: visualStatus === "listening" ? "Hands-free listening..." : STATUS_META[visualStatus].title,
+        hint: visualStatus === "listening"
+          ? `Pause when done, or press ${pushToTalkHotkey} again.`
+          : STATUS_META[visualStatus].hint,
+        modeLabel: "HANDS-FREE"
+      }
+    : STATUS_META[visualStatus];
   const stateClass = `vw-home-state-${visualStatus}`;
 
   const transcriptRows = recentSentences.map((session, index) => ({
@@ -125,18 +138,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <p className={`${colors.textSecondary} text-lg font-light opacity-80`}>System is local and secure. Ready to transcribe.</p>
         </div>
 
-        <div className="flex items-center gap-2 pb-1 text-sm text-faint">
-          <span>Hold</span>
-          <kbd className="rounded-lg border border-edge bg-surface px-2 py-1 font-sans text-xs font-semibold text-ink-strong shadow-[var(--vw-shadow-card)]">
-            {pushToTalkHotkey}
-          </kbd>
-          <span>to dictate anywhere</span>
+        <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-2 pb-1 text-sm text-faint">
+          <span className="flex items-center gap-2">
+            <span>Hold</span>
+            <kbd className="rounded-lg border border-edge bg-surface px-2 py-1 font-sans text-xs font-semibold text-ink-strong shadow-[var(--vw-shadow-card)]">
+              {pushToTalkHotkey}
+            </kbd>
+          </span>
+          <span className="text-quiet">to dictate</span>
+          <span aria-hidden="true" className="text-faint">·</span>
+          <span className="text-quiet">Double-tap for hands-free</span>
         </div>
       </section>
 
       <div className="space-y-6">
         <section>
-          <div className="grid gap-4 md:grid-cols-[1fr_320px]">
+          <div className="grid items-start gap-4 md:grid-cols-[1fr_320px]">
             <div className={`vw-ring-shell vw-ring-shell-lg ${shapes.radius}`}>
               <div
                 className={`

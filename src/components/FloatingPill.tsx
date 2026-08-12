@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Lock } from "lucide-react";
 import {
   addDictionaryTerm,
   approveDictionaryEntry,
@@ -16,6 +17,7 @@ import {
   showMainWindow
 } from "../lib/tauri";
 import type {
+  DictationControlMode,
   DictionaryQueueItem,
   PillNoticePayload,
   PolishProfile,
@@ -49,8 +51,8 @@ function clamp01(value: number): number {
 
 export function FloatingPill() {
   const [rawState, setRawState] = useState<VoiceWaveHudState>("idle");
+  const [controlMode, setControlMode] = useState<DictationControlMode | null>(null);
   const [displayState, setDisplayState] = useState<VisualState>("idle");
-  const [micLevel, setMicLevel] = useState(0);
   const [smoothedLevel, setSmoothedLevel] = useState(0);
   const [phaseTime, setPhaseTime] = useState(0);
   const [reviewItem, setReviewItem] = useState<DictionaryQueueItem | null>(null);
@@ -68,6 +70,7 @@ export function FloatingPill() {
   const [actionDone, setActionDone] = useState(false);
   const noticeTimerRef = useRef<number | null>(null);
   const previousRawStateRef = useRef<VoiceWaveHudState>("idle");
+  const micLevelRef = useRef(0);
   // Slowly-decaying running peak for auto-gain normalization of the waveform.
   const levelPeakRef = useRef(0.08);
   // Scrolling waveform: one slot per bar, newest sample enters on the right
@@ -163,9 +166,15 @@ export function FloatingPill() {
       try {
         stateUnlisten = await listenVoicewaveState((payload) => {
           setRawState(payload.state);
+          setControlMode((previous) =>
+            payload.controlMode ?? (payload.state === "idle" ? null : previous)
+          );
         });
         micUnlisten = await listenVoicewaveMicLevel((payload) => {
-          setMicLevel(clamp01(payload.level ?? 0));
+          // The waveform loop reads the latest sample directly. Keeping raw
+          // mic events out of React state avoids a render for every native
+          // level update while listening.
+          micLevelRef.current = clamp01(payload.level ?? 0);
         });
         noticeUnlisten = await listenVoicewavePillNotice((payload) => {
           setNotice(payload);
@@ -193,6 +202,9 @@ export function FloatingPill() {
         try {
           const snapshot = await loadSnapshot();
           setRawState(snapshot.state);
+          setControlMode((previous) =>
+            snapshot.controlMode ?? (snapshot.state === "idle" ? null : previous)
+          );
         } catch {
           // Ignore transient snapshot poll failures in pill overlay.
         }
@@ -376,6 +388,17 @@ export function FloatingPill() {
   }, [resetReview, reviewBusy]);
 
   useEffect(() => {
+    if (visualState !== "listening") {
+      // Idle, transcribing, notice, and review visuals are CSS-driven. Do not
+      // keep a WebView animation-frame loop alive while the waveform is hidden.
+      levelPeakRef.current = 0.08;
+      waveHistoryRef.current.fill(0);
+      lastWaveSampleTsRef.current = 0;
+      setSmoothedLevel(0);
+      setPhaseTime(0);
+      return;
+    }
+
     let frame = 0;
     let lastFrame = 0;
     let current = 0;
@@ -391,15 +414,10 @@ export function FloatingPill() {
       // running maximum so loud syllables always reach the top of the range,
       // then gamma-expand (>1) to ADD contrast — quiet hovers low, speech
       // slams high. (sqrt compression made everything mid-height = flat.)
-      const raw = visualState === "listening" ? micLevel : 0;
+      const raw = micLevelRef.current;
       levelPeakRef.current = Math.max(raw, levelPeakRef.current * 0.994, 0.05);
       const shaped = Math.pow(clamp01(raw / levelPeakRef.current), 1.4);
-      const target =
-        visualState === "listening"
-          ? shaped
-          : visualState === "transcribing"
-            ? 0.12
-            : 0.03;
+      const target = shaped;
       // Peak-meter dynamics: instant attack, exponential release. Any lerp on
       // the way up softens exactly the motion the user should see.
       current = target > current ? target : current * 0.86;
@@ -422,7 +440,7 @@ export function FloatingPill() {
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [micLevel, visualState]);
+  }, [visualState]);
 
   const bars = useMemo(() => {
     const history = waveHistoryRef.current;
@@ -441,12 +459,20 @@ export function FloatingPill() {
     });
   }, [phaseTime, smoothedLevel]);
 
+  const handsFreeActive = controlMode === "handsFree" && visualState === "listening";
+  const pillLabel = handsFreeActive
+    ? "VoiceWave hands-free listening. Pause when done, or press the shortcut again."
+    : `VoiceWave ${visualState}`;
+
   return (
     <div
-      className={`vw-pill-shell vw-pill-state-${visualState}${reviewModeActive ? " vw-pill-mode-review" : ""}${noticeActive ? ` vw-pill-mode-notice vw-pill-notice-${notice?.severity ?? "info"}${notice?.transcript ? " vw-pill-mode-rescue" : ""}` : ""}`}
+      className={`vw-pill-shell vw-pill-state-${visualState}${handsFreeActive ? " vw-pill-control-hands-free" : ""}${reviewModeActive ? " vw-pill-mode-review" : ""}${noticeActive ? ` vw-pill-mode-notice vw-pill-notice-${notice?.severity ?? "info"}${notice?.transcript ? " vw-pill-mode-rescue" : ""}` : ""}`}
     >
       <div
         className={`vw-pill-surface${reviewModeActive ? " vw-pill-surface-review" : ""}`}
+        role="status"
+        aria-label={pillLabel}
+        title={pillLabel}
         onDoubleClick={() => {
           void showMainWindow();
         }}
@@ -457,6 +483,9 @@ export function FloatingPill() {
         <div className="vw-pill-core">
           <span className="vw-pill-profile" title={PROFILE_TITLES[activeProfile]}>
             {PROFILE_ABBREV[activeProfile]}
+          </span>
+          <span className="vw-pill-control-indicator" aria-hidden="true">
+            <Lock size={8} strokeWidth={2.5} />
           </span>
           <div className="vw-pill-wave">
             {bars.map((bar) => (
