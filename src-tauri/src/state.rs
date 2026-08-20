@@ -956,6 +956,49 @@ fn push_to_talk_press_decision(
     }
 }
 
+/// Terminal states mean the flow task is done with the session and the session
+/// object is only awaiting reaping. `active_control_mode` already treats them
+/// as "no session"; anything that gates on a live session must agree, or a
+/// session that never got reaped wedges the hotkey permanently.
+fn is_terminal_lifecycle_state(state: DictationLifecycleState) -> bool {
+    matches!(
+        state,
+        DictationLifecycleState::Idle
+            | DictationLifecycleState::Inserted
+            | DictationLifecycleState::Error
+    )
+}
+
+/// Press decision for a session object that is still present.
+///
+/// Only `Listening` is genuinely in-flight enough for the control-mode rules to
+/// apply. Terminal states start a fresh session; the remaining states
+/// (ReleasePending, Transcribing) are real work in progress and are ignored.
+fn push_press_decision_for_session(
+    state: DictationLifecycleState,
+    control_mode: DictationControlMode,
+    pending_push_release: bool,
+) -> PushPressDecision {
+    if is_terminal_lifecycle_state(state) {
+        return PushPressDecision::Start;
+    }
+    if state != DictationLifecycleState::Listening {
+        return PushPressDecision::Ignore;
+    }
+    push_to_talk_press_decision(Some(control_mode), pending_push_release)
+}
+
+/// Whether an un-cancelled `cancel_token` should be treated as debris rather
+/// than as proof that a dictation is running.
+///
+/// A hung or panicked flow task leaves exactly this shape behind: a live token
+/// with no owning session (or one already in a terminal state). Without this
+/// the start gate returns `AlreadyRunning` forever and the hotkey is dead until
+/// the app restarts.
+fn live_cancel_token_is_stale(session_state: Option<DictationLifecycleState>) -> bool {
+    session_state.is_none_or(is_terminal_lifecycle_state)
+}
+
 /// Decision emitted by `trigger_hotkey_action` for a PushToTalk Release event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PushReleaseDecision {
@@ -1720,14 +1763,33 @@ impl VoiceWaveController {
             "voicewave: start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
             trigger, control_mode, mode
         );
+        // Snapshot the lifecycle state before touching the token: nothing in
+        // this file holds `active_session` and `cancel_token` at the same
+        // time, and this is not the place to start.
+        let session_state = self
+            .active_session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.state);
+
         let cancel_token = {
             let mut token_slot = self.cancel_token.lock().await;
-            if token_slot
+            let token_live = token_slot
                 .as_ref()
-                .is_some_and(|token| !token.is_cancelled())
-            {
-                eprintln!("voicewave: start_dictation rejected (already running)");
-                return Err(ControllerError::AlreadyRunning);
+                .is_some_and(|token| !token.is_cancelled());
+            if token_live {
+                if live_cancel_token_is_stale(session_state) {
+                    eprintln!(
+                        "voicewave: start_dictation clearing stale cancel token (session_state={session_state:?})"
+                    );
+                    if let Some(stale) = token_slot.take() {
+                        stale.cancel();
+                    }
+                } else {
+                    eprintln!("voicewave: start_dictation rejected (already running)");
+                    return Err(ControllerError::AlreadyRunning);
+                }
             }
             let token = CancellationToken::new();
             *token_slot = Some(token.clone());
@@ -1866,21 +1928,29 @@ impl VoiceWaveController {
                 _ => None,
             }
         };
-        let Some(session_id) = cancelled_session else {
-            eprintln!("voicewave: cancel_dictation ignored (no cancellable session)");
-            return;
-        };
-
-        eprintln!("voicewave: cancel_dictation accepted (session={session_id})");
-        self.set_hotkey_dictation_active(false).await;
+        // Teardown is unconditional. A wedged or panicked flow task leaves a
+        // live token, a set stop flag, and Escape still owned by the hook with
+        // no cancellable session attached - and cancel is the only path that
+        // can clear that. All three are idempotent, so running them on a
+        // no-op cancel costs nothing.
         if let Some(token) = self.cancel_token.lock().await.clone() {
             token.cancel();
         }
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
         }
-        play_cue_without_blocking(crate::cue::CueSound::Close);
+        self.set_hotkey_dictation_active(false).await;
         self.stop_mic_level_monitor().await;
+
+        // Only the user-visible effects stay session-gated, so repeated
+        // cancels do not replay the close cue or spam Idle transitions.
+        let Some(session_id) = cancelled_session else {
+            eprintln!("voicewave: cancel_dictation ignored (no cancellable session)");
+            return;
+        };
+
+        eprintln!("voicewave: cancel_dictation accepted (session={session_id})");
+        play_cue_without_blocking(crate::cue::CueSound::Close);
         self.update_state(
             &app,
             VoiceWaveHudState::Idle,
@@ -1957,14 +2027,21 @@ impl VoiceWaveController {
             }
             Err(err) => {
                 eprintln!("voicewave: global hotkey runtime unavailable: {err}");
+                // The duplicate-instance case has a fix the user can actually
+                // perform; everything else is a genuine "something broke".
+                let detail = if err
+                    .to_string()
+                    .contains("already owns the keyboard hook")
+                {
+                    "Another copy of VoiceWave is already running. Close it from the tray, then restart this one."
+                } else {
+                    "Restart VoiceWave. If this continues, export diagnostics from Settings."
+                };
                 emit_pill_notice(
                     &app,
                     "error",
                     "VoiceWave hotkeys are unavailable",
-                    Some(
-                        "Restart VoiceWave. If this continues, export diagnostics from Settings."
-                            .to_string(),
-                    ),
+                    Some(detail.to_string()),
                     8_000,
                 );
                 return;
@@ -5065,17 +5142,23 @@ impl VoiceWaveController {
             return PushPressDecision::Start;
         };
 
-        if session.state != DictationLifecycleState::Listening {
-            return PushPressDecision::Ignore;
-        }
-
-        let decision = push_to_talk_press_decision(
-            Some(session.control_mode),
+        let decision = push_press_decision_for_session(
+            session.state,
+            session.control_mode,
             session.pending_push_release,
         );
-        if decision == PushPressDecision::LockHandsFree {
-            session.pending_push_release = false;
-            session.control_mode = DictationControlMode::HandsFree;
+        match decision {
+            PushPressDecision::LockHandsFree => {
+                session.pending_push_release = false;
+                session.control_mode = DictationControlMode::HandsFree;
+            }
+            // The only decision arm that used to be silent, and the one that
+            // looks identical to a dead hotkey from the user's side.
+            PushPressDecision::Ignore => eprintln!(
+                "voicewave: push press ignored (session_state={:?})",
+                session.state
+            ),
+            _ => {}
         }
         decision
     }
@@ -5516,12 +5599,13 @@ mod tests {
         clamp_vad_threshold, classify_insertion_target, decode_mode_key, decode_mode_rank,
         derive_correction_candidates, effective_release_watchdog_threshold_ms,
         faster_whisper_download_percent, floor_decode_mode, hands_free_toggle_decision,
-        insertion_method_key, is_likely_low_quality_input_name, now_utc_ms,
-        push_to_talk_press_decision, push_to_talk_release_decision, release_watchdog_recovered,
+        insertion_method_key, is_likely_low_quality_input_name, live_cancel_token_is_stale,
+        now_utc_ms, push_press_decision_for_session, push_to_talk_press_decision,
+        push_to_talk_release_decision, release_watchdog_recovered,
         should_reject_low_confidence_transcript_as_no_speech, DictationControlMode,
-        DictationStartTrigger, HandsFreeToggleDecision, PillAction, PillNoticePayload,
-        PushPressDecision, PushReleaseDecision, MAX_VAD_THRESHOLD, MIN_VAD_THRESHOLD,
-        RECOMMENDED_VAD_THRESHOLD,
+        DictationLifecycleState, DictationStartTrigger, HandsFreeToggleDecision, PillAction,
+        PillNoticePayload, PushPressDecision, PushReleaseDecision, MAX_VAD_THRESHOLD,
+        MIN_VAD_THRESHOLD, RECOMMENDED_VAD_THRESHOLD,
     };
     use crate::audio::{AudioQualityBand, CaptureEndPolicy};
     use crate::insertion::InsertionMethod;
@@ -5611,6 +5695,74 @@ mod tests {
             push_to_talk_press_decision(Some(DictationControlMode::HoldToTalk), false),
             PushPressDecision::Ignore
         );
+    }
+
+    #[test]
+    fn push_press_over_a_terminal_session_starts_a_new_one() {
+        // A session left in a terminal state is awaiting reaping by the flow
+        // task, not in flight. Returning Ignore here is what made the hotkey
+        // look dead after a session failed to get cleaned up.
+        for state in [
+            DictationLifecycleState::Idle,
+            DictationLifecycleState::Inserted,
+            DictationLifecycleState::Error,
+        ] {
+            assert_eq!(
+                push_press_decision_for_session(state, DictationControlMode::HoldToTalk, false),
+                PushPressDecision::Start,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_press_is_ignored_while_work_is_genuinely_in_flight() {
+        for state in [
+            DictationLifecycleState::ReleasePending,
+            DictationLifecycleState::Transcribing,
+        ] {
+            assert_eq!(
+                push_press_decision_for_session(state, DictationControlMode::HoldToTalk, true),
+                PushPressDecision::Ignore,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_press_while_listening_defers_to_the_control_mode_rules() {
+        assert_eq!(
+            push_press_decision_for_session(
+                DictationLifecycleState::Listening,
+                DictationControlMode::HoldToTalk,
+                true
+            ),
+            push_to_talk_press_decision(Some(DictationControlMode::HoldToTalk), true)
+        );
+        assert_eq!(
+            push_press_decision_for_session(
+                DictationLifecycleState::Listening,
+                DictationControlMode::HandsFree,
+                false
+            ),
+            push_to_talk_press_decision(Some(DictationControlMode::HandsFree), false)
+        );
+    }
+
+    #[test]
+    fn live_cancel_token_is_stale_only_without_an_in_flight_session() {
+        // No session, or a terminal one: the token is debris from a flow task
+        // that never finished tearing itself down.
+        assert!(live_cancel_token_is_stale(None));
+        assert!(live_cancel_token_is_stale(Some(
+            DictationLifecycleState::Error
+        )));
+        assert!(!live_cancel_token_is_stale(Some(
+            DictationLifecycleState::Listening
+        )));
+        assert!(!live_cancel_token_is_stale(Some(
+            DictationLifecycleState::Transcribing
+        )));
     }
 
     #[test]

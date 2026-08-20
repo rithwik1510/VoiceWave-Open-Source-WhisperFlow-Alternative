@@ -38,7 +38,7 @@ thiserror = "2.0.12"
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.13"
 unicode-normalization = "0.1.24"
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
 whisper-rs = "0.15.1"
 ureq = "2.12.0"
 

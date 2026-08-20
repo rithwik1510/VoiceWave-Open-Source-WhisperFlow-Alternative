@@ -288,6 +288,65 @@ struct HookDispatch {
 #[cfg(target_os = "windows")]
 static HOOK_DISPATCH: OnceLock<StdMutex<Option<HookDispatch>>> = OnceLock::new();
 
+/// Session-global claim on the WH_KEYBOARD_LL hook.
+///
+/// `HOOK_DISPATCH` only guarantees one hook per *process*. Two full VoiceWave
+/// processes would install two hooks and insert every dictation twice, so the
+/// claim has to live in the kernel. Held for the life of the hook thread and
+/// released in `Drop`, which runs as that thread unwinds.
+#[cfg(target_os = "windows")]
+struct GlobalHookMutex(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl Drop for GlobalHookMutex {
+    fn drop(&mut self) {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::ReleaseMutex};
+        // SAFETY: `self.0` is a live mutex handle created (and owned) by the
+        // same thread that drops this guard.
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+/// Claims the session-global hook mutex, or reports who already owns it.
+///
+/// No `Global\` prefix: per-logon-session scope is exactly right, since a
+/// keyboard hook only ever sees its own interactive session anyway.
+#[cfg(target_os = "windows")]
+fn acquire_global_hook_mutex() -> Result<GlobalHookMutex, String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS},
+        System::Threading::CreateMutexW,
+    };
+
+    let name: Vec<u16> = "VoiceWave-hotkey-hook"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `name` is a valid nul-terminated UTF-16 buffer that outlives the
+    // call; a null security descriptor gives the default ACL.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+    if handle.is_null() {
+        // SAFETY: GetLastError only reads this thread's last-error slot.
+        let code = unsafe { GetLastError() };
+        return Err(format!(
+            "CreateMutexW for the keyboard hook failed (error {code})"
+        ));
+    }
+    // SAFETY: as above.
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // CreateMutexW still hands back a (non-owning) handle in this case.
+        // SAFETY: `handle` is a live handle we are done with.
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return Err("another VoiceWave instance already owns the keyboard hook".to_string());
+    }
+    Ok(GlobalHookMutex(handle))
+}
+
 #[cfg(target_os = "windows")]
 fn start_windows_hotkey_runtime(
     config: HotkeyConfig,
@@ -343,6 +402,17 @@ fn windows_hotkey_thread(
     unsafe {
         let _ = PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
     }
+
+    // Claim the system-wide hook slot BEFORE installing anything. `_hook_claim`
+    // stays alive for the rest of this function, so the mutex is released only
+    // once the message loop has exited and the hook is torn down.
+    let _hook_claim = match acquire_global_hook_mutex() {
+        Ok(claim) => claim,
+        Err(message) => {
+            let _ = ready.send(Err(message));
+            return;
+        }
+    };
 
     let module = unsafe { GetModuleHandleW(std::ptr::null()) };
     if module.is_null() {
