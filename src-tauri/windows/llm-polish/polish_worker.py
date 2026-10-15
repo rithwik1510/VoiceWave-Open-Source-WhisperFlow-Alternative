@@ -311,6 +311,12 @@ def _load_model():
     _LLM = Llama(
         model_path=str(model_path),
         n_ctx=2048,
+        # n_batch (and so n_ubatch) sizes two n_batch x vocab(152k) float32
+        # buffers: llama.cpp's compute buffer (~303 MiB at 512) and an unused
+        # llama-cpp-python logits array (~297 MiB). 128 cuts ~450 MiB of commit
+        # with identical prefill speed on CPU at 4 threads (measured 2026-10-15,
+        # prompts up to ~450 tokens prefill in 128-token chunks just as fast).
+        n_batch=128,
         n_gpu_layers=_resolve_gpu_layers(),
         n_threads=threads,
         n_threads_batch=threads,
