@@ -13,9 +13,7 @@
 //! and keep the user's existing field values untouched (as overrides), so
 //! day-one output is byte-identical to before the migration.
 
-use super::{
-    CodeCasingStyle, CodeModeSettings, DomainPackId, FormatProfile, VoiceWaveSettings,
-};
+use super::{CodeCasingStyle, CodeModeSettings, DomainPackId, FormatProfile, VoiceWaveSettings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 

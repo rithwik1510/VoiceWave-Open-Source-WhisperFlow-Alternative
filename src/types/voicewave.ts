@@ -69,9 +69,12 @@ export interface VoiceWaveSettings {
   releaseTailMs: number;
   decodeMode: DecodeMode;
   diagnosticsOptIn: boolean;
-  /** Explicit consent for two content-free analytics events: first successful
-   * dictation and once-per-day activity. Off by default. */
+  /** Two content-free analytics events: first successful dictation and
+   * once-per-day activity. On by default; the user can turn it off. */
   anonymousUsageOptIn: boolean;
+  /** Analytics disclosure revision the user has seen (0 = never). Below
+   * ANALYTICS_CONSENT_VERSION after onboarding, the app asks once. */
+  analyticsConsentVersion?: number;
   toggleHotkey: string;
   pushToTalkHotkey: string;
   preferClipboardFallback: boolean;
@@ -138,6 +141,25 @@ export interface PillNoticePayload {
   transcript: string | null;
   /** A typed action makes the pill interactive and renders a button. */
   action: PillAction | null;
+  /** Explicitly marks a blocking/recoverable user-content failure. Severity
+   * alone is visual and must not decide surface priority. */
+  recovery?: boolean;
+}
+
+export type PillWindowMode = "compact" | "review" | "notice";
+
+export type PillQuickControlsInvocation = "mouse" | "focused";
+
+/** Small Phase 0 snapshot. `invocation` is null while the spike is closed. */
+export interface PillQuickControlsSnapshot {
+  enabled: boolean;
+  invocation: PillQuickControlsInvocation | null;
+}
+
+/** Authoritative open/close event emitted by the native pill window. */
+export interface PillQuickControlsEvent {
+  open: boolean;
+  invocation: PillQuickControlsInvocation | null;
 }
 
 export interface TranscriptEvent {
@@ -359,6 +381,10 @@ export interface ModelCatalogItem {
   license: string;
   downloadUrl: string;
   signature: string;
+  /** True for exactly one row: the model the backend picks for this machine. */
+  recommended: boolean;
+  /** One-line, hardware-specific note shown next to the model. */
+  hardwareNote: string;
 }
 
 export interface InstalledModel {

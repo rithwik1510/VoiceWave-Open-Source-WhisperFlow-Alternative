@@ -3,6 +3,7 @@ import { ArrowRight, Check, Mic, Sparkles } from "lucide-react";
 
 import {
   canUseTauri,
+  getPillQuickControlsSnapshot,
   listenVoicewaveMicLevel,
   setMicLevelForwarding,
   startMicLevelMonitor,
@@ -28,7 +29,15 @@ interface OnboardingProps {
   makeModelActive: (modelId: string) => Promise<void>;
   hotkeyLabel: string;
   snapshot: VoiceWaveSnapshot;
+  /** Anonymous usage count, on by default. Disclosed on the first screen so
+   * it is seen before the rehearsal dictation could send anything; changes
+   * persist immediately. */
+  usageOptIn: boolean;
+  onUsageOptInChange: (enabled: boolean) => void;
   onComplete: () => void;
+  /** Test/host override. Desktop normally resolves the internal rollout flag
+   * from the native snapshot so onboarding never advertises a disabled card. */
+  quickControlsAvailable?: boolean;
 }
 
 function prefersReducedMotion(): boolean {
@@ -180,16 +189,26 @@ function MicMeter({ heard, onHeard }: { heard: boolean; onHeard: () => void }) {
     let energy = 0;
     let active = true;
 
+    // Cleanup can land mid-setup (fast Continue, StrictMode remount): bail
+    // before starting the monitor, and release a listener that resolves late.
     void (async () => {
       try {
         await setMicLevelForwarding(true);
+        if (!active) {
+          return;
+        }
         await startMicLevelMonitor();
       } catch {
         // The hint copy below the meter covers the "we hear nothing" case.
       }
-      unlisten = await listenVoicewaveMicLevel((event) => {
+      const fn = await listenVoicewaveMicLevel((event) => {
         levelRef.current = event.error ? 0 : event.level;
       });
+      if (active) {
+        unlisten = fn;
+      } else {
+        fn();
+      }
     })();
 
     const reduced = prefersReducedMotion();
@@ -284,24 +303,65 @@ export function Onboarding({
   makeModelActive,
   hotkeyLabel,
   snapshot,
-  onComplete
+  usageOptIn,
+  onUsageOptInChange,
+  onComplete,
+  quickControlsAvailable: quickControlsAvailableOverride
 }: OnboardingProps) {
   const [step, setStep] = useState<OnboardingStep>("welcome");
-  const [modelChoice, setModelChoice] = useState("fw-small.en");
+  const [modelChoice, setModelChoice] = useState(
+    () => catalog.find((row) => row.recommended)?.modelId ?? "fw-small.en"
+  );
+  const modelPickedRef = useRef(false);
   const [downloadStarted, setDownloadStarted] = useState(false);
   const [micHeard, setMicHeard] = useState(false);
   const [micHintVisible, setMicHintVisible] = useState(false);
   const [spokeDone, setSpokeDone] = useState(false);
+  const [quickControlsPreviewOpen, setQuickControlsPreviewOpen] = useState(false);
+  const [quickControlsAvailable, setQuickControlsAvailable] = useState(
+    quickControlsAvailableOverride ?? false
+  );
   const shellRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const rehearsalBaselineRef = useRef<string | null>(null);
   const { canvasRef, burst } = useParticleBurst();
 
+  useEffect(() => {
+    if (quickControlsAvailableOverride !== undefined) {
+      setQuickControlsAvailable(quickControlsAvailableOverride);
+      return;
+    }
+    if (!canUseTauri()) {
+      return;
+    }
+    void getPillQuickControlsSnapshot()
+      .then((snapshot) => setQuickControlsAvailable(snapshot.enabled))
+      .catch(() => setQuickControlsAvailable(false));
+  }, [quickControlsAvailableOverride]);
+
+  // The catalog can arrive after mount; follow its recommendation until the user picks.
+  useEffect(() => {
+    const recommendedId = catalog.find((row) => row.recommended)?.modelId;
+    if (recommendedId && !modelPickedRef.current) {
+      setModelChoice(recommendedId);
+    }
+  }, [catalog]);
+
+  const chooseModel = (modelId: string) => {
+    modelPickedRef.current = true;
+    setModelChoice(modelId);
+  };
+
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
-  const downloadFailed = !modelReady && status?.state === "failed";
+  const downloadFailed =
+    !modelReady && (status?.state === "failed" || status?.state === "cancelled");
+  const smallRecommended = catalog.some((row) => row.modelId === "fw-small.en" && row.recommended);
+  const turboRecommended = catalog.some(
+    (row) => row.modelId === "fw-large-v3-turbo" && row.recommended
+  );
   const progress = modelReady ? 100 : Math.max(0, Math.min(100, status?.progress ?? 0));
   const catalogRow = catalog.find((row) => row.modelId === modelChoice);
 
@@ -331,7 +391,7 @@ export function Onboarding({
         await installModel(modelChoice);
         await makeModelActive(modelChoice);
       } catch {
-        // Surfaced through the model status (state === "failed") with a retry.
+        // Surfaced through the model status (state === "failed" or "cancelled") with a retry.
         setDownloadStarted(false);
       }
     })();
@@ -462,25 +522,44 @@ export function Onboarding({
                       <button
                         type="button"
                         className={`vw-seg-btn ${modelChoice === "fw-small.en" ? "vw-seg-btn-active" : ""}`}
-                        onClick={() => setModelChoice("fw-small.en")}
+                        onClick={() => chooseModel("fw-small.en")}
                       >
-                        Small · recommended
+                        {smallRecommended ? "Small · recommended" : "Small"}
                       </button>
                       <button
                         type="button"
                         className={`vw-seg-btn ${modelChoice === "fw-large-v3-turbo" ? "vw-seg-btn-active" : ""}`}
-                        onClick={() => setModelChoice("fw-large-v3-turbo")}
+                        onClick={() => chooseModel("fw-large-v3-turbo")}
                       >
-                        Large Turbo · max accuracy
+                        {turboRecommended ? "Large Turbo · recommended" : "Large Turbo · slower on this PC"}
                       </button>
                     </div>
                     {catalogRow && (
                       <p className="mt-2 text-xs text-hint">
-                        {catalogRow.displayName} · {formatSize(catalogRow.sizeBytes)} · downloads in the background while you finish setup
+                        {catalogRow.hardwareNote} · {formatSize(catalogRow.sizeBytes)} · downloads in the background while you finish setup
                       </p>
                     )}
                   </div>
                 )}
+
+                <div className="mt-6 flex max-w-[30rem] items-start justify-between gap-6">
+                  <div>
+                    <p className="vw-set-title">Anonymous usage count · on by default</p>
+                    <p className="vw-set-desc">
+                      Counts active installs with a random ID, the app version, and a once-a-day marker.
+                      Never audio or text. Change it anytime in Settings.
+                    </p>
+                  </div>
+                  <span className="vw-switch">
+                    <input
+                      type="checkbox"
+                      aria-label="Share anonymous usage count"
+                      checked={usageOptIn}
+                      onChange={(event) => onUsageOptInChange(event.target.checked)}
+                    />
+                    <span className="vw-switch-track" aria-hidden="true" />
+                  </span>
+                </div>
 
                 <div className="mt-auto flex items-center gap-3 pt-8">
                   <button type="button" className="vw-btn-primary" onClick={begin}>
@@ -639,9 +718,28 @@ export function Onboarding({
                   VoiceWave works in every app — try your email or notes next.
                   Say “new line” or “bullet point” to add structure as you speak.
                 </p>
+                {quickControlsAvailable ? <button
+                  type="button"
+                  className={`vw-onb-pill-tip${quickControlsPreviewOpen ? " is-open" : ""}`}
+                  aria-expanded={quickControlsPreviewOpen}
+                  onClick={() => setQuickControlsPreviewOpen((open) => !open)}
+                >
+                  <span className="vw-onb-pill-tip-visual" aria-hidden="true">
+                    <span className="vw-onb-pill-tip-line" />
+                    <span className="vw-onb-pill-tip-card">
+                      <span>Standard</span>
+                      <span>Writing</span>
+                      <span>Hands-free</span>
+                    </span>
+                  </span>
+                  <span className="vw-onb-pill-tip-copy">
+                    <strong>Quick Controls</strong>
+                    <span>Click the bottom pill for profiles and hands-free.</span>
+                  </span>
+                </button> : null}
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
                   <span className="vw-chip">Spoken commands · on</span>
-                  <span className="vw-chip">History · kept 30 days, on-device</span>
+                  <span className="vw-chip">History · kept on this PC</span>
                   <span className="vw-chip">
                     <Sparkles size={12} className="mr-1 inline-block" />
                     AI polish · waiting in Settings

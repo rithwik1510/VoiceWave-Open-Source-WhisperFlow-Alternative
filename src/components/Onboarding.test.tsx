@@ -13,8 +13,11 @@ const CATALOG: ModelCatalogItem[] = [
     sizeBytes: 466 * 1024 * 1024,
     sha256: "x",
     license: "MIT",
-    downloadUrl: "https://example.invalid"
-  } as ModelCatalogItem
+    downloadUrl: "https://example.invalid",
+    signature: "local",
+    recommended: true,
+    hardwareNote: "Fast on most laptops"
+  }
 ];
 
 function makeSnapshot(overrides: Partial<VoiceWaveSnapshot> = {}): VoiceWaveSnapshot {
@@ -36,7 +39,10 @@ function renderFlow(overrides: Partial<Parameters<typeof Onboarding>[0]> = {}) {
     makeModelActive: vi.fn().mockResolvedValue(undefined),
     hotkeyLabel: "Ctrl+Windows",
     snapshot: makeSnapshot(),
+    usageOptIn: true,
+    onUsageOptInChange: vi.fn(),
     onComplete: vi.fn(),
+    quickControlsAvailable: true,
     ...overrides
   };
   const view = render(<Onboarding {...props} />);
@@ -50,6 +56,18 @@ describe("Onboarding first-run flow", () => {
     expect(screen.getByText(/Your voice,/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Skip setup" }));
     expect(props.onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not advertise Quick Controls when the rollout is unavailable", () => {
+    const { view, props } = renderFlow({ quickControlsAvailable: false });
+    fireEvent.click(screen.getByRole("button", { name: /Get started/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    view.rerender(
+      <Onboarding {...props} snapshot={makeSnapshot({ lastFinal: "Finished setup." })} />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    expect(screen.queryByRole("button", { name: /Quick Controls/ })).not.toBeInTheDocument();
   });
 
   it("starts the model download when none is installed", () => {
@@ -120,6 +138,11 @@ describe("Onboarding first-run flow", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     expect(screen.getByText("You're set.")).toBeInTheDocument();
+
+    const quickControlsTip = screen.getByRole("button", { name: /Quick Controls/ });
+    expect(quickControlsTip).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(quickControlsTip);
+    expect(quickControlsTip).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(screen.getByRole("button", { name: "Start dictating" }));
     expect(props.onComplete).toHaveBeenCalledTimes(1);

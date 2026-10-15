@@ -149,8 +149,7 @@ mod platform {
         set_master_volume_level_scalar:
             unsafe extern "system" fn(*mut c_void, f32, *const GUID) -> Hresult,
         get_master_volume_level: usize,
-        get_master_volume_level_scalar:
-            unsafe extern "system" fn(*mut c_void, *mut f32) -> Hresult,
+        get_master_volume_level_scalar: unsafe extern "system" fn(*mut c_void, *mut f32) -> Hresult,
         set_channel_volume_level: usize,
         set_channel_volume_level_scalar: usize,
         get_channel_volume_level: usize,
@@ -280,12 +279,11 @@ mod platform {
     pub fn read_default_input_volume() -> Result<InputVolumeReading, String> {
         let endpoint = EndpointVolume::open_default_capture()?;
         let mut scalar: f32 = 0.0;
-        let hr = unsafe {
-            ((*vtbl::<IAudioEndpointVolumeVtbl>(endpoint.volume)).get_master_volume_level_scalar)(
-                endpoint.volume,
-                &mut scalar,
-            )
-        };
+        let hr =
+            unsafe {
+                ((*vtbl::<IAudioEndpointVolumeVtbl>(endpoint.volume))
+                    .get_master_volume_level_scalar)(endpoint.volume, &mut scalar)
+            };
         if hr != 0 {
             return Err(format!("GetMasterVolumeLevelScalar failed: 0x{hr:08x}"));
         }
@@ -357,9 +355,18 @@ mod tests {
     #[test]
     fn healthy_volume_is_silent() {
         for mode in [MicVolumeGuardMode::Warn, MicVolumeGuardMode::AutoRestore] {
-            assert_eq!(plan_mic_guard(mode, reading(1.0, false)), MicGuardPlan::Silent);
-            assert_eq!(plan_mic_guard(mode, reading(0.70, false)), MicGuardPlan::Silent);
-            assert_eq!(plan_mic_guard(mode, reading(0.85, false)), MicGuardPlan::Silent);
+            assert_eq!(
+                plan_mic_guard(mode, reading(1.0, false)),
+                MicGuardPlan::Silent
+            );
+            assert_eq!(
+                plan_mic_guard(mode, reading(0.70, false)),
+                MicGuardPlan::Silent
+            );
+            assert_eq!(
+                plan_mic_guard(mode, reading(0.85, false)),
+                MicGuardPlan::Silent
+            );
         }
     }
 

@@ -34,6 +34,7 @@ import {
 import { firebaseEnabled } from "./lib/firebase";
 import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard } from "./lib/tauri";
+import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
 import { Onboarding } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
@@ -570,6 +571,7 @@ function App() {
     setSpokenEditCommands,
     completeOnboarding,
     restartOnboarding,
+    resolveAnalyticsConsent,
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
@@ -667,6 +669,14 @@ function App() {
   // onboarding without installing a model; it hides while the flow is up.
   const showModelSetupGate =
     tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
+  // One-time notice for installs that finished (or skipped) onboarding before
+  // usage counting became on-by-default. Onboarding carries its own
+  // disclosure, and the model gate goes first so the two never stack.
+  const showAnalyticsConsent =
+    tauriAvailable &&
+    !showOnboarding &&
+    !showModelSetupGate &&
+    (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
   const selectedSetupCatalogRow = setupCatalog.find((row) => row.modelId === setupModelChoice) ?? null;
   const selectedSetupStatus = modelStatuses[setupModelChoice] ?? null;
 
@@ -1589,12 +1599,13 @@ function App() {
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="text-sm font-semibold text-ink-strong">{model.displayName}</p>
                               {isActiveModel && <span className="vw-chip vw-chip-ink">Active</span>}
-                              {!isActiveModel && model.modelId === "fw-small.en" && (
-                                <span className="vw-chip" title="Default model. Fast, accurate, works on any machine.">
+                              {!isActiveModel && model.recommended && (
+                                <span className="vw-chip" title="Recommended for this PC.">
                                   Recommended
                                 </span>
                               )}
                             </div>
+                            <p className="mt-1 text-xs text-faint">{model.hardwareNote}</p>
                             <p className="mt-1 flex items-center gap-2 text-xs text-faint">
                               <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
                               <span className="capitalize">{statusLabel}</span>
@@ -1832,6 +1843,9 @@ function App() {
                   </button>
                 </div>
               </div>
+              <p className="mt-2 text-xs text-faint">
+                History keeps at most the newest 1,000 records, whichever policy is set.
+              </p>
 
               <div className="vw-surface-base mt-5 px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2900,11 +2914,11 @@ function App() {
                 <div>
                   <div className="vw-set-row">
                     <div>
-                      <p className="vw-set-title">Anonymous usage count</p>
+                      <p className="vw-set-title">Anonymous usage count (on by default)</p>
                       <p className="vw-set-desc">
-                        Help us count real activated installations. After a successful dictation, VoiceWave
+                        Helps us count real activated installations. After a successful dictation, VoiceWave
                         shares only a random installation ID, app version, and a once-per-day active marker.
-                        No audio, transcript, account, filename, or settings data is sent.
+                        No audio, transcript, account, filename, or settings data is sent. Turn off anytime.
                       </p>
                     </div>
                     <span className="vw-switch">
@@ -3441,8 +3455,43 @@ function App() {
           makeModelActive={makeModelActive}
           hotkeyLabel={settings.pushToTalkHotkey}
           snapshot={snapshot}
+          usageOptIn={settings.anonymousUsageOptIn}
+          onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}
           onComplete={() => void completeOnboarding()}
         />
+      )}
+
+      {showAnalyticsConsent && (
+        <div className="vw-model-gate-backdrop">
+          <section
+            className="vw-model-gate-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Anonymous usage count"
+          >
+            <header>
+              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
+                Anonymous usage count
+              </h3>
+              <p className="mt-1 text-sm text-faint">
+                VoiceWave now counts active installs by default, so we know how many people use it.
+              </p>
+            </header>
+            <p className="mt-4 text-sm leading-relaxed text-label">
+              After a successful dictation it sends a random installation ID, the app version, and a
+              once-per-day active marker. Never audio, transcripts, account details, filenames, or
+              settings. You can change this anytime in Settings → Diagnostics.
+            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+              <button type="button" className="vw-btn-primary" onClick={() => void resolveAnalyticsConsent(true)}>
+                Keep on
+              </button>
+              <button type="button" className="vw-btn-secondary" onClick={() => void resolveAnalyticsConsent(false)}>
+                Turn off
+              </button>
+            </div>
+          </section>
+        </div>
       )}
 
       {showModelSetupGate && (

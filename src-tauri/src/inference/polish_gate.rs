@@ -213,9 +213,7 @@ const MODALITY_WORDS: &[&str] = &["maybe", "must", "probably", "might", "perhaps
 
 /// Hesitation fillers (the deterministic pruner's list). Used by the Writing
 /// profile's no-fillers-in-output check.
-const FILLER_WORDS: &[&str] = &[
-    "um", "umm", "uhm", "uh", "uhh", "erm", "er", "ahem", "mhm",
-];
+const FILLER_WORDS: &[&str] = &["um", "umm", "uhm", "uh", "uhh", "erm", "er", "ahem", "mhm"];
 
 /// Classic e-mail sign-off lines the Casual profile must never produce.
 const SIGNOFF_LINES: &[&str] = &[
@@ -349,7 +347,8 @@ fn has_structured_formatting(candidate: &str) -> bool {
         if line.starts_with('#')
             || line.starts_with("- ")
             || line.starts_with("* ")
-            || line.starts_with("\u{2022}") // bullet char
+            || line.starts_with("\u{2022}")
+        // bullet char
         {
             return true;
         }
@@ -362,10 +361,7 @@ fn has_structured_formatting(candidate: &str) -> bool {
             }
         }
         // Short heading line ("Summary:") followed by more content.
-        if idx + 1 < lines.len()
-            && line.ends_with(':')
-            && line.split_whitespace().count() <= 4
-        {
+        if idx + 1 < lines.len() && line.ends_with(':') && line.split_whitespace().count() <= 4 {
             return true;
         }
         // Sign-off line ("Best," / "Regards").
@@ -475,10 +471,7 @@ pub fn validate_polish(
     let polished_lower = polished_trimmed.to_lowercase();
     'outer: for token in raw.split(|c: char| !c.is_ascii_alphabetic()) {
         let lowered = token.to_lowercase();
-        if lowered.len() >= 4
-            && has_consonant_run(&lowered)
-            && !polished_lower.contains(&lowered)
-        {
+        if lowered.len() >= 4 && has_consonant_run(&lowered) && !polished_lower.contains(&lowered) {
             rejections.push(PolishRejection::LiteralTokenDropped);
             break 'outer;
         }
@@ -695,10 +688,7 @@ mod tests {
                 "we must ship the fix before friday",
                 "We should ship the fix before friday.",
             ),
-            (
-                "we should ship this",
-                "We must ship this.",
-            ),
+            ("we should ship this", "We must ship this."),
             // The plan-010 holdout false-accept: "probably" dropped, hedge
             // became a directive. Must reject under the extended word list.
             (
@@ -769,7 +759,11 @@ mod tests {
 
     #[test]
     fn truncated_output_rejects() {
-        let cases = ["We should refactor the parser and,", "The plan is:", "First we fix the (",];
+        let cases = [
+            "We should refactor the parser and,",
+            "The plan is:",
+            "First we fix the (",
+        ];
         for polished in cases {
             let reasons = rejected_with(
                 "we should refactor the parser and fix the tests",

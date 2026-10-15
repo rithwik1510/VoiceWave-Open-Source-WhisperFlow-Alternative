@@ -28,8 +28,9 @@ use crate::{
         HotkeySnapshot,
     },
     inference::{
-        cpu_runtime_pool_enabled, ensure_faster_whisper_ready, faster_whisper_cache_hint,
-        faster_whisper_runtime_model_id, is_faster_whisper_model, kill_faster_whisper_workers,
+        cancel_faster_whisper_downloads, cpu_runtime_pool_enabled,
+        download_faster_whisper_model, ensure_faster_whisper_ready, faster_whisper_cache_hint,
+        faster_whisper_runtime_model_id, is_faster_whisper_model,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
         polish_gate::gate_polish_candidate, prefetch_faster_whisper_model, prewarm_runtime,
         warmup_faster_whisper_model, warmup_plan_for_model, InferenceError, InferenceWorker,
@@ -145,6 +146,11 @@ pub struct PillNoticePayload {
     /// for the notice's lifetime and renders a button; the frontend switches on
     /// `kind` to pick the handler.
     pub action: Option<PillAction>,
+    /// Blocking recovery is a product priority, while severity only controls
+    /// color. Keeping this explicit prevents an ordinary red warning from
+    /// displacing recording or user-opened controls.
+    #[serde(default)]
+    pub recovery: bool,
 }
 
 /// A single interactive affordance carried by a pill notice. Generalizes the
@@ -180,6 +186,7 @@ fn emit_pill_notice(
             duration_ms,
             transcript: None,
             action: None,
+            recovery: false,
         },
     );
 }
@@ -209,6 +216,7 @@ fn emit_pill_rescue(
                 label: "Copy".to_string(),
                 value: None,
             }),
+            recovery: true,
         },
     );
 }
@@ -235,6 +243,7 @@ fn emit_pill_action_notice(
             duration_ms,
             transcript: None,
             action: Some(action),
+            recovery: false,
         },
     );
 }
@@ -564,6 +573,10 @@ const INCREMENTAL_MIN_VOICED_MS: u64 = 400;
 const INCREMENTAL_WINDOW_MS: u64 = 1_400;
 const INCREMENTAL_WINDOW_OVERLAP_MS: u64 = 280;
 const FINALIZE_LOOKBACK_MS: u64 = 1_200;
+/// How long capture may sit finished waiting on the speech engine before the
+/// pill explains why. The start-of-dictation GPU warmup normally lands well
+/// inside this, so the notice only fires for a genuinely cold engine.
+const ENGINE_WAIT_NOTICE_GRACE_MS: u64 = 1_500;
 const FW_MIN_DECODE_AUDIO_MS_DEFAULT: u64 = 280;
 const FINAL_DECODE_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 const FINAL_DECODE_TIMEOUT_MS_MIN: u64 = 8_000;
@@ -813,7 +826,6 @@ fn asr_integrity_metrics(raw_transcript: &str, final_transcript: &str) -> (f32, 
     (integrity.clamp(0.0, 100.0), raw_count, final_count)
 }
 
-
 fn should_reject_low_confidence_transcript_as_no_speech(
     use_faster_whisper: bool,
     captured_audio_ms: u64,
@@ -901,31 +913,44 @@ fn insertion_method_key(method: &InsertionMethod) -> &'static str {
     }
 }
 
+/// Diagnostics bucket for an insertion target's window title. Whole-word
+/// matching keeps "edge" from claiming "Knowledge Base - Notepad".
 fn classify_insertion_target(target_app: Option<&str>) -> &'static str {
+    const BROWSER_WORDS: &[&str] = &[
+        "chrome",
+        "edge",
+        "firefox",
+        "safari",
+        "google ai studio",
+        "aistudio.google",
+        "gemini",
+    ];
+    const EDITOR_WORDS: &[&str] = &[
+        "visual studio code",
+        "vscode",
+        "vs code",
+        "cursor",
+        "notepad",
+        "notes",
+    ];
+    const COLLAB_WORDS: &[&str] = &["slack", "notion"];
+
     let Some(app) = target_app else {
         return "unknown";
     };
     let normalized = app.to_ascii_lowercase();
-    if normalized.contains("chrome")
-        || normalized.contains("edge")
-        || normalized.contains("firefox")
-        || normalized.contains("safari")
-        || normalized.contains("google ai studio")
-        || normalized.contains("aistudio.google")
-        || normalized.contains("gemini")
-    {
+    let has_any = |words: &[&str]| {
+        words
+            .iter()
+            .any(|word| crate::insertion::title_contains_word(&normalized, word))
+    };
+    if has_any(BROWSER_WORDS) {
         return "browser";
     }
-    if normalized.contains("visual studio code")
-        || normalized.contains("vscode")
-        || normalized.contains("vs code")
-        || normalized.contains("cursor")
-        || normalized.contains("notepad")
-        || normalized.contains("notes")
-    {
+    if has_any(EDITOR_WORDS) {
         return "editor";
     }
-    if normalized.contains("slack") || normalized.contains("notion") {
+    if has_any(COLLAB_WORDS) {
         return "collab";
     }
     "desktop"
@@ -1516,7 +1541,9 @@ impl VoiceWaveController {
     /// first transcription doesn't pay a cold-start penalty (model deserialize
     /// + CUDA context init + CTranslate2 kernel compile, typically 2-5 s).
     /// Fire-and-forget — errors are logged, never propagated. Safe to call
-    /// before any hotkey press.
+    /// before any hotkey press. Never downloads: on first launch (default
+    /// model not on disk yet) the cache-only prefetch fails fast and the
+    /// onboarding download, with its progress UI, is the only fetch.
     pub async fn prewarm_active_model(&self) {
         let active_model = {
             let settings = self.settings.lock().await;
@@ -2029,10 +2056,7 @@ impl VoiceWaveController {
                 eprintln!("voicewave: global hotkey runtime unavailable: {err}");
                 // The duplicate-instance case has a fix the user can actually
                 // perform; everything else is a genuine "something broke".
-                let detail = if err
-                    .to_string()
-                    .contains("already owns the keyboard hook")
-                {
+                let detail = if err.to_string().contains("already owns the keyboard hook") {
                     "Another copy of VoiceWave is already running. Close it from the tray, then restart this one."
                 } else {
                     "Restart VoiceWave. If this continues, export diagnostics from Settings."
@@ -2334,7 +2358,9 @@ impl VoiceWaveController {
         app: AppHandle,
         payload: InsertTextRequest,
     ) -> Result<InsertResult, ControllerError> {
-        let (result, _record_id) = self.insert_text_with_polish_meta(app, payload, None).await?;
+        let (result, _record_id) = self
+            .insert_text_with_polish_meta(app, payload, None)
+            .await?;
         Ok(result)
     }
 
@@ -2358,29 +2384,53 @@ impl VoiceWaveController {
             .lock()
             .await
             .insert_text(payload.clone())?;
-        let record_id = self
-            .history_manager
-            .lock()
-            .await
-            .record_insertion(&result, &payload.text, polish_meta)?;
+        // Report a landed insertion BEFORE persisting history. The record is
+        // an encrypted atomic write with fsync, and a stalled disk once held
+        // the pill on "Finishing dictation..." for 4 minutes after a 5 ms
+        // paste (2026-09-18: NTFS logged a 224 s write latency on C:). The
+        // failure branch below still waits, because its message depends on
+        // whether the History record was written.
+        if result.success {
+            self.update_state(&app, VoiceWaveHudState::Inserted, result.message.clone())
+                .await;
+            let _ = app.emit("voicewave://insertion", result.clone());
+        }
+        // A history write failure must not turn a landed insertion into a
+        // reported failure (Error HUD, uncounted stats): the text is already
+        // in the target app, so log it and carry on without a record id.
+        let record_id = match self.history_manager.lock().await.record_insertion(
+            &result,
+            &payload.text,
+            polish_meta,
+        ) {
+            Ok(record_id) => record_id,
+            Err(err) => {
+                eprintln!("voicewave: could not record the insertion in history: {err}");
+                None
+            }
+        };
         if let Err(err) = app.emit_to(MAIN_WINDOW_LABEL, "voicewave://history-updated", ()) {
             eprintln!("history-updated emit failed: {err}");
         }
 
-        if result.success {
-            self.update_state(&app, VoiceWaveHudState::Inserted, result.message.clone())
+        if !result.success {
+            // Every method failed, clipboard-only included, so the text is
+            // neither in the target app nor on the clipboard. Say so with the
+            // Error state; the dictation flow's rescue pill carries the words
+            // and a Copy action, and History keeps them unless retention is Off.
+            let headline = if record_id.is_some() {
+                "Couldn't insert or copy the text. It's saved in History."
+            } else {
+                "Couldn't insert or copy the text."
+            };
+            let message = match result.message.as_deref() {
+                Some(reason) => format!("{headline} ({reason})"),
+                None => headline.to_string(),
+            };
+            self.update_state(&app, VoiceWaveHudState::Error, Some(message))
                 .await;
-        } else {
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Inserted,
-                result.message.clone().or(Some(
-                    "Insertion fallback used. Transcript preserved.".to_string(),
-                )),
-            )
-            .await;
+            let _ = app.emit("voicewave://insertion", result.clone());
         }
-        let _ = app.emit("voicewave://insertion", result.clone());
 
         Ok((result, record_id))
     }
@@ -2554,9 +2604,7 @@ impl VoiceWaveController {
                 progress: 1,
                 active: active_model == model_id,
                 installed: false,
-                message: Some(
-                    "Preparing Faster-Whisper runtime (Python + CTranslate2)...".to_string(),
-                ),
+                message: Some("Preparing the speech engine...".to_string()),
                 installed_model: None,
                 downloaded_bytes: Some(0),
                 total_bytes: Some(expected_total_bytes.max(1)),
@@ -2621,11 +2669,8 @@ impl VoiceWaveController {
             // fresh download (the worker it killed has already respawned).
             if cancel_token.is_cancelled() {
                 self.model_download_cancels.lock().await.remove(&model_id);
-                let status = faster_whisper_cancelled_status(
-                    &model_id,
-                    &active_model,
-                    expected_total_bytes,
-                );
+                let status =
+                    faster_whisper_cancelled_status(&model_id, &active_model, expected_total_bytes);
                 self.model_statuses
                     .lock()
                     .await
@@ -2682,7 +2727,8 @@ impl VoiceWaveController {
                 }
             });
 
-            let prefetch_result = prefetch_faster_whisper_model(&model_id).await;
+            let prefetch_result =
+                download_faster_whisper_model(&model_id, cancel_token.clone()).await;
             // The poller must be stopped and joined BEFORE any terminal status
             // is emitted, otherwise its next tick re-emits "downloading" over
             // the failed/cancelled status and freezes the UI again.
@@ -2739,23 +2785,64 @@ impl VoiceWaveController {
                 }
             };
             self.model_download_cancels.lock().await.remove(&model_id);
-            let installed = {
-                let mut manager = self.model_manager.lock().await;
-                manager.install_faster_whisper_model(&model_id, &prefetch.cache_hint_path)?
+            let install_result = self
+                .model_manager
+                .lock()
+                .await
+                .install_faster_whisper_model(&model_id, &prefetch.cache_hint_path);
+            let installed = match install_result {
+                Ok(installed) => installed,
+                Err(err) => {
+                    // Emit a terminal status before returning, or onboarding
+                    // sits on a frozen "downloading" bar with no Retry.
+                    eprintln!("voicewave: faster-whisper install failed for {model_id}: {err}");
+                    let (downloaded, progress) =
+                        faster_whisper_download_progress(&model_id, expected_total_bytes);
+                    let status = ModelStatus {
+                        model_id: model_id.clone(),
+                        state: ModelStatusState::Failed,
+                        progress,
+                        active: active_model == model_id,
+                        installed: false,
+                        message: Some(
+                            "The speech model download didn't finish cleanly. Press Retry to complete it."
+                                .to_string(),
+                        ),
+                        installed_model: None,
+                        downloaded_bytes: Some(downloaded),
+                        total_bytes: Some(expected_total_bytes.max(1)),
+                        resumable: false,
+                    };
+                    self.model_statuses
+                        .lock()
+                        .await
+                        .insert(model_id.clone(), status.clone());
+                    self.emit_model_status(&app, &status);
+                    return Err(err.into());
+                }
             };
+            // The download ran in its own worker; load the model into the
+            // shared dictation worker now if it's the active one, so the
+            // first dictation (onboarding's rehearsal) is warm.
+            if self.settings.lock().await.active_model == model_id {
+                let warm_model_id = model_id.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = prefetch_faster_whisper_model(&warm_model_id).await {
+                        eprintln!("voicewave: post-install warmup failed for {warm_model_id}: {err}");
+                    }
+                });
+            }
+            eprintln!(
+                "voicewave: installed {model_id} (load {} ms, cache hit {})",
+                prefetch.model_init_ms, prefetch.runtime_cache_hit
+            );
             let final_status = ModelStatus {
                 model_id: model_id.clone(),
                 state: ModelStatusState::Installed,
                 progress: 100,
                 active: active_model == model_id,
                 installed: true,
-                message: Some(
-                    format!(
-                        "Faster-Whisper model ready (cache hit: {}, init {} ms).",
-                        prefetch.runtime_cache_hit, prefetch.model_init_ms
-                    )
-                    .to_string(),
-                ),
+                message: Some("Speech model downloaded and ready.".to_string()),
                 installed_model: Some(installed),
                 downloaded_bytes: Some(expected_total_bytes.max(1)),
                 total_bytes: Some(expected_total_bytes.max(1)),
@@ -2881,10 +2968,9 @@ impl VoiceWaveController {
                 return Ok(status);
             };
             token.cancel();
-            // The prefetch is blocked inside the worker's WhisperModel() call
-            // and never reads stdin, so killing the process is the only way to
-            // abort it. The worker respawns (cold) on the next request.
-            kill_faster_whisper_workers();
+            // Kills only the dedicated download worker; the warm dictation
+            // worker keeps running.
+            cancel_faster_whisper_downloads();
             let expected_total_bytes: u64 = self
                 .model_manager
                 .lock()
@@ -3063,8 +3149,13 @@ impl VoiceWaveController {
         );
 
         if is_faster_whisper_model(&model_id) {
-            tauri::async_runtime::spawn(async {
-                let _ = ensure_faster_whisper_ready().await;
+            // Load the newly active model now (cache-only, so a model that
+            // isn't downloaded yet fails fast instead of fetching silently).
+            let warm_model_id = model_id.clone();
+            tauri::async_runtime::spawn(async move {
+                if ensure_faster_whisper_ready().await.is_ok() {
+                    let _ = prefetch_faster_whisper_model(&warm_model_id).await;
+                }
             });
         } else if cpu_runtime_pool_enabled() {
             let model_path = {
@@ -3352,10 +3443,7 @@ impl VoiceWaveController {
         self.stats_manager
             .lock()
             .await
-            .summary_for_window(
-                chrono::Local::now().date_naive(),
-                range_days,
-            )
+            .summary_for_window(chrono::Local::now().date_naive(), range_days)
     }
 
     pub async fn prune_history_now(&self, _app: AppHandle) -> Result<usize, ControllerError> {
@@ -3632,10 +3720,9 @@ impl VoiceWaveController {
                         }
                     }
                     MicGuardPlan::Restore { from_percent } => {
-                        let restored = tokio::task::spawn_blocking(
-                            input_volume::restore_default_input_volume,
-                        )
-                        .await;
+                        let restored =
+                            tokio::task::spawn_blocking(input_volume::restore_default_input_volume)
+                                .await;
                         match restored {
                             Ok(Ok(())) => {
                                 if let Ok(mut slot) = volume_slot.lock() {
@@ -3831,9 +3918,7 @@ impl VoiceWaveController {
                             None,
                         )
                         .await;
-                        let device_label = input_device
-                            .as_deref()
-                            .unwrap_or("system default");
+                        let device_label = input_device.as_deref().unwrap_or("system default");
                         let warmup_peak_msg = if threshold > 0.0 {
                             format!(
                                 " (warmup threshold {:.4}, full threshold {:.4})",
@@ -4041,8 +4126,35 @@ impl VoiceWaveController {
         }
         let decode_policy_reason = decode_policy_reasons.join("|");
         let mut fw_runtime_ready = false;
-        if let Some(task) = fw_ready_task {
-            match task.await {
+        if let Some(mut task) = fw_ready_task {
+            // Capture is done, but the engine may still be loading the model:
+            // dictating seconds after launch waits on the startup prefetch, and
+            // a crashed worker reloads in the background. That wait is real
+            // (no decode can start before the model is in memory) and used to
+            // be silent, so say what is happening. Releases that land on a
+            // warm engine never see this.
+            let grace = Duration::from_millis(ENGINE_WAIT_NOTICE_GRACE_MS);
+            let joined = if task.is_finished() {
+                task.await
+            } else {
+                match timeout(grace, &mut task).await {
+                    Ok(joined) => joined,
+                    Err(_) => {
+                        emit_pill_notice(
+                            &app,
+                            "info",
+                            "Loading the speech model",
+                            Some(
+                                "Your words are captured. Transcription starts as soon as it's ready."
+                                    .to_string(),
+                            ),
+                            5_000,
+                        );
+                        task.await
+                    }
+                }
+            };
+            match joined {
                 Ok(Ok(())) => {
                     fw_runtime_ready = true;
                 }
@@ -4220,6 +4332,24 @@ impl VoiceWaveController {
                 return Ok(());
             }
             Ok(Err(err)) => {
+                // The worker refuses to load a model that is not on disk yet
+                // (worker.py raises "... is not downloaded yet"). That is a
+                // setup state, not a decode failure: feeding it to the policy
+                // or the audio-pipeline fallback counters would degrade later
+                // dictations once the download finishes.
+                if err.to_string().contains("is not downloaded yet") {
+                    emit_pill_notice(
+                        &app,
+                        "warning",
+                        "Speech model isn't ready yet",
+                        Some("Finish the download in VoiceWave, then try again.".to_string()),
+                        4_000,
+                    );
+                    return Err(ControllerError::Runtime(
+                        "The speech model is still downloading. Finish the download in VoiceWave, then try again."
+                            .to_string(),
+                    ));
+                }
                 if mode == DictationMode::Microphone {
                     self.decode_policy
                         .lock()
@@ -4359,11 +4489,7 @@ impl VoiceWaveController {
             // Only spoken structural commands, dictionary stabilization, and
             // punctuation/capitalization apply — never filler removal, domain
             // corrections, format profiles, or code mode.
-            finalize_literal_transcript(
-                literal_input,
-                settings.spoken_edit_commands,
-                &custom_terms,
-            )
+            finalize_literal_transcript(literal_input, settings.spoken_edit_commands, &custom_terms)
         } else if entitlement.is_pro {
             let app_profile_behavior = Self::active_profile_behavior(&settings);
             finalize_pro_transcript(
@@ -4487,8 +4613,8 @@ impl VoiceWaveController {
                         // existing release_to_inserted_ms metric measures from.
                         let elapsed_since_release_ms = release_to_transcribing_ms
                             .saturating_add(transcribing_started.elapsed().as_millis() as u64);
-                        let remaining_budget_ms =
-                            WAIT_VALIDATED_RELEASE_BUDGET_MS.saturating_sub(elapsed_since_release_ms);
+                        let remaining_budget_ms = WAIT_VALIDATED_RELEASE_BUDGET_MS
+                            .saturating_sub(elapsed_since_release_ms);
                         if remaining_budget_ms == 0 {
                             // Decode alone consumed the budget (long dictation):
                             // insert the floor immediately, no attempt.
@@ -4614,9 +4740,10 @@ impl VoiceWaveController {
                 result.success,
                 insertion_method_key(&result.method).to_string(),
                 classify_insertion_target(result.target_app.as_deref()).to_string(),
-                // insert_text persisted a history record (with method and
-                // success) before returning, so the transcript-side write
-                // below must not duplicate it.
+                // insert_text already wrote the history record (with method
+                // and success), or logged why it could not; the record is in
+                // memory either way, so the transcript-side write below must
+                // not duplicate it.
                 true,
                 record_id,
             ),
@@ -4629,7 +4756,13 @@ impl VoiceWaveController {
                 .await;
                 self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
-                (false, "error".to_string(), "unknown".to_string(), false, None)
+                (
+                    false,
+                    "error".to_string(),
+                    "unknown".to_string(),
+                    false,
+                    None,
+                )
             }
         };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
@@ -4640,7 +4773,7 @@ impl VoiceWaveController {
                 if !had_snippet
                     && !previous.had_snippet
                     && inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
-                    <= CORRECTION_SESSION_WINDOW_MS
+                        <= CORRECTION_SESSION_WINDOW_MS
                 {
                     derive_correction_candidates(&previous.inserted_text, &inserted_text)
                 } else {
@@ -4709,10 +4842,9 @@ impl VoiceWaveController {
                     if stabilized.trim() == raw.trim() {
                         return;
                     }
-                    let Ok(restored) = restore_snippet_candidate(
-                        snippet_plan_for_polish.as_deref(),
-                        &stabilized,
-                    ) else {
+                    let Ok(restored) =
+                        restore_snippet_candidate(snippet_plan_for_polish.as_deref(), &stabilized)
+                    else {
                         return;
                     };
                     let polish_latency_ms = polish_started.elapsed().as_millis() as u64;
@@ -4771,8 +4903,7 @@ impl VoiceWaveController {
         // the background and, if the gate accepts it, record the candidate on
         // this dictation's History record (`polishedText` only — the outcome
         // stays `fallbackTimeout` and the target app is never touched).
-        if let (Some(handle), Some(record_id)) = (late_polish_handle, insertion_record_id.clone())
-        {
+        if let (Some(handle), Some(record_id)) = (late_polish_handle, insertion_record_id.clone()) {
             let history_manager = Arc::clone(&self.history_manager);
             let app_for_late = app.clone();
             let raw = final_transcript.clone();
@@ -4783,10 +4914,9 @@ impl VoiceWaveController {
                     if let Ok(stabilized) =
                         gate_polish_candidate(&raw, &candidate, &custom_terms_late, polish_profile)
                     {
-                        let Ok(restored) = restore_snippet_candidate(
-                            snippet_plan_late.as_deref(),
-                            &stabilized,
-                        ) else {
+                        let Ok(restored) =
+                            restore_snippet_candidate(snippet_plan_late.as_deref(), &stabilized)
+                        else {
                             return;
                         };
                         let update = PolishHistoryMeta {
@@ -4963,10 +5093,7 @@ impl VoiceWaveController {
                 correction_candidates_count: correction_candidates.len() as u32,
                 insertion_method: insertion_method.clone(),
                 insertion_target_class: insertion_target_class.clone(),
-                mic_input_volume_percent: mic_input_volume_slot
-                    .lock()
-                    .ok()
-                    .and_then(|slot| *slot),
+                mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
             },
         );
         // Always-on aggregate stats (counts and durations only, never text)
@@ -5081,13 +5208,10 @@ impl VoiceWaveController {
             // user's words. On the happy path insert_text already recorded and
             // emitted, and recording here again would double every dictation.
             if !insertion_history_recorded {
-                match history_manager
-                    .lock()
-                    .await
-                    .record_transcript_with_polish(
-                        &transcript_for_history,
-                        Some(&rescue_polish_meta),
-                    ) {
+                match history_manager.lock().await.record_transcript_with_polish(
+                    &transcript_for_history,
+                    Some(&rescue_polish_meta),
+                ) {
                     Ok(_record_id) => {
                         if let Err(err) = app_for_history.emit_to(
                             MAIN_WINDOW_LABEL,
@@ -5102,11 +5226,21 @@ impl VoiceWaveController {
                     }
                 }
             }
-            if let Err(err) = dictionary_manager.lock().await.queue_correction_candidates(
+            match dictionary_manager.lock().await.queue_correction_candidates(
                 &correction_candidates_for_dictionary,
                 &transcript_for_dictionary_preview,
             ) {
-                eprintln!("dictionary ingest failed: {err}");
+                Ok(added) if added > 0 => {
+                    if let Err(err) = app_for_history.emit_to(
+                        PILL_WINDOW_LABEL,
+                        "voicewave://dictionary-queue-changed",
+                        added,
+                    ) {
+                        eprintln!("dictionary-queue-changed emit failed: {err}");
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("dictionary ingest failed: {err}"),
             }
         });
 
@@ -5655,6 +5789,7 @@ mod tests {
                 label: "Add \"foo\"".to_string(),
                 value: Some("foo".to_string()),
             }),
+            recovery: false,
         };
         let json = serde_json::to_string(&payload).unwrap();
         // camelCase renaming on the payload's duration field survives.
@@ -6036,11 +6171,8 @@ mod tests {
         // includes the deliberate post-release capture tail, so with a 350 ms
         // tail every utterance measured ~360 ms and a flat 220-300 ms
         // threshold flagged 200/200 dictations as watchdog recoveries.
-        let threshold = effective_release_watchdog_threshold_ms(
-            AudioQualityBand::Good,
-            12_000,
-            350,
-        );
+        let threshold =
+            effective_release_watchdog_threshold_ms(AudioQualityBand::Good, 12_000, 350);
         assert!(
             threshold > 350,
             "threshold ({threshold}) must exceed the configured release tail"
@@ -6048,10 +6180,7 @@ mod tests {
         // The typical healthy case must NOT count as a recovery...
         assert!(!release_watchdog_recovered(363, threshold));
         // ...while a genuine stall still must.
-        assert!(release_watchdog_recovered(
-            350 + 700,
-            threshold
-        ));
+        assert!(release_watchdog_recovered(350 + 700, threshold));
     }
 
     #[test]

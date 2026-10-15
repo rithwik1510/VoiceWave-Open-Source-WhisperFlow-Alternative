@@ -1076,7 +1076,10 @@ mod tests {
 
     #[test]
     fn cleanup_prunes_leading_filler_and_recapitalizes() {
-        assert_eq!(cleanup("um, i think this works now"), "I think this works now.");
+        assert_eq!(
+            cleanup("um, i think this works now"),
+            "I think this works now."
+        );
     }
 
     #[test]
@@ -1337,11 +1340,7 @@ mod tests {
         use super::finalize_literal_transcript;
         let custom_terms = vec!["VoiceWave".to_string()];
         assert_eq!(
-            finalize_literal_transcript(
-                "voicewave is ready new line ship it",
-                true,
-                &custom_terms
-            ),
+            finalize_literal_transcript("voicewave is ready new line ship it", true, &custom_terms),
             "VoiceWave is ready\nship it."
         );
         // Structural commands off -> spoken phrase stays literal words.

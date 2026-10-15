@@ -28,6 +28,7 @@ import {
   listenVoicewaveLatency,
   listenVoicewaveModel,
   listenVoicewavePermission,
+  listenVoicewaveSettingsChanged,
   listenVoicewaveState,
   listenVoicewaveTranscript,
   listInstalledModels,
@@ -80,7 +81,7 @@ import {
 } from "../lib/tauri";
 import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
-import { trackAnonymousUsage } from "../lib/telemetry";
+import { ANALYTICS_CONSENT_VERSION, trackAnonymousUsage } from "../lib/telemetry";
 import type {
   AppProfileOverrides,
   CodeModeSettings,
@@ -158,7 +159,10 @@ const fallbackSettings: VoiceWaveSettings = {
   releaseTailMs: DEFAULT_RELEASE_TAIL_MS,
   decodeMode: DEFAULT_DECODE_MODE,
   diagnosticsOptIn: false,
-  anonymousUsageOptIn: false,
+  anonymousUsageOptIn: true,
+  // Current in the pre-load fallback for the same reason as
+  // onboardingCompleted below: the consent notice must not flash pre-load.
+  analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
   toggleHotkey: "Ctrl+Alt+X",
   pushToTalkHotkey: "Ctrl+Windows",
   preferClipboardFallback: false,
@@ -248,7 +252,9 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
     sha256: "000000000000000000000000000000000000000000000000000000001d10d5f9",
     license: "MIT (faster-whisper + model license)",
     downloadUrl: "faster-whisper://small.en",
-    signature: "local"
+    signature: "local",
+    recommended: true,
+    hardwareNote: "Fast on most laptops"
   },
   {
     modelId: "fw-large-v3-turbo",
@@ -259,7 +265,9 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
     sha256: "0000000000000000000000000000000000000000000000000000000060907f00",
     license: "MIT (faster-whisper + model license)",
     downloadUrl: "faster-whisper://large-v3-turbo",
-    signature: "local"
+    signature: "local",
+    recommended: false,
+    hardwareNote: "Higher accuracy, but much slower without an NVIDIA GPU"
   }
 ];
 
@@ -413,7 +421,8 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     releaseTailMs: clampReleaseTailMs(settings.releaseTailMs ?? DEFAULT_RELEASE_TAIL_MS),
     decodeMode: settings.decodeMode ?? DEFAULT_DECODE_MODE,
     diagnosticsOptIn: settings.diagnosticsOptIn ?? false,
-    anonymousUsageOptIn: settings.anonymousUsageOptIn ?? false,
+    anonymousUsageOptIn: settings.anonymousUsageOptIn ?? true,
+    analyticsConsentVersion: settings.analyticsConsentVersion ?? 0,
     formatProfile: settings.formatProfile ?? "default",
     activeDomainPacks: settings.activeDomainPacks ?? [],
     appProfileOverrides: settings.appProfileOverrides ?? fallbackSettings.appProfileOverrides,
@@ -479,7 +488,7 @@ function deriveModelStatuses(
         progress: installedModel ? 100 : 0,
         active: item.modelId === activeModel,
         installed: Boolean(installedModel),
-        message: installedModel ? "Installed and checksum verified." : "Not installed.",
+        message: installedModel ? "Installed. All model files are present." : "Not installed.",
         installedModel,
         downloadedBytes: installedModel ? installedModel.sizeBytes : 0,
         totalBytes: item.sizeBytes,
@@ -1224,8 +1233,14 @@ export function useVoiceWave() {
     [settings, tauriAvailable]
   );
 
+  // Onboarding shows the analytics disclosure on its first screen, so finishing
+  // or skipping it also counts as having seen the notice.
   const completeOnboarding = useCallback(async () => {
-    const nextSettings = { ...settings, onboardingCompleted: true };
+    const nextSettings = {
+      ...settings,
+      onboardingCompleted: true,
+      analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+    };
     setSettings(nextSettings);
     if (!tauriAvailable) {
       return;
@@ -1345,6 +1360,32 @@ export function useVoiceWave() {
   const setAnonymousUsageOptIn = useCallback(
     async (enabled: boolean) => {
       const nextSettings = { ...settings, anonymousUsageOptIn: enabled };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(
+          persistErr instanceof Error
+            ? persistErr.message
+            : "Failed to update anonymous usage sharing"
+        );
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  // Existing-user consent notice: records the choice and marks the notice
+  // seen in one save so it can never show twice.
+  const resolveAnalyticsConsent = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = {
+        ...settings,
+        anonymousUsageOptIn: enabled,
+        analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+      };
       setSettings(nextSettings);
       if (!tauriAvailable) {
         return;
@@ -2016,15 +2057,19 @@ export function useVoiceWave() {
       return;
     }
 
-    let stateUnlisten: (() => void) | null = null;
-    let transcriptUnlisten: (() => void) | null = null;
-    let insertionUnlisten: (() => void) | null = null;
-    let permissionUnlisten: (() => void) | null = null;
-    let hotkeyUnlisten: (() => void) | null = null;
-    let modelUnlisten: (() => void) | null = null;
-    let audioQualityUnlisten: (() => void) | null = null;
-    let latencyUnlisten: (() => void) | null = null;
-    let historyUnlisten: (() => void) | null = null;
+    // This effect re-runs on every active-model change (refreshPhase3Data
+    // depends on it), so cleanup can land while init is still awaiting. A
+    // listener that resolves after cleanup is released on the spot.
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const keep = async (pending: Promise<() => void>) => {
+      const unlisten = await pending;
+      if (disposed) {
+        unlisten();
+      } else {
+        unlisteners.push(unlisten);
+      }
+    };
 
     void (async () => {
       try {
@@ -2047,6 +2092,9 @@ export function useVoiceWave() {
           getDiagnosticsStatus(),
           getEntitlementSnapshot()
         ]);
+        if (disposed) {
+          return;
+        }
         const safeLoadedSettings = normalizeSettings({
           ...loadedSettings,
           diagnosticsOptIn: diagnostics.optIn
@@ -2068,8 +2116,11 @@ export function useVoiceWave() {
       } catch (loadErr) {
         setError(loadErr instanceof Error ? loadErr.message : "Failed to initialize VoiceWave runtime.");
       }
+      if (disposed) {
+        return;
+      }
 
-      stateUnlisten = await listenVoicewaveState(({ controlMode, message, state }) => {
+      await keep(listenVoicewaveState(({ controlMode, message, state }) => {
         setSnapshot((prev) => ({
           ...prev,
           state,
@@ -2080,9 +2131,9 @@ export function useVoiceWave() {
         } else if (state !== "error") {
           setError(null);
         }
-      });
+      }));
 
-      transcriptUnlisten = await listenVoicewaveTranscript((event) => {
+      await keep(listenVoicewaveTranscript((event) => {
         setSnapshot((prev) => ({
           ...prev,
           lastPartial: event.isFinal ? prev.lastPartial : event.text,
@@ -2091,23 +2142,23 @@ export function useVoiceWave() {
         if (event.isFinal && event.text.trim()) {
           void trackAnonymousUsage(settingsRef.current.anonymousUsageOptIn).catch(() => undefined);
         }
-      });
+      }));
 
-      insertionUnlisten = await listenVoicewaveInsertion((result) => {
+      await keep(listenVoicewaveInsertion((result) => {
         setLastInsertion(result);
         void refreshRecentInsertions();
         void refreshPhase3Data();
-      });
+      }));
 
-      permissionUnlisten = await listenVoicewavePermission((payload) => {
+      await keep(listenVoicewavePermission((payload) => {
         setPermissions(payload);
-      });
+      }));
 
-      hotkeyUnlisten = await listenVoicewaveHotkey((payload) => {
+      await keep(listenVoicewaveHotkey((payload) => {
         setLastHotkeyEvent(payload);
-      });
+      }));
 
-      modelUnlisten = await listenVoicewaveModel((payload: ModelEvent) => {
+      await keep(listenVoicewaveModel((payload: ModelEvent) => {
         if (typeof payload.downloadedBytes === "number") {
           const now = Date.now();
           const last = speedSamples.current[payload.modelId];
@@ -2143,48 +2194,29 @@ export function useVoiceWave() {
             resumable: payload.state !== "installed" && !isFasterWhisperModelId(payload.modelId)
           }
         }));
-      });
+      }));
 
-      audioQualityUnlisten = await listenVoicewaveAudioQuality((payload: AudioQualityReport) => {
+      await keep(listenVoicewaveAudioQuality((payload: AudioQualityReport) => {
         setAudioQualityReport(payload);
-      });
+      }));
 
-      latencyUnlisten = await listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
+      await keep(listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
-      });
+      }));
 
-      historyUnlisten = await listenVoicewaveHistoryUpdated(() => {
+      await keep(listenVoicewaveHistoryUpdated(() => {
         void refreshSessionHistory();
-      });
+      }));
+
+      await keep(listenVoicewaveSettingsChanged((freshSettings) => {
+        setSettings(normalizeSettings(freshSettings));
+      }));
     })();
 
     return () => {
-      if (stateUnlisten) {
-        stateUnlisten();
-      }
-      if (transcriptUnlisten) {
-        transcriptUnlisten();
-      }
-      if (insertionUnlisten) {
-        insertionUnlisten();
-      }
-      if (permissionUnlisten) {
-        permissionUnlisten();
-      }
-      if (hotkeyUnlisten) {
-        hotkeyUnlisten();
-      }
-      if (modelUnlisten) {
-        modelUnlisten();
-      }
-      if (audioQualityUnlisten) {
-        audioQualityUnlisten();
-      }
-      if (latencyUnlisten) {
-        latencyUnlisten();
-      }
-      if (historyUnlisten) {
-        historyUnlisten();
+      disposed = true;
+      for (const unlisten of unlisteners) {
+        unlisten();
       }
       if (tauriAvailable) {
         void stopMicLevelMonitor();
@@ -2424,6 +2456,7 @@ export function useVoiceWave() {
     setSpokenEditCommands,
     completeOnboarding,
     restartOnboarding,
+    resolveAnalyticsConsent,
     setLlmPolishEnabled,
     polishModelProgress,
     updateHotkeys,

@@ -572,7 +572,8 @@ mod tests {
     use crate::settings::VoiceWaveSettings;
 
     fn test_manager(name: &str) -> DiagnosticsManager {
-        let base = std::env::temp_dir().join(format!("voicewave-diagnostics-{name}-{}", now_utc_ms()));
+        let base =
+            std::env::temp_dir().join(format!("voicewave-diagnostics-{name}-{}", now_utc_ms()));
         let store_path = base.with_extension("json");
         let key_path = base.with_extension("key");
         let export_dir = std::env::temp_dir().join(format!("voicewave-diagnostics-export-{name}"));

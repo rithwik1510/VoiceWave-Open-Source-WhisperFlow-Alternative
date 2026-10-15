@@ -39,8 +39,7 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// Repo-relative dev path to the prototype 1.5B GGUF. Production distribution
 /// (a signed model in the catalog) is a follow-up; do NOT hardcode an absolute
 /// user path here.
-const DEV_MODEL_REL_PATH: &str =
-    "scripts/llm-polish/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf";
+const DEV_MODEL_REL_PATH: &str = "scripts/llm-polish/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf";
 
 /// The polish model file name, shared by the dev path and the shipped
 /// download. Kept in sync with DEV_MODEL_REL_PATH's tail.
@@ -553,9 +552,7 @@ fn resolve_model_path() -> Option<PathBuf> {
 /// and renames on success, so an interrupted download never leaves a truncated
 /// file that `resolve_model_path` would treat as installed. Idempotent: returns
 /// immediately if the model is already present.
-pub fn download_polish_model<F: FnMut(u64, u64)>(
-    mut on_progress: F,
-) -> Result<PathBuf, String> {
+pub fn download_polish_model<F: FnMut(u64, u64)>(mut on_progress: F) -> Result<PathBuf, String> {
     if let Some(existing) = resolve_model_path() {
         return Ok(existing);
     }

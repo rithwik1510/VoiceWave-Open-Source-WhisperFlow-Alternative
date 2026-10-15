@@ -394,8 +394,7 @@ impl StatsManager {
             if day.dictations > 0 {
                 summary.active_days += 1;
             }
-            summary.words_cleaned_up +=
-                day.raw_words.saturating_sub(day.final_words);
+            summary.words_cleaned_up += day.raw_words.saturating_sub(day.final_words);
             for (class, count) in &day.app_classes {
                 *app_class_totals.entry(class.clone()).or_default() += count;
             }
@@ -420,8 +419,7 @@ impl StatsManager {
         }
         summary.time_saved_ms_all_time =
             typing_ms(summary.all_time_words).saturating_sub(summary.speaking_ms);
-        summary.time_saved_ms_month =
-            typing_ms(summary.month_words).saturating_sub(month_audio_ms);
+        summary.time_saved_ms_month = typing_ms(summary.month_words).saturating_sub(month_audio_ms);
 
         // Heatmap window + streak math over full history.
         summary.days = self.day_buckets_for_today(today, normalized_range);
@@ -620,8 +618,24 @@ mod tests {
     #[test]
     fn gates_reject_empty_and_too_short_dictations() {
         let mut stats = StatsManager::in_memory();
-        assert!(!stats.ingest(ts_for(NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()), 0, 0, 10_000, None, None, None));
-        assert!(!stats.ingest(ts_for(NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()), 5, 5, 1_000, None, None, None));
+        assert!(!stats.ingest(
+            ts_for(NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()),
+            0,
+            0,
+            10_000,
+            None,
+            None,
+            None
+        ));
+        assert!(!stats.ingest(
+            ts_for(NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()),
+            5,
+            5,
+            1_000,
+            None,
+            None,
+            None
+        ));
         assert_eq!(stats.summary().all_time_words, 0);
     }
 
@@ -637,7 +651,15 @@ mod tests {
         // (June 30); 30 words / 20s just outside the week (June 29, so it
         // lands in the previous-month bucket along with June 15).
         assert!(stats.ingest(ts_for(today), 100, 104, 60_000, Some("editor"), None, None));
-        assert!(stats.ingest(ts_for(within_week), 50, 50, 30_000, Some("browser"), None, None));
+        assert!(stats.ingest(
+            ts_for(within_week),
+            50,
+            50,
+            30_000,
+            Some("browser"),
+            None,
+            None
+        ));
         assert!(stats.ingest(ts_for(outside_week), 30, 30, 20_000, None, None, None));
         assert!(stats.ingest(ts_for(prev_month_day), 40, 40, 25_000, None, None, None));
 
@@ -645,8 +667,8 @@ mod tests {
         assert_eq!(summary.today_words, 100);
         assert_eq!(summary.week_words, 150);
         assert_eq!(summary.month_words, 100); // July: only today's dictation
-        // June 30 + June 29 + June 15 — the rolling week and the calendar
-        // month overlap by design, so June 30 counts in both.
+                                              // June 30 + June 29 + June 15 — the rolling week and the calendar
+                                              // month overlap by design, so June 30 counts in both.
         assert_eq!(summary.prev_month_words, 120);
         assert_eq!(summary.all_time_words, 220);
         assert_eq!(summary.all_time_dictations, 4);
@@ -758,11 +780,22 @@ mod tests {
         // Only two days of data inside a 5-day window.
         stats.ingest(ts_for(today), 10, 10, 6_000, Some("editor"), None, None);
         let five_days_ago = today - Duration::days(4);
-        stats.ingest(ts_for(five_days_ago), 20, 20, 7_000, Some("browser"), None, None);
+        stats.ingest(
+            ts_for(five_days_ago),
+            20,
+            20,
+            7_000,
+            Some("browser"),
+            None,
+            None,
+        );
 
         let buckets = stats.day_buckets_for_today(today, 5);
         assert_eq!(buckets.len(), 5);
-        assert_eq!(buckets[0].date, (today - Duration::days(4)).format("%Y-%m-%d").to_string());
+        assert_eq!(
+            buckets[0].date,
+            (today - Duration::days(4)).format("%Y-%m-%d").to_string()
+        );
         assert_eq!(buckets[4].date, today.format("%Y-%m-%d").to_string());
         assert_eq!(buckets[0].words, 20);
         assert_eq!(buckets[0].dictations, 1);
@@ -780,7 +813,10 @@ mod tests {
     fn top_app_classes_are_descending_and_capped() {
         let mut stats = StatsManager::in_memory();
         let today = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
-        for (i, class) in ["editor", "browser", "collab", "terminal", "chat"].iter().enumerate() {
+        for (i, class) in ["editor", "browser", "collab", "terminal", "chat"]
+            .iter()
+            .enumerate()
+        {
             let words = (u32::try_from(i).unwrap() + 1) * 5;
             stats.ingest(ts_for(today), words, words, 6_000, Some(class), None, None);
         }
@@ -797,8 +833,24 @@ mod tests {
         let mut stats = StatsManager::in_memory();
         let today = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
         stats.ingest(ts_for(today), 10, 10, 6_000, None, None, None);
-        stats.ingest(ts_for(today - Duration::days(1)), 10, 10, 6_000, None, None, None);
-        stats.ingest(ts_for(today - Duration::days(2)), 10, 10, 6_000, None, None, None);
+        stats.ingest(
+            ts_for(today - Duration::days(1)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
+        stats.ingest(
+            ts_for(today - Duration::days(2)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
         assert_eq!(stats.current_streak_for_today(today), 3);
     }
 
@@ -807,8 +859,24 @@ mod tests {
         let mut stats = StatsManager::in_memory();
         let today = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
         // No dictation today, but yesterday and before are active.
-        stats.ingest(ts_for(today - Duration::days(1)), 10, 10, 6_000, None, None, None);
-        stats.ingest(ts_for(today - Duration::days(2)), 10, 10, 6_000, None, None, None);
+        stats.ingest(
+            ts_for(today - Duration::days(1)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
+        stats.ingest(
+            ts_for(today - Duration::days(2)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
         assert_eq!(stats.current_streak_for_today(today), 2);
     }
 
@@ -818,8 +886,24 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
         // Active yesterday and today, but a gap two days ago.
         stats.ingest(ts_for(today), 10, 10, 6_000, None, None, None);
-        stats.ingest(ts_for(today - Duration::days(1)), 10, 10, 6_000, None, None, None);
-        stats.ingest(ts_for(today - Duration::days(3)), 10, 10, 6_000, None, None, None);
+        stats.ingest(
+            ts_for(today - Duration::days(1)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
+        stats.ingest(
+            ts_for(today - Duration::days(3)),
+            10,
+            10,
+            6_000,
+            None,
+            None,
+            None,
+        );
         assert_eq!(stats.current_streak_for_today(today), 2);
     }
 
@@ -829,11 +913,27 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
         // Run of 3, then a gap, then a run of 5.
         for offset in 0..3 {
-            stats.ingest(ts_for(today - Duration::days(offset)), 10, 10, 6_000, None, None, None);
+            stats.ingest(
+                ts_for(today - Duration::days(offset)),
+                10,
+                10,
+                6_000,
+                None,
+                None,
+                None,
+            );
         }
         // Gap at offset 3.
         for offset in 4..9 {
-            stats.ingest(ts_for(today - Duration::days(offset)), 10, 10, 6_000, None, None, None);
+            stats.ingest(
+                ts_for(today - Duration::days(offset)),
+                10,
+                10,
+                6_000,
+                None,
+                None,
+                None,
+            );
         }
         assert_eq!(stats.longest_streak(), 5);
     }
@@ -853,20 +953,27 @@ mod tests {
         stats.ingest(ts_for(today), 10, 10, 6_000, None, Some(-0.1), Some(0.05));
         let summary = stats.summary_for_today(today);
         assert_eq!(summary.range_days, 30);
-        assert!(summary.clarity_score >= 75, "expected high clarity, got {}", summary.clarity_score);
+        assert!(
+            summary.clarity_score >= 75,
+            "expected high clarity, got {}",
+            summary.clarity_score
+        );
 
         // Very unclear -> score should be low-ish (clamped >= 0).
         let mut stats2 = StatsManager::in_memory();
         stats2.ingest(ts_for(today), 10, 10, 6_000, None, Some(-0.95), Some(0.49));
         let summary2 = stats2.summary_for_today(today);
-        assert!(summary2.clarity_score <= 10, "expected low clarity, got {}", summary2.clarity_score);
+        assert!(
+            summary2.clarity_score <= 10,
+            "expected low clarity, got {}",
+            summary2.clarity_score
+        );
         // Out-of-range inputs still clamp into 0..100.
         let mut stats3 = StatsManager::in_memory();
         stats3.ingest(ts_for(today), 10, 10, 6_000, None, Some(-5.0), Some(2.0));
         let summary3 = stats3.summary_for_today(today);
         assert!((0..=100).contains(&summary3.clarity_score));
     }
-
 
     /// Minimal valid LatencyMetricRecord for struct-update syntax in tests
     /// (only serde-required fields; everything else takes serde defaults).
