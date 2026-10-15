@@ -5,6 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [0.6.1] – 2026-10-15
+
+First-run reliability, faster first dictation, and safer storage.
+
+### Fixed
+
+- **Model download progress no longer sits at 0%.** The speech-model download
+  now grows the progress bar steadily instead of jumping from almost nothing
+  to done at the very end, and Cancel keeps what was fetched so Install
+  genuinely resumes.
+- **No hidden background download on first launch.** VoiceWave no longer
+  starts downloading the default model before you choose one, and it no
+  longer contacts Hugging Face on every launch.
+- **First dictation after launch is much faster.** Startup could load the
+  speech model twice, which made the first dictation take 10–20 seconds. It
+  now loads once, and if the model is still loading when you finish speaking,
+  the pill says so.
+- Dictating before the model has finished downloading now explains that the
+  model isn't ready yet, instead of waiting about 45 seconds and failing.
+- If text could not be inserted or copied, the pill now shows an error
+  instead of "Inserted".
+- The pill shows Inserted as soon as the text lands, even if saving History
+  is slow.
+- Focused-app detection uses the process name, so window titles such as
+  "Knowledge base" are no longer mistaken for Microsoft Edge.
+- Emoji are typed as a single unit and can no longer be split by other input.
+- A briefly locked encryption key file (for example during an antivirus scan)
+  can no longer cause your history, dictionary, or snippets to be reset. An
+  existing key is never overwritten.
+- History now keeps up to 1,000 recent dictations under every retention
+  setting (previously 200), and the Settings page says so. Starred entries
+  export with a ★.
+
+### Changed
+
+- **Model recommendation per PC.** Setup and the Models page recommend the
+  speech model that suits your hardware and note when Large Turbo will be
+  slow on this PC.
+- Installed models are checked for completeness (all model files present).
+  The previous "checksum verified" message was inaccurate and has been
+  removed.
+- Lower memory use: the AI polish worker reserves about 450 MB less memory,
+  and the speech worker no longer loads unused video codecs.
+
+- **Anonymous usage count is now on by default for new installs.** First-run
+  setup shows what is counted, with a switch to turn it off before the first
+  dictation. Existing users are asked once (Keep on / Turn off); a stored
+  "off" is never flipped without that choice, and users who had already
+  turned it on are not asked again.
+- What is sent is unchanged: a random installation identifier, app version,
+  GitHub distribution channel, one activation marker, and at most one active
+  marker per day. Audio, transcripts, account identity, filenames, settings,
+  and device details are never sent. It can be turned off anytime in
+  Settings → Diagnostics.
+
+---
+
 ## [0.6.0] – 2026-08-12
 
 Hands-free dictation, full dark mode, and deeper usage insights.

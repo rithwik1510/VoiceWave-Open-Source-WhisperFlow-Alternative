@@ -61,6 +61,21 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 
 ---
 
+## What's New in 0.6.1
+
+**First-run reliability and a faster first dictation**
+
+1. The speech-model download shows real progress, and Cancel keeps what was
+   fetched so Install resumes.
+1. No hidden download on first launch, and the first dictation after launch no
+   longer loads the model twice (previously 10–20 seconds).
+1. Setup recommends the model that suits your PC and notes when Large Turbo
+   will be slow on it.
+1. Safer storage: a briefly locked key file can no longer reset your history,
+   dictionary, or snippets.
+1. The anonymous usage count is on by default for new installs and can be
+   turned off during setup or in Settings. Existing users are asked once.
+
 ## What's New in 0.6.0
 
 **Hands-free dictation, dark mode, and deeper insights**
@@ -230,7 +245,7 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 | ![Local-only](docs/assets/readme/icon-local-only.svg) | Local-Only Privacy         | Production path has no outbound audio transport and no cloud transcription rewrite path for v1.                               |
 | ![Runtime](docs/assets/readme/icon-runtime.svg)       | Deterministic Runtime Flow | Audio capture, inference orchestration, insertion, and persistence are handled in Rust services behind Tauri commands/events. |
 | ![Insertion](docs/assets/readme/icon-insertion.svg)   | Fallback-Safe Insertion    | Insertion engine prioritizes direct insertion and degrades to clipboard/history fallback to preserve user text.               |
-| ![Models](docs/assets/readme/icon-models.svg)         | Verified Model Lifecycle   | Model install/switch includes cataloging, checksum verification, and recommendation logic.                                    |
+| ![Models](docs/assets/readme/icon-models.svg)         | Verified Model Lifecycle   | Model install/switch includes cataloging, completeness checks (all model files present), and recommendation logic.            |
 
 ## ![Architecture](docs/assets/readme/section-architecture.svg) Runtime Architecture
 
@@ -245,7 +260,7 @@ Core modules:
 1. `inference-worker` (whisper.cpp integration + cancellable jobs)
 1. `insertion-engine` (direct/clipboard/history reliability chain)
 1. `hotkey-manager` (global binding lifecycle)
-1. `model-manager` (catalog/download/checksum/health)
+1. `model-manager` (catalog/download/completeness check/health)
 1. `persistence` (local settings/history/stats)
 1. `diagnostics` (redacted export, opt-in)
 1. `experience-state` (shared state contract for UX)
@@ -392,9 +407,10 @@ Reference: [docs/monetization.md](docs/monetization.md)
 1. Local-only ASR and deterministic local post-processing in current monetization architecture.
 1. Model/update verification paths are documented in phase evidence.
 1. Diagnostics export is user-triggered and revocable.
-1. Anonymous activated-install analytics is off by default. If explicitly enabled, VoiceWave sends only a
-   random installation identifier, app version, first-success marker, and once-per-day active marker — never
-   audio, transcript text, account identity, filenames, or settings.
+1. Anonymous activated-install analytics is **on by default** and can be turned off in onboarding or
+   Settings → Diagnostics. Existing installs are asked once before anything is sent. VoiceWave sends only a
+   random installation ID, app version, distribution channel, a first-success marker, and a once-per-day
+   active marker via TelemetryDeck — never audio, transcript text, account identity, filenames, or settings.
 
 References:
 
