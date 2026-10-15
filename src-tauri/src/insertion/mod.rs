@@ -73,6 +73,13 @@ pub struct BackendInsertSuccess {
 pub trait InsertionBackend: Send {
     fn detect_target_app(&mut self) -> Option<String>;
 
+    /// Executable file name of the foreground process (e.g. "msedge.exe"),
+    /// when it can be resolved. Classification prefers it over the window
+    /// title, which is free text the user's document controls.
+    fn detect_target_process(&mut self) -> Option<String> {
+        None
+    }
+
     fn direct_insert(
         &mut self,
         text: &str,
@@ -139,9 +146,16 @@ impl InsertionEngine {
             .clone()
             .or_else(|| self.backend.detect_target_app());
         let target_ref = resolved_target.as_deref();
+        // An explicit target names some other window, so the foreground
+        // process says nothing about it; classify by that name alone.
+        let target_process = if request.target_app.is_some() {
+            None
+        } else {
+            self.backend.detect_target_process()
+        };
 
-        let prefer_clipboard =
-            request.prefer_clipboard || should_auto_prefer_clipboard(&request.text, target_ref);
+        let prefer_clipboard = request.prefer_clipboard
+            || should_auto_prefer_clipboard(&request.text, target_ref, target_process.as_deref());
 
         let method_order = if request.force_clipboard_only {
             vec![InsertionMethod::ClipboardOnly]
@@ -280,7 +294,11 @@ impl InsertionEngine {
     }
 }
 
-fn should_auto_prefer_clipboard(text: &str, target_app: Option<&str>) -> bool {
+fn should_auto_prefer_clipboard(
+    text: &str,
+    target_app: Option<&str>,
+    target_process: Option<&str>,
+) -> bool {
     const LONG_TEXT_THRESHOLD: usize = 48;
     const UNKNOWN_TARGET_THRESHOLD: usize = 1;
     if text.chars().count() >= LONG_TEXT_THRESHOLD {
@@ -290,22 +308,65 @@ fn should_auto_prefer_clipboard(text: &str, target_app: Option<&str>) -> bool {
     let Some(app) = target_app else {
         return text.chars().count() >= UNKNOWN_TARGET_THRESHOLD;
     };
-    is_clipboard_preferred_target(app)
+    // The process is authoritative when known: a Notepad window titled
+    // "cursor.md" is still Notepad. The title is only the fallback.
+    match target_process {
+        Some(exe) => is_clipboard_preferred_process(exe),
+        None => is_clipboard_preferred_title(app),
+    }
 }
 
-fn is_clipboard_preferred_target(app: &str) -> bool {
+/// Apps where synthetic typing is flaky (Electron editors, browsers, web
+/// chat apps), identified by executable. Gemini / AI Studio run inside a
+/// browser, so the browser executables cover them.
+fn is_clipboard_preferred_process(exe_name: &str) -> bool {
+    const CLIPBOARD_PREFERRED_EXES: &[&str] = &[
+        "code.exe",
+        "code - insiders.exe",
+        "cursor.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "slack.exe",
+        "notion.exe",
+    ];
+    let lowered = exe_name.to_ascii_lowercase();
+    CLIPBOARD_PREFERRED_EXES
+        .iter()
+        .any(|candidate| lowered == *candidate)
+}
+
+/// Title fallback for [`is_clipboard_preferred_process`], matched on whole
+/// words so "edge" does not fire on "Knowledge Base - Notepad".
+fn is_clipboard_preferred_title(app: &str) -> bool {
+    const CLIPBOARD_PREFERRED_TITLE_WORDS: &[&str] = &[
+        "visual studio code",
+        "vscode",
+        "cursor",
+        "chrome",
+        "edge",
+        "firefox",
+        "google ai studio",
+        "aistudio.google",
+        "gemini",
+        "slack",
+        "notion",
+    ];
     let normalized = app.to_ascii_lowercase();
-    normalized.contains("visual studio code")
-        || normalized.contains("vscode")
-        || normalized.contains("cursor")
-        || normalized.contains("chrome")
-        || normalized.contains("edge")
-        || normalized.contains("firefox")
-        || normalized.contains("google ai studio")
-        || normalized.contains("aistudio.google")
-        || normalized.contains("gemini")
-        || normalized.contains("slack")
-        || normalized.contains("notion")
+    CLIPBOARD_PREFERRED_TITLE_WORDS
+        .iter()
+        .any(|word| title_contains_word(&normalized, word))
+}
+
+/// True when `word` occurs in `lowered_title` with no letter or digit
+/// directly on either side, so "edge" matches "Microsoft Edge" but not
+/// "Knowledge". Both arguments must already be lowercase.
+pub fn title_contains_word(lowered_title: &str, word: &str) -> bool {
+    lowered_title.match_indices(word).any(|(start, _)| {
+        let before = lowered_title[..start].chars().next_back();
+        let after = lowered_title[start + word.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Executable names of terminal hosts where SendInput keystroke injection
@@ -375,7 +436,9 @@ fn foreground_process_exe_name() -> Option<String> {
     let mut buffer = [0u16; 1024];
     let mut len = buffer.len() as u32;
     // SAFETY: handle is valid, buffer/len describe a real writable buffer.
-    let ok = unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len) };
+    let ok = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len)
+    };
     // SAFETY: handle came from OpenProcess above.
     unsafe { CloseHandle(handle) };
     if ok == 0 || len == 0 {
@@ -489,12 +552,12 @@ fn foreground_is_dangerous_for_send_input(window_title: Option<&str>) -> bool {
     // cause the dictation to route through the clipboard fallback instead
     // of typing keystrokes into the foreground app.
     const DANGEROUS_TITLE_FRAGMENTS: &[&str] = &[
-        "user account control",      // UAC prompt (class #32770 with consent.exe)
-        "windows security",          // Windows Security Center prompts
-        "credential manager",        // stored credentials UI
-        "enter your credentials",    // network / RDP credential prompt
-        "enter your pin",            // Windows Hello PIN
-        "sign in to windows",        // lock screen / login
+        "user account control",   // UAC prompt (class #32770 with consent.exe)
+        "windows security",       // Windows Security Center prompts
+        "credential manager",     // stored credentials UI
+        "enter your credentials", // network / RDP credential prompt
+        "enter your pin",         // Windows Hello PIN
+        "sign in to windows",     // lock screen / login
     ];
     DANGEROUS_TITLE_FRAGMENTS
         .iter()
@@ -535,6 +598,18 @@ impl InsertionBackend for PlatformInsertionBackend {
             } else {
                 Some(trimmed.to_string())
             }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+
+    fn detect_target_process(&mut self) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            foreground_process_exe_name()
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -671,43 +746,44 @@ fn send_unicode_text(text: &str) -> Result<(), String> {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     };
 
-    for code_unit in text.encode_utf16() {
-        let mut inputs = [
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: 0,
-                        wScan: code_unit,
-                        dwFlags: KEYEVENTF_UNICODE,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
+    let key = |code_unit: u16, flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: code_unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
             },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: 0,
-                        wScan: code_unit,
-                        dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            },
-        ];
+        },
+    };
 
-        // SAFETY: INPUT payload is fully initialized and SendInput is called with a valid pointer.
+    // KEYEVENTF_UNICODE types one UTF-16 code unit per down/up pair, so a
+    // non-BMP character (emoji) is its two surrogates sent in order. Both go
+    // in one SendInput call: only events within a single call are guaranteed
+    // not to interleave with other input, and a failure never strands half
+    // a pair in the target.
+    let mut units = [0_u16; 2];
+    for character in text.chars() {
+        let mut inputs = [key(0, 0); 4];
+        let mut count = 0;
+        for &code_unit in character.encode_utf16(&mut units).iter() {
+            inputs[count] = key(code_unit, KEYEVENTF_UNICODE);
+            inputs[count + 1] = key(code_unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+            count += 2;
+        }
+
+        // SAFETY: the first `count` INPUTs are fully initialized and SendInput
+        // is called with a valid pointer and that length.
         let sent = unsafe {
             SendInput(
-                inputs.len() as u32,
+                count as u32,
                 inputs.as_mut_ptr(),
                 std::mem::size_of::<INPUT>() as i32,
             )
         };
-        if sent != inputs.len() as u32 {
+        if sent != count as u32 {
             return Err(format!(
                 "SendInput failed while typing text: {}",
                 std::io::Error::last_os_error()
@@ -1183,7 +1259,7 @@ mod tests {
             text: "hello".to_string(),
             target_app: Some("Notepad".to_string()),
             prefer_clipboard: false,
-                force_clipboard_only: false,
+            force_clipboard_only: false,
         });
 
         let first = engine.undo_last();
@@ -1200,7 +1276,7 @@ mod tests {
             text: "hello".to_string(),
             target_app: Some("Notepad".to_string()),
             prefer_clipboard: false,
-                force_clipboard_only: false,
+            force_clipboard_only: false,
         });
 
         let result = engine.undo_last();
@@ -1238,7 +1314,7 @@ mod tests {
                         text: format!("matrix run {idx} for {app}"),
                         target_app: Some(app.to_string()),
                         prefer_clipboard: false,
-                force_clipboard_only: false,
+                        force_clipboard_only: false,
                     })
                     .expect("insertion should return a deterministic result");
                 if result.success {
@@ -1382,8 +1458,7 @@ mod tests {
 
     #[test]
     fn force_clipboard_only_skips_direct_and_clipboard_paste() {
-        let backend = DeterministicMatrixBackend::new()
-            .with_active_app(Some("Windows Terminal"));
+        let backend = DeterministicMatrixBackend::new().with_active_app(Some("Windows Terminal"));
         let mut engine = InsertionEngine::new(Box::new(backend));
 
         let result = engine
@@ -1401,8 +1476,7 @@ mod tests {
 
     #[test]
     fn force_clipboard_only_works_for_gui_targets_too() {
-        let backend = DeterministicMatrixBackend::new()
-            .with_active_app(Some("Visual Studio Code"));
+        let backend = DeterministicMatrixBackend::new().with_active_app(Some("Visual Studio Code"));
         let mut engine = InsertionEngine::new(Box::new(backend));
 
         let result = engine
@@ -1435,7 +1509,7 @@ mod tests {
     #[test]
     fn without_force_clipboard_only_gui_uses_direct_insertion() {
         // Notepad, not a browser: browsers are clipboard-preferred targets by
-        // policy (see is_clipboard_preferred_target), so only a plain GUI app
+        // policy (see should_auto_prefer_clipboard), so only a plain GUI app
         // exercises the Direct-first ladder.
         let backend = DeterministicMatrixBackend::new().with_active_app(Some("Notepad"));
         let mut engine = InsertionEngine::new(Box::new(backend));
