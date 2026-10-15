@@ -153,10 +153,24 @@ pub struct VoiceWaveSettings {
     pub release_tail_ms: u64,
     pub decode_mode: DecodeMode,
     pub diagnostics_opt_in: bool,
-    /// Explicit opt-in for content-free activated-install analytics. The
-    /// frontend sends only first-use and once-per-day active markers tied to a
-    /// random local identifier; transcript/audio/account data never leaves.
+    /// Content-free activated-install analytics. On by default for new
+    /// installs; the user can turn it off in onboarding, the one-time consent
+    /// notice, or Settings. The frontend sends only first-use and
+    /// once-per-day active markers tied to a random local identifier;
+    /// transcript/audio/account data never leaves.
+    ///
+    /// FIELD-level `serde(default)` on purpose: a legacy settings file without
+    /// this key predates the opt-in entirely, so it must read as `false`
+    /// (not the container default `true`) and go through the consent notice.
+    #[serde(default)]
     pub anonymous_usage_opt_in: bool,
+    /// Which analytics disclosure the user has seen. 0 = never seen (legacy
+    /// installs, or a new install that has not finished onboarding); 1 = saw
+    /// the on-by-default notice in onboarding or the existing-user prompt.
+    /// The frontend shows the existing-user prompt while this is below
+    /// `ANALYTICS_CONSENT_VERSION` and onboarding is done.
+    #[serde(default)]
+    pub analytics_consent_version: u32,
     pub toggle_hotkey: String,
     pub push_to_talk_hotkey: String,
     pub prefer_clipboard_fallback: bool,
@@ -233,7 +247,8 @@ impl Default for VoiceWaveSettings {
             release_tail_ms: 500,
             decode_mode: DecodeMode::Balanced,
             diagnostics_opt_in: false,
-            anonymous_usage_opt_in: false,
+            anonymous_usage_opt_in: true,
+            analytics_consent_version: 0,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
             push_to_talk_hotkey: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
@@ -304,6 +319,7 @@ impl SettingsStore {
         settings.active_model = normalize_active_model_id(&settings.active_model);
         normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
+        migrate_analytics_consent(&mut settings);
         Ok(settings)
     }
 
@@ -347,6 +363,23 @@ pub fn normalize_pro_settings(settings: &mut VoiceWaveSettings) {
     // Plan 010: fill the polish profile for legacy configs (keeping their
     // field values as overrides) and keep the `customized` flag honest.
     migrate_and_sync_polish_profile(settings);
+}
+
+/// Current analytics disclosure revision. Bump only when what is collected
+/// changes enough that every user should be asked again.
+pub const ANALYTICS_CONSENT_VERSION: u32 = 1;
+
+/// Before analytics became on-by-default, `true` could only come from the user
+/// flipping the Settings switch, so a finished-onboarding install holding
+/// `true` already gave explicit consent: mark the notice as seen instead of
+/// nagging. A stored `false` is left alone and the frontend asks once.
+fn migrate_analytics_consent(settings: &mut VoiceWaveSettings) {
+    if settings.analytics_consent_version < ANALYTICS_CONSENT_VERSION
+        && settings.onboarding_completed
+        && settings.anonymous_usage_opt_in
+    {
+        settings.analytics_consent_version = ANALYTICS_CONSENT_VERSION;
+    }
 }
 
 pub const LOCKED_TOGGLE_HOTKEY: &str = "Ctrl+Alt+X";
@@ -413,7 +446,7 @@ mod tests {
         assert_eq!(loaded.release_tail_ms, 300);
         assert_eq!(loaded.decode_mode, DecodeMode::Fast);
         assert!(loaded.diagnostics_opt_in);
-        assert!(!loaded.anonymous_usage_opt_in);
+        assert!(loaded.anonymous_usage_opt_in);
         assert!(loaded.prefer_clipboard_fallback);
         assert_eq!(loaded.format_profile, FormatProfile::Technical);
         assert!(loaded.pro_post_processing_enabled);

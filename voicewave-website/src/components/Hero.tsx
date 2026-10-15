@@ -7,7 +7,7 @@ import HeroDottedField, { type HeroSafeZone } from './HeroDottedField'
 const WINGET_COMMAND = 'winget install VoiceWave.LocalCore'
 
 const HERO_SUBTEXTS = [
-  'Built for fast on-device dictation. No cloud path. Everything stays local.',
+  'Built for fast on-device dictation. No cloud path. Your words stay local.',
   'Press. Speak. Release. Text appears in your active app in under 2 seconds.',
   'Whisper runs on your CPU or GPU. Your audio never leaves this machine.',
   'Hold to talk. Release to insert. Local by design, fast by default.',

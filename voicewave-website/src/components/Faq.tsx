@@ -7,8 +7,11 @@ const FAQS: Array<{ q: string; a: React.ReactNode }> = [
     a: (
       <>
         Transcription is, yes — audio is captured, decoded by Whisper, and discarded
-        entirely on your machine. The only network calls in the app are downloading
-        models and checking GitHub for signed updates, and you can verify that in the{' '}
+        entirely on your machine. The app only goes online to download models, check
+        GitHub for signed updates, and send an anonymous usage count (a random
+        install ID, app version, and a once-a-day active marker via TelemetryDeck;
+        on by default, off with one switch). Never audio or text. You can verify
+        all of it in the{' '}
         <a href={GITHUB_REPO_URL} target="_blank" rel="noreferrer" className="font-semibold text-[#0b3f98] underline decoration-[#9cc6f5] underline-offset-2 hover:text-[#0050d2]">
           source code
         </a>

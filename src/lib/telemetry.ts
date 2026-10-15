@@ -4,6 +4,9 @@ import { getVersion as getAppVersion } from "@tauri-apps/api/app";
 const INSTALLATION_ID_KEY = "voicewave.analytics.installation-id";
 const ACTIVATED_KEY = "voicewave.analytics.activated";
 const LAST_ACTIVE_DAY_KEY = "voicewave.analytics.last-active-day";
+/** Mirrors `ANALYTICS_CONSENT_VERSION` in src-tauri/src/settings/mod.rs: the
+ * analytics disclosure revision every user must have seen once. */
+export const ANALYTICS_CONSENT_VERSION = 1;
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";
 
 type SignalClient = {
@@ -122,9 +125,9 @@ async function sendAnonymousUsage(
 
 /**
  * Records only an activated installation and a once-per-UTC-day active marker.
- * Call this after a successful final dictation. Nothing is sent before explicit
- * consent, and no transcript, audio, account, filename, or device data enters
- * either event payload.
+ * Call this after a successful final dictation. Nothing is sent while the user
+ * has it turned off, and no transcript, audio, account, filename, or device
+ * data enters either event payload.
  */
 export function trackAnonymousUsage(
   optedIn: boolean,

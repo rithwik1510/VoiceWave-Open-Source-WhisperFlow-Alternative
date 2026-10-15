@@ -238,6 +238,10 @@ export default function PrivacyDeepDive() {
                 <span className="block font-mono text-xs text-[#64748B] uppercase mb-1">The only network calls</span>
                 <span className="block font-bold text-sm">Model downloads &amp; signed update checks — both from GitHub, both visible in the source.</span>
               </div>
+              <div className="bg-[#FFFFFF]/92 border border-[#d7e5f7] p-4 vw-radius-tab shadow-sm max-w-xs">
+                <span className="block font-mono text-xs text-[#64748B] uppercase mb-1">Anonymous usage count</span>
+                <span className="block font-bold text-sm">On by default, one switch to turn off. A random install ID, app version, and a once-a-day active marker via TelemetryDeck. Never audio or text.</span>
+              </div>
             </motion.div>
           </div>
         </div>
