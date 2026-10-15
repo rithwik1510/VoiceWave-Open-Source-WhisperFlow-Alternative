@@ -157,9 +157,7 @@ mod tests {
     #[test]
     fn policy_version_includes_backend_name() {
         let version = backend_policy_version("small.en");
-        assert!(
-            version.contains("cpu") || version.contains("cuda") || version.contains("vulkan")
-        );
+        assert!(version.contains("cpu") || version.contains("cuda") || version.contains("vulkan"));
     }
 
     #[test]

@@ -50,6 +50,13 @@ pub struct ModelCatalogItem {
     pub license: String,
     pub download_url: String,
     pub signature: String,
+    /// The model VoiceWave recommends for THIS machine's hardware (exactly one
+    /// catalog row is true). See `recommended_model_id`.
+    #[serde(default)]
+    pub recommended: bool,
+    /// One honest sentence on how the model will perform on this machine.
+    #[serde(default)]
+    pub hardware_note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,6 +169,8 @@ pub enum ModelError {
         model_id: String,
         expected_path: String,
     },
+    #[error("downloaded files for {model_id} are incomplete: {reason}")]
+    IncompleteModel { model_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -247,7 +256,11 @@ impl ModelManager {
     }
 
     pub fn list_catalog(&self) -> Vec<ModelCatalogItem> {
-        self.catalog.iter().map(manifest_to_catalog_item).collect()
+        let gpu_accelerated = crate::inference::gpu_acceleration_available();
+        self.catalog
+            .iter()
+            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
+            .collect()
     }
 
     pub fn list_installed(&self) -> Vec<InstalledModel> {
@@ -287,6 +300,16 @@ impl ModelManager {
                 expected_path: cache_path.to_string_lossy().to_string(),
             });
         }
+        // The caller only gets here after the worker loaded the model, which
+        // proves model.bin/config parse. This catches the files a successful
+        // load does NOT prove are on disk (e.g. a missing tokenizer.json makes
+        // faster-whisper silently fetch one online, which then fails offline).
+        verify_faster_whisper_snapshot(&cache_path).map_err(|reason| {
+            ModelError::IncompleteModel {
+                model_id: model_id.to_string(),
+                reason,
+            }
+        })?;
 
         let size_bytes = directory_size_bytes(&cache_path).unwrap_or(manifest.size);
         let installed = InstalledModel {
@@ -295,9 +318,11 @@ impl ModelManager {
             format: manifest.format.clone(),
             size_bytes,
             file_path: cache_path.to_string_lossy().to_string(),
-            sha256: manifest.sha256.clone(),
+            // HuggingFace serves these models with no hash we pin, so there
+            // is nothing honest to record or verify against.
+            sha256: String::new(),
             installed_at_utc_ms: now_utc_ms(),
-            checksum_verified: true,
+            checksum_verified: false,
         };
         self.installed
             .insert(installed.model_id.clone(), installed.clone());
@@ -306,10 +331,11 @@ impl ModelManager {
     }
 
     pub fn get_catalog_item(&self, model_id: &str) -> Option<ModelCatalogItem> {
+        let gpu_accelerated = crate::inference::gpu_acceleration_available();
         self.catalog
             .iter()
             .find(|item| item.model_id == model_id)
-            .map(manifest_to_catalog_item)
+            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
     }
 
     pub fn get_installed(&self, model_id: &str) -> Option<InstalledModel> {
@@ -328,7 +354,7 @@ impl ModelManager {
                 progress: 100,
                 active: active_model.is_some_and(|value| value == model_id),
                 installed: true,
-                message: Some("Installed and checksum verified.".to_string()),
+                message: Some(installed_status_message(&installed).to_string()),
                 installed_model: Some(installed),
                 downloaded_bytes: None,
                 total_bytes: None,
@@ -888,7 +914,10 @@ impl ModelManager {
                 continue;
             }
             if is_virtual_model_format(&model.format) {
-                if !Path::new(&model.file_path).exists() {
+                // Files deleted or never finished: un-register so the UI
+                // offers a (resuming) download instead of a dead model.
+                if let Err(reason) = verify_faster_whisper_snapshot(Path::new(&model.file_path)) {
+                    eprintln!("voicewave: {model_id} no longer installed: {reason}");
                     to_remove.push(model_id.clone());
                     changed = true;
                 }
@@ -1283,7 +1312,9 @@ fn directory_size_bytes(path: &Path) -> Option<u64> {
     let entries = fs::read_dir(path).ok()?;
     for entry in entries.flatten() {
         let entry_path = entry.path();
-        let metadata = fs::metadata(&entry_path).ok()?;
+        // symlink_metadata: HF snapshots can be symlinks into blobs/, and
+        // following them would count every model file twice.
+        let metadata = fs::symlink_metadata(&entry_path).ok()?;
         if metadata.is_file() {
             total = total.saturating_add(metadata.len());
         } else if metadata.is_dir() {
@@ -1334,14 +1365,94 @@ fn default_model_format() -> String {
     "bin".to_string()
 }
 
-fn manifest_to_catalog_item(manifest: &SignedModelManifest) -> ModelCatalogItem {
-    let display_name = match manifest.model_id.as_str() {
-        "fw-small.en" => "faster-whisper small.en".to_string(),
-        "fw-large-v3-turbo" => {
-            "faster-whisper large-v3-turbo (~1.6 GB, best accuracy on GPU)".to_string()
-        }
-        _ => manifest.model_id.clone(),
+fn installed_status_message(installed: &InstalledModel) -> &'static str {
+    if installed.checksum_verified {
+        "Installed and checksum verified."
+    } else {
+        "Installed. All model files are present."
+    }
+}
+
+/// Files a faster-whisper model needs on disk to load fully offline.
+/// `vocabulary.*` is `.txt` for small.en and `.json` for large-v3-turbo.
+const FW_REQUIRED_FILES: [&str; 3] = ["model.bin", "config.json", "tokenizer.json"];
+
+/// Check that a HuggingFace cache repo dir (`models--org--name`) holds a
+/// complete faster-whisper snapshot: the revision `refs/main` points at, with
+/// every required file present and non-empty. Returns the snapshot dir.
+///
+/// No sha256 pinning: these repos publish no hashes we control, and pinning a
+/// hash without also pinning the HF revision would brick every install the
+/// day the repo is updated. Integrity is HTTPS plus the worker successfully
+/// loading the model.
+fn verify_faster_whisper_snapshot(repo_dir: &Path) -> Result<PathBuf, String> {
+    let revision = fs::read_to_string(repo_dir.join("refs").join("main"))
+        .map_err(|err| format!("no downloaded revision ({err})"))?;
+    let snapshot = repo_dir.join("snapshots").join(revision.trim());
+    // fs::metadata follows symlinks, so a snapshot link into blobs/ is
+    // measured by its real target size.
+    let non_empty = |name: &str| {
+        fs::metadata(snapshot.join(name))
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false)
     };
+    if let Some(missing) = FW_REQUIRED_FILES.iter().find(|name| !non_empty(name)) {
+        return Err(format!("{missing} is missing or empty"));
+    }
+    if !["vocabulary.txt", "vocabulary.json"]
+        .iter()
+        .any(|name| non_empty(name))
+    {
+        return Err("vocabulary file is missing or empty".to_string());
+    }
+    Ok(snapshot)
+}
+
+/// The catalog model that suits a machine. The bundled speech runtime decodes
+/// on CPU unless GPU acceleration is available (optional GPU runtime or a
+/// CUDA toolkit, plus an NVIDIA GPU), and on CPU large-v3-turbo is several
+/// times slower than small.en at every clip length: whisper pads each clip to
+/// a 30 s window, so short dictations pay turbo's full encoder cost. Measured
+/// with the shipped worker settings on a Ryzen 7 5800H (8 cores, 12 threads):
+/// small.en 1.7 s / 3.0 s vs turbo 7.4-9.5 s / 8.6 s for 4.8 s / 25 s clips.
+pub fn recommended_model_id(gpu_accelerated: bool) -> &'static str {
+    if gpu_accelerated {
+        "fw-large-v3-turbo"
+    } else {
+        "fw-small.en"
+    }
+}
+
+/// Display name and one-line performance note for a catalog model on this
+/// machine. Turbo is never pitched as a good pick on a CPU-only machine.
+fn model_hardware_fit(model_id: &str, gpu_accelerated: bool) -> (String, String) {
+    let (name, note) = match (model_id, gpu_accelerated) {
+        ("fw-small.en", false) => (
+            "small.en · recommended for this PC",
+            "Fast on any modern laptop: about 2 seconds per dictation.",
+        ),
+        ("fw-small.en", true) => (
+            "small.en · smaller download",
+            "Fast and accurate, at a third of the download size.",
+        ),
+        ("fw-large-v3-turbo", false) => (
+            "large-v3-turbo · slower on this PC",
+            "No GPU acceleration here: expect 7+ seconds per dictation, even on fast laptops.",
+        ),
+        ("fw-large-v3-turbo", true) => (
+            "large-v3-turbo · recommended for this PC",
+            "Best accuracy, and fast on your NVIDIA GPU.",
+        ),
+        _ => return (model_id.to_string(), String::new()),
+    };
+    (name.to_string(), note.to_string())
+}
+
+fn manifest_to_catalog_item(
+    manifest: &SignedModelManifest,
+    gpu_accelerated: bool,
+) -> ModelCatalogItem {
+    let (display_name, hardware_note) = model_hardware_fit(&manifest.model_id, gpu_accelerated);
     ModelCatalogItem {
         model_id: manifest.model_id.clone(),
         display_name,
@@ -1352,6 +1463,8 @@ fn manifest_to_catalog_item(manifest: &SignedModelManifest) -> ModelCatalogItem 
         license: manifest.license.clone(),
         download_url: manifest.download_url.clone(),
         signature: manifest.signature.clone(),
+        recommended: manifest.model_id == recommended_model_id(gpu_accelerated),
+        hardware_note,
     }
 }
 
@@ -1390,9 +1503,9 @@ fn sign_manifest(manifest: &SignedModelManifest) -> String {
 #[cfg(any(test, debug_assertions))]
 fn manifest_signing_key() -> Option<SigningKey> {
     Some(SigningKey::from_bytes(&[
-        0x53, 0x12, 0x29, 0x7A, 0x40, 0xCD, 0x81, 0x03, 0xE0, 0x11, 0xF1, 0x56, 0x0A, 0x44,
-        0xB8, 0x92, 0xBC, 0x01, 0x77, 0xAB, 0x18, 0x6F, 0x99, 0x31, 0xD2, 0x2E, 0x50, 0x8D,
-        0x09, 0x6A, 0x4F, 0xC1,
+        0x53, 0x12, 0x29, 0x7A, 0x40, 0xCD, 0x81, 0x03, 0xE0, 0x11, 0xF1, 0x56, 0x0A, 0x44, 0xB8,
+        0x92, 0xBC, 0x01, 0x77, 0xAB, 0x18, 0x6F, 0x99, 0x31, 0xD2, 0x2E, 0x50, 0x8D, 0x09, 0x6A,
+        0x4F, 0xC1,
     ]))
 }
 

@@ -601,8 +601,7 @@ mod tests {
         let input_amplitude = 0.3_f32;
         let input: Vec<f32> = (0..duration_samples)
             .map(|i| {
-                input_amplitude
-                    * (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 16_000.0).sin()
+                input_amplitude * (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 16_000.0).sin()
             })
             .collect();
 

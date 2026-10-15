@@ -2,14 +2,16 @@ mod audio_pipeline;
 mod backend;
 mod executor;
 mod faster_whisper;
+pub mod gpu_runtime;
 pub mod llm_polish;
-pub mod polish_gate;
 mod policy;
+pub mod polish_gate;
 
 pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};
 pub use faster_whisper::{
-    cache_hint_for_model as faster_whisper_cache_hint, ensure_faster_whisper_ready,
-    kill_worker_processes as kill_faster_whisper_workers,
+    cache_hint_for_model as faster_whisper_cache_hint,
+    cancel_model_downloads as cancel_faster_whisper_downloads, ensure_faster_whisper_ready,
+    gpu_acceleration_available, kill_worker_processes as kill_faster_whisper_workers,
 };
 pub use policy::RuntimeDecodePolicy;
 
@@ -104,18 +106,19 @@ fn debug_fw_gpu_log(hypothesis_id: &str, location: &str, message: &str, kvs: &[(
         "timestamp": ts
     });
 
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{}", payload);
     }
 }
 
 fn fw_debug_logs_enabled() -> bool {
     std::env::var("VOICEWAVE_ENABLE_FW_DEBUG_LOGS")
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -650,21 +653,46 @@ pub struct FasterWhisperPrefetchResult {
     pub cache_hint_path: String,
 }
 
+/// Load an already-downloaded model into the shared worker so the next
+/// dictation is warm. Never downloads: a model missing from the cache fails
+/// fast with a "not downloaded" error.
 pub async fn prefetch_faster_whisper_model(
     model_id: &str,
 ) -> Result<FasterWhisperPrefetchResult, InferenceError> {
-    let runtime_model =
-        faster_whisper_runtime_model_id(model_id).ok_or_else(|| InferenceError::DecodeFailed {
-            model_id: model_id.to_string(),
-            reason: "unsupported faster-whisper model id".to_string(),
-        })?;
+    let runtime_model = runtime_model_or_err(model_id)?;
     let prefetch = faster_whisper::prefetch_model(runtime_model).await?;
-    let cache_hint = faster_whisper::cache_hint_for_model(runtime_model);
-    Ok(FasterWhisperPrefetchResult {
+    Ok(prefetch_result(runtime_model, prefetch))
+}
+
+/// Download a model (resuming partial downloads) in a dedicated worker and
+/// confirm it loads. Cancel via `cancel_faster_whisper_downloads`.
+pub async fn download_faster_whisper_model(
+    model_id: &str,
+    cancel_token: CancellationToken,
+) -> Result<FasterWhisperPrefetchResult, InferenceError> {
+    let runtime_model = runtime_model_or_err(model_id)?;
+    let prefetch = faster_whisper::download_model(runtime_model, cancel_token).await?;
+    Ok(prefetch_result(runtime_model, prefetch))
+}
+
+fn runtime_model_or_err(model_id: &str) -> Result<&'static str, InferenceError> {
+    faster_whisper_runtime_model_id(model_id).ok_or_else(|| InferenceError::DecodeFailed {
+        model_id: model_id.to_string(),
+        reason: "unsupported faster-whisper model id".to_string(),
+    })
+}
+
+fn prefetch_result(
+    runtime_model: &str,
+    prefetch: faster_whisper::FasterWhisperPrefetchOutput,
+) -> FasterWhisperPrefetchResult {
+    FasterWhisperPrefetchResult {
         model_init_ms: prefetch.model_init_ms,
         runtime_cache_hit: prefetch.runtime_cache_hit,
-        cache_hint_path: cache_hint.to_string_lossy().to_string(),
-    })
+        cache_hint_path: faster_whisper::cache_hint_for_model(runtime_model)
+            .to_string_lossy()
+            .to_string(),
+    }
 }
 
 /// Warm the GPU for an imminent decode (dictation just started). No-op if
@@ -1757,15 +1785,24 @@ mod tests {
     fn warmup_plan_routes_faster_whisper_models_to_python_prefetch() {
         // fw-* models must be routed to the Python worker prefetch path so
         // the model is loaded into MODEL_CACHE at app startup.
-        assert_eq!(warmup_plan_for_model("fw-small.en"), WarmupPlan::FasterWhisper);
-        assert_eq!(warmup_plan_for_model("fw-large-v3"), WarmupPlan::FasterWhisper);
+        assert_eq!(
+            warmup_plan_for_model("fw-small.en"),
+            WarmupPlan::FasterWhisper
+        );
+        assert_eq!(
+            warmup_plan_for_model("fw-large-v3"),
+            WarmupPlan::FasterWhisper
+        );
     }
 
     #[test]
     fn warmup_plan_routes_whisper_cpp_models_to_prewarm_runtime() {
         // wcpp-* models use the existing Rust prewarm_runtime path so the
         // WhisperContext is initialized before the first transcription.
-        assert_eq!(warmup_plan_for_model("wcpp-small.en"), WarmupPlan::WhisperCpp);
+        assert_eq!(
+            warmup_plan_for_model("wcpp-small.en"),
+            WarmupPlan::WhisperCpp
+        );
         assert_eq!(
             warmup_plan_for_model("wcpp-large-v3-turbo"),
             WarmupPlan::WhisperCpp
@@ -1777,7 +1814,10 @@ mod tests {
         // Unknown or unset model IDs should not crash startup. Return
         // Unsupported and let the caller skip the warmup call.
         assert_eq!(warmup_plan_for_model(""), WarmupPlan::Unsupported);
-        assert_eq!(warmup_plan_for_model("some-future-backend"), WarmupPlan::Unsupported);
+        assert_eq!(
+            warmup_plan_for_model("some-future-backend"),
+            WarmupPlan::Unsupported
+        );
     }
 
     #[test]

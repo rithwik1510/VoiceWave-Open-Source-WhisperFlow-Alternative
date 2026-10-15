@@ -3,25 +3,23 @@ use crate::settings::DecodeMode;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, RecvTimeoutError},
-    Mutex, MutexGuard, OnceLock, TryLockError,
+    Arc, Mutex, MutexGuard, OnceLock, TryLockError,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-#[cfg(target_os = "windows")]
-const DETACHED_PROCESS: u32 = 0x00000008;
 
 #[derive(Debug, Clone)]
 pub struct FasterWhisperDecodeOutput {
@@ -67,6 +65,10 @@ struct WorkerRequest {
     compute_type: String,
     backend_preference: String,
     allow_backend_fallback: bool,
+    /// Only the explicit model download may fetch from HuggingFace. Every
+    /// other load is cache-only, so a missing model fails fast instead of
+    /// starting a silent background download (and launch never pings HF).
+    allow_download: bool,
     audio_path: String,
     audio_pcm16_b64: Option<String>,
     sample_rate_hz: u32,
@@ -118,12 +120,15 @@ struct WorkerProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: Option<BufReader<ChildStdout>>,
-    next_id: u64,
+    /// Last lines the worker wrote to stderr, kept by a drain thread so error
+    /// messages can say WHY the worker died (Python traceback, DLL error).
+    stderr_tail: StderrTail,
 }
 
-/// Killing on drop is deliberate: the worker is spawned DETACHED_PROCESS, so a
-/// handle dropped without an explicit kill (an error path, a panicking blocking
-/// thread) leaves a python.exe running with nothing left that can reach it.
+/// Killing on drop is deliberate: Windows never kills a child with its parent,
+/// so a handle dropped without an explicit kill (an error path, a panicking
+/// blocking thread) leaves a python.exe running with nothing left that can
+/// reach it.
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
         unregister_worker_pid(self.child.id());
@@ -138,17 +143,32 @@ static WORKER: OnceLock<Mutex<Option<WorkerProcess>>> = OnceLock::new();
 /// first-run model download — exactly when cancelling or quitting has to reach
 /// the process — the slot is empty and the pid is the only handle left.
 static LIVE_WORKER_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-/// Serializes worker requests. Without this, a dictation arriving while the
-/// startup prefetch is still loading the model checks out an empty slot,
-/// spawns a SECOND worker, and pays the full model load itself (observed as
-/// 7-10 s first dictations) — plus two copies of the model on the GPU.
+/// PIDs of dedicated model-download workers (see `download_model`), so Cancel
+/// can stop a download without also killing the warm dictation worker.
+static DOWNLOAD_WORKER_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Serializes requests on the shared worker. Without this, a dictation
+/// arriving while the startup prefetch is still loading the model checks out
+/// an empty slot, spawns a SECOND worker, and pays the full model load itself
+/// (observed as 7-10 s first dictations) — plus two copies of the model in
+/// memory. Requests never bypass it: model downloads run in their own worker,
+/// so the longest legitimate holder is one model load or one decode.
 static WORKER_REQUEST_GATE: Mutex<()> = Mutex::new(());
 /// At most one background worker reload at a time (see schedule_worker_reload).
 static WORKER_RELOAD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// How long a request waits for the gate before proceeding ungated. Covers a
-/// warm model load (~7 s) but not a first-time multi-minute model download —
-/// degrading to the old racing behavior beats hanging a dictation that long.
-const WORKER_GATE_MAX_WAIT: Duration = Duration::from_secs(15);
+/// How long a request waits for the gate before giving up with a "busy"
+/// error. Longer than the default response timeout, so a wedged holder is
+/// killed (releasing the gate) before waiters give up.
+const WORKER_GATE_MAX_WAIT: Duration = Duration::from_secs(90);
+/// How long a freshly spawned worker may take to print its ready line. Cold
+/// imports measured ~4.6 s on a fast laptop; antivirus scanning the bundled
+/// runtime on first launch can make it far slower. Past this, the spawn is
+/// treated as hung so it cannot hold the worker slot (and block Cancel/Quit).
+const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(90);
+/// Stderr lines kept per worker for error messages.
+const STDERR_TAIL_LINES: usize = 40;
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+type StderrTail = Arc<Mutex<VecDeque<String>>>;
 /// Last time the worker GPU did real work (decode or warmup). Used to skip
 /// the start-of-dictation warmup when the GPU is already hot.
 static LAST_GPU_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
@@ -173,7 +193,7 @@ pub async fn ensure_faster_whisper_ready() -> Result<(), InferenceError> {
         })?
 }
 
-fn prefetch_request_for(model_id: &str) -> WorkerRequest {
+fn prefetch_request_for(model_id: &str, allow_download: bool) -> WorkerRequest {
     let backend_preference = worker_backend_preference_for_model(model_id);
     let compute_type = worker_compute_type_for_backend(&backend_preference);
     WorkerRequest {
@@ -183,6 +203,7 @@ fn prefetch_request_for(model_id: &str) -> WorkerRequest {
         compute_type,
         backend_preference,
         allow_backend_fallback: true,
+        allow_download,
         audio_path: String::new(),
         audio_pcm16_b64: None,
         sample_rate_hz: 16_000,
@@ -222,7 +243,7 @@ pub async fn warmup_model(model_id: &str) -> Result<(), InferenceError> {
     if gpu_recently_active() {
         return Ok(());
     }
-    let mut request = prefetch_request_for(model_id);
+    let mut request = prefetch_request_for(model_id, false);
     request.command = "warmup".to_string();
     let response = tokio::task::spawn_blocking(move || send_worker_request_blocking(request))
         .await
@@ -235,8 +256,10 @@ pub async fn warmup_model(model_id: &str) -> Result<(), InferenceError> {
     Ok(())
 }
 
+/// Load an already-downloaded model into the shared worker's cache so the
+/// next dictation is warm. Cache-only: fails fast if the model isn't on disk.
 pub async fn prefetch_model(model_id: &str) -> Result<FasterWhisperPrefetchOutput, InferenceError> {
-    let request = prefetch_request_for(model_id);
+    let request = prefetch_request_for(model_id, false);
     let response = tokio::task::spawn_blocking(move || send_worker_request_blocking(request))
         .await
         .map_err(|err| {
@@ -252,6 +275,61 @@ pub async fn prefetch_model(model_id: &str) -> Result<FasterWhisperPrefetchOutpu
         model_init_ms: response.model_init_ms,
         runtime_cache_hit: response.runtime_cache_hit,
     })
+}
+
+/// Download a model from HuggingFace (resuming any partial download) and
+/// prove it loads, in a dedicated worker process that exits afterwards.
+///
+/// A separate process keeps the shared dictation worker free: a multi-minute
+/// download never holds the request gate, the user can keep dictating with an
+/// already-installed model, and Cancel (`cancel_model_downloads`) kills only
+/// this process instead of the warm dictation worker.
+pub async fn download_model(
+    model_id: &str,
+    cancel_token: CancellationToken,
+) -> Result<FasterWhisperPrefetchOutput, InferenceError> {
+    let request = prefetch_request_for(model_id, true);
+    let response = tokio::task::spawn_blocking(move || {
+        let mut worker = spawn_worker()?;
+        let pid = worker.child.id();
+        if let Ok(mut guard) = DOWNLOAD_WORKER_PIDS.lock() {
+            guard.push(pid);
+        }
+        // Checked after registering: a cancel that landed during the spawn
+        // found nothing to kill, so honour it here instead.
+        let result = if cancel_token.is_cancelled() {
+            Err(InferenceError::Cancelled)
+        } else {
+            exchange_with_worker(&mut worker, &request)
+        };
+        if let Ok(mut guard) = DOWNLOAD_WORKER_PIDS.lock() {
+            guard.retain(|value| *value != pid);
+        }
+        // Dropping `worker` kills the process; it has served its purpose.
+        result
+    })
+    .await
+    .map_err(|err| {
+        InferenceError::RuntimeJoin(format!("faster-whisper download join failure: {err}"))
+    })??;
+    Ok(FasterWhisperPrefetchOutput {
+        model_init_ms: response.model_init_ms,
+        runtime_cache_hit: response.runtime_cache_hit,
+    })
+}
+
+/// Abort in-flight model downloads. The download is blocked inside the
+/// worker's `WhisperModel()` call and never reads stdin, so killing the
+/// process is the only way to stop it. HuggingFace keeps the partial blob, so
+/// the next download resumes from it.
+pub fn cancel_model_downloads() {
+    let pids = DOWNLOAD_WORKER_PIDS
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default();
+    for pid in pids {
+        kill_process_by_pid(pid);
+    }
 }
 
 pub async fn transcribe_samples_with_overrides(
@@ -345,18 +423,16 @@ fn kill_process_by_pid(pid: u32) {
 #[cfg(not(target_os = "windows"))]
 fn kill_process_by_pid(_pid: u32) {}
 
-/// Kill every live faster-whisper worker process.
-///
-/// Two callers: cancelling a model download (the prefetch is blocked inside the
-/// worker's `WhisperModel()` call and never reads stdin, so killing the process
-/// is the only way to abort it) and app shutdown (DETACHED_PROCESS workers
-/// otherwise outlive the app and keep downloading in the background).
-///
-/// The worker's warm model cache dies with it; the next request respawns via
-/// `ensure_worker` and pays one model load. That is the accepted tradeoff.
+/// Kill every live faster-whisper worker process (shared and download
+/// workers). Called on app shutdown: Windows does not kill children with
+/// their parent, so workers would otherwise outlive the app and keep
+/// downloading in the background.
 pub fn kill_worker_processes() {
     if let Some(slot) = WORKER.get() {
-        if let Ok(mut guard) = slot.lock() {
+        // try_lock: a worker spawn holds the slot while it waits for the
+        // ready line. Blocking here would stall shutdown behind it; the pid
+        // sweep below kills that half-started worker anyway.
+        if let Ok(mut guard) = slot.try_lock() {
             // Dropping the handle kills and unregisters it (see Drop above).
             drop(guard.take());
         }
@@ -383,6 +459,14 @@ pub fn cache_hint_for_model(model_id: &str) -> PathBuf {
 }
 
 fn ensure_worker_ready_blocking() -> Result<(), InferenceError> {
+    // A held gate means a request is in flight: it has the worker checked out
+    // (so the slot looks empty) or is about to spawn one itself. Spawning here
+    // too would start a second python that loads its own copy of the model.
+    let _gate = match WORKER_REQUEST_GATE.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return Ok(()),
+    };
     let slot = WORKER.get_or_init(|| Mutex::new(None));
     let mut guard = slot.lock().map_err(|_| {
         InferenceError::RuntimeJoin("faster-whisper worker lock poisoned".to_string())
@@ -429,7 +513,15 @@ fn drain_buffered_stdout_lines<R: Read>(reader: &mut BufReader<R>) -> usize {
 }
 
 fn send_worker_request_blocking(request: WorkerRequest) -> Result<WorkerResponse, InferenceError> {
-    let _gate = acquire_request_gate(WORKER_GATE_MAX_WAIT);
+    let Some(_gate) = acquire_request_gate(WORKER_GATE_MAX_WAIT) else {
+        // Never proceed ungated: that is exactly how a second worker (and a
+        // second copy of the model in memory) used to get spawned.
+        return Err(InferenceError::DecodeFailed {
+            model_id: request.model_id,
+            reason: "the speech engine is busy loading the model; try again in a moment"
+                .to_string(),
+        });
+    };
     let command = request.command.clone();
     let model_id = request.model_id.clone();
     let result = send_worker_request_inner(request);
@@ -451,16 +543,16 @@ fn acquire_request_gate(max_wait: Duration) -> Option<MutexGuard<'static, ()>> {
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     eprintln!(
-                        "voicewave: worker request gate busy for {} ms; proceeding ungated",
+                        "voicewave: worker request gate busy for {} ms; giving up",
                         max_wait.as_millis()
                     );
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            // A poisoned gate only means a holder panicked; serialization is
-            // best-effort, so proceed ungated rather than failing the decode.
-            Err(TryLockError::Poisoned(_)) => return None,
+            // The gate guards no data, so poison (a holder panicked) carries
+            // no meaning; take the guard and carry on serialized.
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
         }
     }
 }
@@ -476,7 +568,7 @@ fn schedule_worker_reload(model_id: String) {
         .name("voicewave-fw-reload".to_string())
         .spawn(move || {
             eprintln!("voicewave: worker died; reloading {model_id} in background");
-            match send_worker_request_blocking(prefetch_request_for(&model_id)) {
+            match send_worker_request_blocking(prefetch_request_for(&model_id, false)) {
                 Ok(response) => eprintln!(
                     "voicewave: background worker reload complete for {model_id} (model_init={} ms)",
                     response.model_init_ms
@@ -494,7 +586,21 @@ fn schedule_worker_reload(model_id: String) {
 
 fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, InferenceError> {
     let mut worker = checkout_worker()?;
+    let result = exchange_with_worker(&mut worker, &request);
+    // A request the worker answered (even with ok=false) leaves it healthy;
+    // every other failure killed it, and dropping the handle reaps it.
+    if matches!(&result, Ok(_) | Err(InferenceError::DecodeFailed { .. })) {
+        checkin_worker(worker);
+    }
+    result
+}
 
+/// Send one request to `worker` and read its response. On any failure other
+/// than an `ok: false` answer (DecodeFailed) the worker process is killed.
+fn exchange_with_worker(
+    worker: &mut WorkerProcess,
+    request: &WorkerRequest,
+) -> Result<WorkerResponse, InferenceError> {
     // Before writing a new request, drain any stale response lines that a
     // prior cancelled request may have left buffered. See
     // drain_buffered_stdout_lines docs for the race this protects against.
@@ -508,7 +614,7 @@ fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, I
         }
     }
 
-    let payload = serde_json::to_string(&request).map_err(|err| {
+    let payload = serde_json::to_string(request).map_err(|err| {
         InferenceError::RuntimeJoin(format!("encode worker request failed: {err}"))
     })?;
     worker
@@ -523,12 +629,14 @@ fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, I
         .flush()
         .map_err(|err| InferenceError::RuntimeJoin(format!("worker stdin flush failed: {err}")))?;
 
-    let timeout = if request.command == "prefetch" {
+    // Only a download may legitimately run for minutes; a cache-only load or
+    // a decode that slow means the worker is wedged.
+    let timeout = if request.allow_download {
         worker_prefetch_timeout()
     } else {
         worker_response_timeout()
     };
-    let line = match read_worker_response_line_with_timeout(&mut worker, timeout) {
+    let line = match read_worker_response_line_with_timeout(worker, timeout) {
         Ok(value) => value,
         Err(err) => {
             let _ = worker.child.kill();
@@ -551,9 +659,8 @@ fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, I
         let reason = response
             .error
             .unwrap_or_else(|| "faster-whisper request failed".to_string());
-        checkin_worker(worker);
         return Err(InferenceError::DecodeFailed {
-            model_id: request.model_id,
+            model_id: request.model_id.clone(),
             reason,
         });
     }
@@ -565,7 +672,6 @@ fn send_worker_request_inner(request: WorkerRequest) -> Result<WorkerResponse, I
             request.id, response.id
         )));
     }
-    checkin_worker(worker);
     Ok(response)
 }
 
@@ -645,9 +751,10 @@ fn read_worker_response_line_with_timeout(
         Ok(Ok((stdout, bytes, line))) => {
             worker.stdout = Some(stdout);
             if bytes == 0 {
-                return Err(InferenceError::RuntimeJoin(
-                    "faster-whisper worker exited unexpectedly".to_string(),
-                ));
+                return Err(InferenceError::RuntimeJoin(format!(
+                    "faster-whisper worker exited unexpectedly. stderr: {}",
+                    stderr_tail_text(&worker.stderr_tail, 8)
+                )));
             }
             Ok(line)
         }
@@ -710,6 +817,12 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
         .env("HF_HOME", &hf_home)
         .env("HUGGINGFACE_HUB_CACHE", &hub_cache)
         .env("TRANSFORMERS_CACHE", &hub_cache)
+        // Xet transfers keep the model blob at 0 bytes on disk until the very
+        // end, so the byte-polling progress bar sat at 0% for the whole
+        // download and a cancelled download had nothing to resume. Plain HTTP
+        // grows the `.incomplete` blob steadily and range-resumes it.
+        .env("HF_HUB_DISABLE_XET", "1")
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
         .env("OMP_NUM_THREADS", &thread_cap)
         .env("CT2_NUM_THREADS", &thread_cap)
         .stdin(Stdio::piped())
@@ -717,8 +830,10 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
         .stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     {
-        // Prevent python worker startup from flashing a console window in desktop builds.
-        command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+        // Prevent python.exe from flashing a console window when invoked from
+        // the Tauri GUI. Deliberately not DETACHED_PROCESS: a console-less
+        // parent makes any console child it launches pop a visible window.
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     let cuda_bins = resolve_cuda_bin_paths(&python);
     if !cuda_bins.is_empty() {
@@ -734,12 +849,6 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
             command.env("PATH", prepend);
         }
     }
-    #[cfg(windows)]
-    {
-        // Prevent python.exe from flashing a console window when invoked from the Tauri GUI.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     let mut child = command.spawn().map_err(|err| {
         InferenceError::RuntimeJoin(format!(
             "failed to spawn faster-whisper worker using '{python}': {err}. Reinstall the latest beta build or configure VOICEWAVE_FASTER_WHISPER_PYTHON."
@@ -747,61 +856,99 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
     })?;
     register_worker_pid(child.id());
 
-    // Every early return below must reap the child: it is detached, so a
-    // dropped `Child` handle would leave a live python.exe behind.
-    let stdin = match child.stdin.take() {
-        Some(value) => value,
-        None => {
-            kill_partial_worker(child);
-            return Err(InferenceError::RuntimeJoin(
-                "worker stdin unavailable".to_string(),
-            ));
-        }
+    // Every early return below must reap the child: Windows does not kill it
+    // with us, so a dropped `Child` handle would leave a live python.exe.
+    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        kill_partial_worker(child);
+        return Err(InferenceError::RuntimeJoin(
+            "worker stdio unavailable".to_string(),
+        ));
     };
-    let stdout = match child.stdout.take() {
-        Some(value) => value,
-        None => {
-            kill_partial_worker(child);
-            return Err(InferenceError::RuntimeJoin(
-                "worker stdout unavailable".to_string(),
-            ));
-        }
-    };
-    let mut stdout_reader = BufReader::new(stdout);
+    // Nothing reads stderr between requests, so without a drain a chatty
+    // worker (warnings, tracebacks) would eventually fill the pipe and block.
+    let stderr_tail: StderrTail = Arc::new(Mutex::new(VecDeque::new()));
+    let stderr_drain = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_stderr_drain(stderr, Arc::clone(&stderr_tail)));
 
-    let mut ready_line = String::new();
-    let ready_bytes = match stdout_reader.read_line(&mut ready_line) {
-        Ok(value) => value,
-        Err(err) => {
+    let stdout_reader = match read_ready_line(BufReader::new(stdout), WORKER_READY_TIMEOUT) {
+        Ok(reader) => reader,
+        Err(reason) => {
             kill_partial_worker(child);
+            // The child is dead, so its stderr hits EOF; give the drain a
+            // moment to capture the final lines (usually the real cause).
+            if let Some(handle) = stderr_drain {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !handle.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             return Err(InferenceError::RuntimeJoin(format!(
-                "worker ready read failed: {err}"
+                "faster-whisper worker failed to start ({reason}). stderr: {}",
+                stderr_tail_text(&stderr_tail, STDERR_TAIL_LINES)
             )));
         }
     };
-    if ready_bytes == 0 {
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut row| {
-                let mut out = String::new();
-                let _ = row.read_to_string(&mut out);
-                out
-            })
-            .unwrap_or_default();
-        kill_partial_worker(child);
-        return Err(InferenceError::RuntimeJoin(format!(
-            "faster-whisper worker exited before ready. stderr: {}",
-            stderr.trim()
-        )));
-    }
 
     Ok(WorkerProcess {
         child,
         stdin,
         stdout: Some(stdout_reader),
-        next_id: 1,
+        stderr_tail,
     })
+}
+
+/// Wait for the worker's `{"ready": true}` line on a helper thread, so a hung
+/// interpreter start can't block the caller (which holds the worker slot).
+fn read_ready_line(
+    mut reader: BufReader<ChildStdout>,
+    timeout: Duration,
+) -> Result<BufReader<ChildStdout>, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = reader.read_line(&mut line);
+        let _ = tx.send((reader, result));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok((reader, Ok(bytes))) if bytes > 0 => Ok(reader),
+        Ok((_, Ok(_))) => Err("exited before ready".to_string()),
+        Ok((_, Err(err))) => Err(format!("ready read failed: {err}")),
+        // On timeout the caller kills the child, which ends the reader thread.
+        Err(_) => Err(format!(
+            "no ready signal within {} s",
+            timeout.as_secs()
+        )),
+    }
+}
+
+fn spawn_stderr_drain(stderr: ChildStderr, tail: StderrTail) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(mut guard) = tail.lock() {
+                if guard.len() >= STDERR_TAIL_LINES {
+                    guard.pop_front();
+                }
+                guard.push_back(line);
+            }
+        }
+    })
+}
+
+/// The last `max_lines` captured stderr lines, joined for an error message.
+fn stderr_tail_text(tail: &StderrTail, max_lines: usize) -> String {
+    let Ok(guard) = tail.lock() else {
+        return String::new();
+    };
+    let skip = guard.len().saturating_sub(max_lines);
+    guard
+        .iter()
+        .skip(skip)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn resolve_worker_path() -> Result<PathBuf, InferenceError> {
@@ -879,7 +1026,52 @@ fn worker_path_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+/// Whether the speech worker can decode on an NVIDIA GPU on this machine:
+/// an NVIDIA driver is installed AND a CUDA 12 cuBLAS the worker can load is
+/// present (optional GPU runtime pack, nvidia wheels next to the python, or a
+/// CUDA toolkit). The shipped runtime is CPU-only, so for most users this is
+/// false. Approximates the worker's own `cuda_runtime_libs_ready` check for
+/// model recommendation; the worker still decides per request.
+///
+/// Filesystem checks only (no process spawns), cached for the process
+/// lifetime — installing the GPU runtime requires a restart anyway.
+pub fn gpu_acceleration_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        if env_flag("VOICEWAVE_FORCE_CPU", false) || !env_flag("VOICEWAVE_AUTO_GPU", true) {
+            return false;
+        }
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let nvidia_driver = Path::new(&system_root)
+            .join("System32")
+            .join("nvcuda.dll")
+            .exists();
+        if !nvidia_driver {
+            return false;
+        }
+        let mut bin_dirs = super::gpu_runtime::installed_bin_paths();
+        if let Some(python) = bundled_python_candidates()
+            .into_iter()
+            .find(|path| path.exists())
+        {
+            bin_dirs.extend(resolve_python_cuda_bin_paths(&python.to_string_lossy()));
+        }
+        bin_dirs.extend(resolve_cuda_bin_path());
+        bin_dirs
+            .iter()
+            .any(|dir| dir.join("cublas64_12.dll").exists())
+    })
+}
+
 fn python_path_candidates() -> Vec<PathBuf> {
+    let mut candidates = bundled_python_candidates();
+    candidates.extend(installed_system_python_candidates());
+    dedupe_existing_paths(candidates)
+}
+
+/// Pythons VoiceWave ships or sets up itself (no PATH lookup), in priority
+/// order: install dir, app support dir, then the dev venv.
+fn bundled_python_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Some(exe_dir) = current_exe_dir() {
@@ -890,7 +1082,9 @@ fn python_path_candidates() -> Vec<PathBuf> {
     }
 
     if let Some(app_support_dir) = app_support_dir() {
-        candidates.extend(python_layout_candidates(&app_support_dir.join("faster-whisper")));
+        candidates.extend(python_layout_candidates(
+            &app_support_dir.join("faster-whisper"),
+        ));
     }
 
     candidates.extend(python_layout_candidates(
@@ -898,9 +1092,7 @@ fn python_path_candidates() -> Vec<PathBuf> {
             .join("..")
             .join(".venv-faster-whisper"),
     ));
-
-    candidates.extend(installed_system_python_candidates());
-    dedupe_existing_paths(candidates)
+    candidates
 }
 
 fn python_layout_candidates(root: &Path) -> Vec<PathBuf> {
@@ -916,7 +1108,9 @@ fn installed_system_python_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let programs_dir = PathBuf::from(local_app_data).join("Programs").join("Python");
+        let programs_dir = PathBuf::from(local_app_data)
+            .join("Programs")
+            .join("Python");
         if let Ok(entries) = fs::read_dir(programs_dir) {
             let mut installs = entries
                 .filter_map(Result::ok)
@@ -957,7 +1151,8 @@ fn installed_system_python_candidates() -> Vec<PathBuf> {
 
 fn dedupe_existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
-    paths.into_iter()
+    paths
+        .into_iter()
         .filter(|path| seen.insert(path.to_string_lossy().to_ascii_lowercase()))
         .collect()
 }
@@ -1014,7 +1209,8 @@ fn resolve_cuda_bin_path() -> Option<PathBuf> {
 }
 
 fn resolve_cuda_bin_paths(python_path: &str) -> Vec<PathBuf> {
-    let mut paths = resolve_python_cuda_bin_paths(python_path);
+    let mut paths = super::gpu_runtime::installed_bin_paths();
+    paths.extend(resolve_python_cuda_bin_paths(python_path));
     if let Some(cuda_bin) = resolve_cuda_bin_path() {
         paths.push(cuda_bin);
     }
@@ -1087,6 +1283,7 @@ fn worker_request_for(
         compute_type,
         backend_preference,
         allow_backend_fallback: true,
+        allow_download: false,
         audio_path: String::new(),
         audio_pcm16_b64: Some(audio_pcm16_b64),
         sample_rate_hz: 16_000,
@@ -1118,9 +1315,7 @@ fn worker_request_for(
         log_prob_threshold: Some(overrides.log_prob_threshold.unwrap_or(-1.0)),
         // Tighter compression-ratio ceiling flags repeat-word hallucinations
         // ("the the the...") so the decoder rejects them instead of pasting.
-        compression_ratio_threshold: Some(
-            overrides.compression_ratio_threshold.unwrap_or(2.2),
-        ),
+        compression_ratio_threshold: Some(overrides.compression_ratio_threshold.unwrap_or(2.2)),
     }
 }
 
@@ -1310,7 +1505,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn request_gate_waits_then_proceeds_ungated() {
+    fn request_gate_waits_then_gives_up() {
         // Use a local gate (not the global) so this test cannot interfere
         // with other tests touching the real request path.
         fn acquire(gate: &'static Mutex<()>, max_wait: Duration) -> bool {
@@ -1330,20 +1525,26 @@ mod tests {
         }
         static GATE: Mutex<()> = Mutex::new(());
 
-        assert!(acquire(&GATE, Duration::from_millis(50)), "free gate must acquire");
+        assert!(
+            acquire(&GATE, Duration::from_millis(50)),
+            "free gate must acquire"
+        );
 
         let held = GATE.lock().expect("hold gate");
         assert!(
             !acquire(&GATE, Duration::from_millis(50)),
-            "held gate must time out and proceed ungated"
+            "held gate must time out (the caller then fails busy)"
         );
         drop(held);
-        assert!(acquire(&GATE, Duration::from_millis(50)), "released gate must acquire");
+        assert!(
+            acquire(&GATE, Duration::from_millis(50)),
+            "released gate must acquire"
+        );
     }
 
     #[test]
     fn prefetch_request_is_a_prefetch_for_the_requested_model() {
-        let request = prefetch_request_for("large-v3-turbo");
+        let request = prefetch_request_for("large-v3-turbo", false);
         assert_eq!(request.command, "prefetch");
         assert_eq!(request.model_id, "large-v3-turbo");
         assert!(request.audio_pcm16_b64.is_none());
@@ -1424,10 +1625,26 @@ mod tests {
         // pinning all cores and causing Windows UI jank (taskbar stutter)
         // for the 500-1500 ms of CPU decode. We must always leave at least
         // one core free for the UI thread.
-        assert_eq!(thread_cap_for_cores(4), 3, "4-core should use 3, leaving 1 for UI");
-        assert_eq!(thread_cap_for_cores(6), 5, "6-core should use 5, leaving 1 for UI");
-        assert_eq!(thread_cap_for_cores(8), 7, "8-core should use 7, leaving 1 for UI");
-        assert_eq!(thread_cap_for_cores(10), 9, "10-core should use 9, leaving 1 for UI");
+        assert_eq!(
+            thread_cap_for_cores(4),
+            3,
+            "4-core should use 3, leaving 1 for UI"
+        );
+        assert_eq!(
+            thread_cap_for_cores(6),
+            5,
+            "6-core should use 5, leaving 1 for UI"
+        );
+        assert_eq!(
+            thread_cap_for_cores(8),
+            7,
+            "8-core should use 7, leaving 1 for UI"
+        );
+        assert_eq!(
+            thread_cap_for_cores(10),
+            9,
+            "10-core should use 9, leaving 1 for UI"
+        );
     }
 
     #[test]
@@ -1510,10 +1727,7 @@ mod tests {
             request.no_speech_threshold
         );
         assert!(
-            request
-                .compression_ratio_threshold
-                .unwrap_or(f32::MAX)
-                <= 2.3,
+            request.compression_ratio_threshold.unwrap_or(f32::MAX) <= 2.3,
             "compression_ratio_threshold was {:?}, expected <= 2.3",
             request.compression_ratio_threshold
         );
@@ -1623,16 +1837,11 @@ mod tests {
     }
 }
 
+/// Process-wide counter: ids only need to be unique per worker, and an atomic
+/// avoids taking the worker slot lock (held for seconds during a spawn) on
+/// the async threads that build requests.
 fn next_request_id() -> u64 {
-    let slot = WORKER.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = slot.lock() {
-        if let Some(worker) = guard.as_mut() {
-            let id = worker.next_id;
-            worker.next_id = worker.next_id.saturating_add(1);
-            return id;
-        }
-    }
-    now_utc_ms()
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 fn hf_home_dir() -> PathBuf {

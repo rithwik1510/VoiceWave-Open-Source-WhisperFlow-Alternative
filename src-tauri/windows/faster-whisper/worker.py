@@ -1,14 +1,42 @@
 import base64
 import ctypes
+import importlib
 import json
 import os
 import sys
 import time
 import traceback
+import types
 from pathlib import Path
 
 import numpy as np
-from faster_whisper import WhisperModel
+
+
+class _LazyAvModule(types.ModuleType):
+    """Stand-in for PyAV until something actually touches it.
+
+    faster-whisper imports `av` at module load, but only uses it in
+    `decode_audio`, which runs for file/bytes input. VoiceWave always sends
+    raw PCM as a numpy array, so the real import (FFmpeg codec DLLs: avcodec,
+    x265, aom, SVT-AV1...) is pure memory cost. Any attribute access, e.g. a
+    future faster-whisper calling into av, transparently imports the real
+    module, so this degrades to the normal behavior rather than breaking.
+    Known gap: a submodule import (`import av.audio`) would fail against the
+    stand-in. Pinned faster-whisper 1.2.1 only uses `av.<attr>`; recheck on
+    upgrade.
+    """
+
+    def __getattr__(self, name):
+        if sys.modules.get("av") is self:
+            del sys.modules["av"]
+        real = importlib.import_module("av")
+        return getattr(real, name)
+
+
+if "av" not in sys.modules:
+    sys.modules["av"] = _LazyAvModule("av")
+
+from faster_whisper import WhisperModel  # noqa: E402
 try:
     import ctranslate2
 except Exception:  # noqa: BLE001
@@ -188,15 +216,38 @@ def resolve_compute_type(device: str, requested_compute_type: str) -> str:
     return requested
 
 
-def load_model(model_id: str, device: str, compute_type: str):
+class ModelNotDownloadedError(RuntimeError):
+    pass
+
+
+def load_model(model_id: str, device: str, compute_type: str, allow_download: bool):
     key = (model_id, device, compute_type)
     cached = MODEL_CACHE.get(key)
     if cached is not None:
         return cached, True, 0
 
     started = time.perf_counter()
-    model = WhisperModel(model_id, device=device, compute_type=compute_type)
+    try:
+        # Only the app's explicit download request may reach HuggingFace.
+        # Every other load is cache-only: no silent background download of a
+        # missing model, and no network round trip on each app launch.
+        model = WhisperModel(
+            model_id,
+            device=device,
+            compute_type=compute_type,
+            local_files_only=not allow_download,
+        )
+    except Exception as err:  # noqa: BLE001
+        if not allow_download and type(err).__name__ == "LocalEntryNotFoundError":
+            raise ModelNotDownloadedError(
+                f"Speech model '{model_id}' is not downloaded yet."
+            ) from err
+        raise
     load_ms = int((time.perf_counter() - started) * 1000)
+    # Keep one model resident: switching models in Settings used to leave the
+    # previous one in memory until the app restarted.
+    for stale_key in [k for k in MODEL_CACHE if k[0] != model_id]:
+        del MODEL_CACHE[stale_key]
     MODEL_CACHE[key] = model
     return model, False, load_ms
 
@@ -216,6 +267,7 @@ def transcribe(req: dict) -> dict:
     vad_filter = bool(req.get("vadFilter", True))
     condition_on_previous_text = bool(req.get("conditionOnPreviousText", False))
     without_timestamps = bool(req.get("withoutTimestamps", False))
+    allow_download = bool(req.get("allowDownload", False))
     initial_prompt = req.get("initialPrompt")
     temperature = req.get("temperature")
     no_speech_threshold = req.get("noSpeechThreshold")
@@ -302,12 +354,16 @@ def transcribe(req: dict) -> dict:
     model_init_ms = 0
     try:
         model, runtime_cache_hit, model_init_ms = load_model(
-            model_id, backend_used, compute_type_used
+            model_id, backend_used, compute_type_used, allow_download
         )
         segments, _info = model.transcribe(audio_input, **transcribe_kwargs)
         segments = list(segments)
     except Exception as first_err:  # noqa: BLE001
-        if backend_used != "cuda" or not allow_backend_fallback:
+        if (
+            backend_used != "cuda"
+            or not allow_backend_fallback
+            or isinstance(first_err, ModelNotDownloadedError)
+        ):
             return {
                 "id": request_id,
                 "ok": False,
@@ -319,7 +375,7 @@ def transcribe(req: dict) -> dict:
         compute_type_used = resolve_compute_type("cpu", compute_type_requested)
         try:
             fallback_model, fallback_cache_hit, fallback_model_init_ms = load_model(
-                model_id, backend_used, compute_type_used
+                model_id, backend_used, compute_type_used, allow_download
             )
             model_init_ms += fallback_model_init_ms
             runtime_cache_hit = runtime_cache_hit and fallback_cache_hit
@@ -425,7 +481,7 @@ def warmup(req: dict) -> dict:
     compute_type_used = resolve_compute_type(backend_used, str(compute_type))
     try:
         model, runtime_cache_hit, model_init_ms = load_model(
-            model_id, backend_used, compute_type_used
+            model_id, backend_used, compute_type_used, False
         )
     except Exception as err:  # noqa: BLE001
         return {
@@ -433,7 +489,9 @@ def warmup(req: dict) -> dict:
             "ok": False,
             "error": f"Warmup failed ({backend_used}/{compute_type_used}): {err}",
         }
-    warmup_ms = kernel_warmup_decode(model)
+    # The throwaway decode only exists to compile CUDA kernels and wake the GPU.
+    # On CPU it adds work directly in front of the user's real transcription.
+    warmup_ms = kernel_warmup_decode(model) if backend_used == "cuda" else 0
     return {
         "id": request_id,
         "ok": True,
@@ -450,6 +508,7 @@ def prefetch(req: dict) -> dict:
     compute_type = req.get("computeType", "int8")
     backend_preference = req.get("backendPreference", "auto")
     allow_backend_fallback = bool(req.get("allowBackendFallback", True))
+    allow_download = bool(req.get("allowDownload", False))
     if not model_id:
         return {"id": request_id, "ok": False, "error": "Model ID is required."}
     if model_id not in ALLOWED_MODELS:
@@ -468,10 +527,14 @@ def prefetch(req: dict) -> dict:
     warmup_ms = 0
     try:
         model, runtime_cache_hit, model_init_ms = load_model(
-            model_id, backend_used, compute_type_used
+            model_id, backend_used, compute_type_used, allow_download
         )
     except Exception as first_err:  # noqa: BLE001
-        if backend_used != "cuda" or not allow_backend_fallback:
+        if (
+            backend_used != "cuda"
+            or not allow_backend_fallback
+            or isinstance(first_err, ModelNotDownloadedError)
+        ):
             return {
                 "id": request_id,
                 "ok": False,
@@ -482,7 +545,7 @@ def prefetch(req: dict) -> dict:
         compute_type_used = resolve_compute_type("cpu", compute_type_requested)
         try:
             model, fallback_cache_hit, fallback_model_init_ms = load_model(
-                model_id, backend_used, compute_type_used
+                model_id, backend_used, compute_type_used, allow_download
             )
             model_init_ms += fallback_model_init_ms
             runtime_cache_hit = runtime_cache_hit and fallback_cache_hit
@@ -495,7 +558,7 @@ def prefetch(req: dict) -> dict:
                     f"with fallback ({backend_used}/{compute_type_used}): {fallback_err}"
                 ),
             }
-    if not runtime_cache_hit:
+    if not runtime_cache_hit and backend_used == "cuda":
         # Fresh load: pay the one-time kernel compilation here, in the
         # background, instead of on the user's first dictation.
         warmup_ms = kernel_warmup_decode(model)
