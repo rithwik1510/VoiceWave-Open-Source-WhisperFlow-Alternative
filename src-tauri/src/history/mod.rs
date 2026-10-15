@@ -13,8 +13,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// Count cap on stored records, on top of the time-based RetentionPolicy below.
-const MAX_HISTORY_RECORDS: usize = 200;
+/// Count cap on stored records, applied on top of every time-based
+/// RetentionPolicy (including Forever, which means "the newest
+/// MAX_HISTORY_RECORDS"). The whole store is re-encrypted and rewritten on
+/// every dictation, so it must stay bounded.
+const MAX_HISTORY_RECORDS: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -372,13 +375,9 @@ impl HistoryManager {
         Ok(updated)
     }
 
-    /// Push a new record, enforce the count cap, prune expired records, then persist.
+    /// Push a new record, prune expired records and enforce the count cap, then persist.
     fn append_record(&mut self, record: SessionHistoryRecord) -> Result<(), HistoryError> {
         self.store.records.push(record);
-        if self.store.records.len() > MAX_HISTORY_RECORDS {
-            let keep_from = self.store.records.len() - MAX_HISTORY_RECORDS;
-            self.store.records = self.store.records.split_off(keep_from);
-        }
         self.prune_expired()?;
         self.persist()
     }
@@ -449,7 +448,7 @@ impl HistoryManager {
                         "[{}] {}{}",
                         row.timestamp_utc_ms,
                         row.display_text(),
-                        if row.starred { " ?" } else { "" }
+                        if row.starred { " \u{2605}" } else { "" }
                     )
                 })
                 .collect::<Vec<_>>()
@@ -552,8 +551,8 @@ impl HistoryManager {
             }
             RetentionPolicy::Forever => {}
         }
-        if self.store.records.len() > 1_000 {
-            let keep_from = self.store.records.len() - 1_000;
+        if self.store.records.len() > MAX_HISTORY_RECORDS {
+            let keep_from = self.store.records.len() - MAX_HISTORY_RECORDS;
             self.store.records = self.store.records.split_off(keep_from);
         }
         Ok(())

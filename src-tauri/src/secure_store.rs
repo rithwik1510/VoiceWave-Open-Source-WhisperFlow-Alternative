@@ -5,7 +5,7 @@ use aes_gcm::{
 use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 const ENVELOPE_VERSION: u8 = 1;
 const KEY_BYTES: usize = 32;
@@ -41,38 +41,77 @@ pub(crate) enum SecureStoreError {
     KeyDecode { label: String, message: String },
 }
 
-/// Loads the key at `path`, regenerating it when the file is missing or
-/// unreadable.
+/// Read attempts before an existing key file that will not open is treated as
+/// stuck. Antivirus scanners and backup agents hold short sharing locks on
+/// Windows, so the first failure is usually transient.
+const KEY_READ_ATTEMPTS: u32 = 5;
+/// First retry delay; it doubles per attempt (50, 100, 200, 400 ms).
+const KEY_READ_BACKOFF_MS: u64 = 50;
+
+/// What was found at a key path.
+enum KeyFile {
+    /// Nothing there yet: a first run, or the key was deliberately removed.
+    Missing,
+    /// The raw file contents, not yet validated.
+    Present(String),
+    /// The file exists but kept failing to read after every retry.
+    Unreadable(std::io::Error),
+}
+
+/// Loads the key at `path`, creating it when none exists yet.
 ///
-/// A key file can be zero-filled by the same interrupted-write mechanism that
-/// corrupts stores. Refusing to launch over it is the worst possible outcome:
-/// a fresh key means the encrypted store no longer decrypts, and the store's
-/// own recovery path then quarantines it and starts from defaults. Losing a
-/// local cache beats an app that cannot start.
+/// Every store encrypted with this key becomes undecryptable the moment the
+/// key changes, so an existing key file is never overwritten in place:
+///
+/// | On disk                               | Outcome                                    |
+/// |---------------------------------------|--------------------------------------------|
+/// | missing                               | generate and persist a new key             |
+/// | valid                                 | use it                                     |
+/// | does not decode (e.g. zero-filled)    | set aside as `.corrupt-<ms>`, regenerate   |
+/// | unreadable after retries              | set aside as `.corrupt-<ms>`, regenerate   |
+/// | either of the above, rename fails too | session-only key, file left untouched      |
+///
+/// Refusing to launch is the worst possible outcome, so this only errors when
+/// a brand-new key cannot be written. After a regenerate or a session-only
+/// key the store's own recovery quarantines the data it can no longer
+/// decrypt; the old key and that data both stay on disk for support. A
+/// session-only key is never written, so the next launch retries the
+/// original file.
 pub(crate) fn load_or_create_key(
     path: &Path,
     label: &str,
 ) -> Result<[u8; KEY_BYTES], SecureStoreError> {
-    let stored = crate::atomic_file::read_to_string_recovering(path).unwrap_or_else(|error| {
-        eprintln!("voicewave: failed to read the {label} key, regenerating: {error}");
-        None
-    });
-
-    if let Some(encoded) = stored {
-        match decode_key(&encoded, label) {
+    let unusable = match read_key_file(path, label) {
+        KeyFile::Missing => None,
+        KeyFile::Present(encoded) => match decode_key(&encoded, label) {
             Ok(key) => return Ok(key),
+            Err(error) => Some(error.to_string()),
+        },
+        KeyFile::Unreadable(error) => Some(format!("still unreadable after retries: {error}")),
+    };
+
+    if let Some(reason) = unusable {
+        crate::atomic_file::note_store_reset(label);
+        match crate::atomic_file::quarantine_corrupt(path) {
+            Ok(Some(target)) => eprintln!(
+                "voicewave: {label} key is unusable ({reason}); kept it at '{}' and regenerating",
+                target.display()
+            ),
+            Ok(None) => eprintln!("voicewave: {label} key vanished while unusable; regenerating"),
             Err(error) => {
-                eprintln!("voicewave: {label} key is unusable, regenerating: {error}");
-                if let Err(error) = crate::atomic_file::quarantine_corrupt(path) {
-                    eprintln!("voicewave: could not quarantine the {label} key: {error}");
-                }
-                crate::atomic_file::note_store_reset(label);
+                // Writing now would replace the only copy of a key that may
+                // still be fine once the lock clears. Run this session on a
+                // throwaway key and leave the file for the next launch.
+                eprintln!(
+                    "voicewave: {label} key is unusable ({reason}) and could not be moved aside \
+                     ({error}); using a session-only key and leaving the file untouched"
+                );
+                return Ok(random_key());
             }
         }
     }
 
-    let mut key = [0_u8; KEY_BYTES];
-    OsRng.fill_bytes(&mut key);
+    let key = random_key();
     let encoded = base64::engine::general_purpose::STANDARD.encode(key);
     crate::atomic_file::atomic_write(path, encoded.as_bytes()).map_err(|source| {
         SecureStoreError::Write {
@@ -81,6 +120,38 @@ pub(crate) fn load_or_create_key(
         }
     })?;
     Ok(key)
+}
+
+/// Reads the key file, retrying anything but `NotFound` with backoff. Only a
+/// genuine `NotFound` counts as missing: any other error means the file is
+/// (or may be) there and must not be replaced.
+fn read_key_file(path: &Path, label: &str) -> KeyFile {
+    if let Err(error) = crate::atomic_file::recover_interrupted_replace(path) {
+        eprintln!("voicewave: could not finish an interrupted {label} key write: {error}");
+    }
+    let mut attempt = 1;
+    loop {
+        match std::fs::read(path) {
+            // Lossy: a damaged key must reach `decode_key` and its quarantine
+            // path rather than surface as an I/O error.
+            Ok(bytes) => return KeyFile::Present(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return KeyFile::Missing,
+            Err(error) if attempt >= KEY_READ_ATTEMPTS => return KeyFile::Unreadable(error),
+            Err(error) => {
+                eprintln!(
+                    "voicewave: could not read the {label} key (attempt {attempt}), retrying: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(KEY_READ_BACKOFF_MS << (attempt - 1)));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn random_key() -> [u8; KEY_BYTES] {
+    let mut key = [0_u8; KEY_BYTES];
+    OsRng.fill_bytes(&mut key);
+    key
 }
 
 fn decode_key(encoded: &str, label: &str) -> Result<[u8; KEY_BYTES], SecureStoreError> {

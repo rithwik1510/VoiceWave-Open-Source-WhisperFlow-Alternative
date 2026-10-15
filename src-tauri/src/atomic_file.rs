@@ -126,13 +126,17 @@ pub fn read_to_string_recovering(path: &Path) -> io::Result<Option<String>> {
 /// Moves a file that could not be decoded aside as `<name>.corrupt-<millis>`
 /// so it stays available for support without blocking the next write. Returns
 /// `Ok(None)` when there was nothing to move.
+///
+/// Only a rename `NotFound` counts as "nothing to move": `Path::exists`
+/// reports `false` on *any* metadata error, which would let a caller treat a
+/// locked file as absent and write over it.
 pub fn quarantine_corrupt(path: &Path) -> io::Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
     let target = sibling_with_suffix(path, &format!(".corrupt-{}", now_utc_ms()));
-    fs::rename(path, &target)?;
-    Ok(Some(target))
+    match fs::rename(path, &target) {
+        Ok(()) => Ok(Some(target)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// What [`load_with_recovery`] found on disk.
