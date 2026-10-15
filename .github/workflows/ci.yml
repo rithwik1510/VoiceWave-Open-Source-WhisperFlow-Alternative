@@ -68,7 +68,7 @@ jobs:
         run: ./scripts/ci/check-phase0-artifacts.ps1
 
   frontend_quality:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,7 +92,7 @@ jobs:
         run: npm run build
 
   dependency_security:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
