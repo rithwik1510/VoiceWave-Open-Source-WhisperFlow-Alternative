@@ -26,7 +26,8 @@ async function announceUpdateOnPill(version: string): Promise<void> {
       detail: `VoiceWave ${version} — restart to install it.`,
       durationMs: 6000,
       transcript: null,
-      action: null
+      action: null,
+      recovery: false
     };
     await emit("voicewave://pill-notice", notice);
   } catch (err) {

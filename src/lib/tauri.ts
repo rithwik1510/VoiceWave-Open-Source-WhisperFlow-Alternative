@@ -34,6 +34,9 @@ import type {
   ModelStatus,
   MicLevelEvent,
   PillNoticePayload,
+  PillWindowMode,
+  PillQuickControlsEvent,
+  PillQuickControlsSnapshot,
   PolishProfile,
   PermissionSnapshot,
   RecentInsertion,
@@ -192,6 +195,44 @@ export async function listenVoicewavePillNotice(
   return listen("voicewave://pill-notice", (event: Event<PillNoticePayload>) =>
     callback(event.payload)
   );
+}
+
+export async function listenVoicewavePillQuickControls(
+  callback: (payload: PillQuickControlsEvent) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://pill-quick-controls", (event: Event<PillQuickControlsEvent>) =>
+    callback(event.payload)
+  );
+}
+
+/** Keeps the main window and floating pill aligned after a narrow settings
+ * mutation from either webview. The payload is the freshly persisted backend
+ * snapshot, never an optimistic/stale frontend copy. */
+export async function listenVoicewaveSettingsChanged(
+  callback: (payload: VoiceWaveSettings) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://settings-changed", (event: Event<VoiceWaveSettings>) =>
+    callback(event.payload)
+  );
+}
+
+/** Fired after correction candidates are durably added to the review queue. */
+export async function listenVoicewaveDictionaryQueueChanged(
+  callback: () => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://dictionary-queue-changed", () => callback());
 }
 
 export async function listenVoicewaveAudioQuality(
@@ -393,6 +434,21 @@ export async function setPillReviewMode(reviewMode: boolean): Promise<void> {
 
 export async function setPillNoticeMode(noticeMode: boolean, interactive = false): Promise<void> {
   await invokeVoicewave<void>("set_pill_notice_mode", { noticeMode, interactive });
+}
+
+export async function getPillQuickControlsSnapshot(): Promise<PillQuickControlsSnapshot> {
+  return invokeVoicewave<PillQuickControlsSnapshot>("get_pill_quick_controls_snapshot");
+}
+
+export async function setPillQuickControlsMode(open: boolean): Promise<void> {
+  await invokeVoicewave<void>("set_pill_quick_controls_mode", { open });
+}
+
+export async function setPillWindowMode(
+  mode: PillWindowMode,
+  interactive = false
+): Promise<void> {
+  await invokeVoicewave<void>("set_pill_window_mode", { mode, interactive });
 }
 
 export async function copyTextToClipboard(text: string): Promise<void> {

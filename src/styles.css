@@ -1829,6 +1829,127 @@ body {
   animation: vw-onb-tick-pop 640ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
 }
 
+.vw-onb-pill-tip {
+  width: min(100%, 390px);
+  min-height: 76px;
+  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--vw-color-border);
+  border-radius: 18px;
+  color: var(--vw-color-text-primary);
+  background: var(--vw-color-surface-subtle);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    transform 180ms ease;
+}
+
+.vw-onb-pill-tip:hover,
+.vw-onb-pill-tip:focus-visible,
+.vw-onb-pill-tip.is-open {
+  border-color: rgba(27, 142, 255, 0.42);
+  background: var(--vw-color-surface-hover);
+}
+
+.vw-onb-pill-tip:focus-visible {
+  outline: 2px solid var(--vw-accent-cyan-500);
+  outline-offset: 3px;
+}
+
+.vw-onb-pill-tip-visual {
+  width: 104px;
+  height: 52px;
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.vw-onb-pill-tip-line {
+  width: 54px;
+  height: 5px;
+  border-radius: 999px 999px 2px 2px;
+  background: linear-gradient(90deg, #3f3f46, #71717a, #3f3f46);
+  transition:
+    width 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease;
+}
+
+.vw-onb-pill-tip-card {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 0;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px;
+  border-radius: 15px;
+  color: #dff5ff;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(27, 142, 255, 0.25), transparent 42%),
+    linear-gradient(145deg, #27272a, #09090b);
+  box-shadow: inset 0 0 0 1px rgba(126, 216, 255, 0.22);
+  opacity: 0;
+  transform: translateY(9px) scale(0.72);
+  transform-origin: bottom center;
+  transition:
+    opacity 160ms ease,
+    transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.vw-onb-pill-tip-card span {
+  padding: 4px 5px;
+  border-radius: 6px;
+  background: rgba(39, 39, 42, 0.9);
+  font-size: 7px;
+  font-weight: 700;
+}
+
+.vw-onb-pill-tip-card span:last-child {
+  color: #19320d;
+  background: #bef264;
+}
+
+.vw-onb-pill-tip.is-open .vw-onb-pill-tip-line {
+  opacity: 0;
+  transform: translateY(-8px) scale(1.2);
+}
+
+.vw-onb-pill-tip.is-open .vw-onb-pill-tip-card {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.vw-onb-pill-tip-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.vw-onb-pill-tip-copy strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.vw-onb-pill-tip-copy span {
+  color: var(--vw-color-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .vw-onb-particles {
   position: absolute;
   inset: 0;
@@ -1846,6 +1967,9 @@ body {
   .vw-onb-done-orb,
   .vw-onb-dock,
   .vw-onb-stage-flash,
+  .vw-onb-pill-tip,
+  .vw-onb-pill-tip-line,
+  .vw-onb-pill-tip-card,
   .vw-onb-progress-fill::after {
     animation: none;
   }

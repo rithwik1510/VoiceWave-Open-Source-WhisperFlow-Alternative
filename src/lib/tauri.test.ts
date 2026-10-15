@@ -84,6 +84,35 @@ describe("tauri bridge", () => {
     expect(typeof unlisten).toBe("function");
   });
 
+  it("notifies only after the dictionary queue change event arrives", async () => {
+    enableTauriRuntimeFlag();
+    const callback = vi.fn();
+    eventMocks.listen.mockImplementationOnce(async (eventName, handler) => {
+      expect(eventName).toBe("voicewave://dictionary-queue-changed");
+      handler({ payload: 1 });
+      return () => undefined;
+    });
+
+    await tauri.listenVoicewaveDictionaryQueueChanged(callback);
+
+    expect(callback).toHaveBeenCalledOnce();
+  });
+
+  it("forwards the fresh backend settings snapshot to every webview listener", async () => {
+    enableTauriRuntimeFlag();
+    const callback = vi.fn();
+    const settings = { polishProfile: "writing" };
+    eventMocks.listen.mockImplementationOnce(async (eventName, handler) => {
+      expect(eventName).toBe("voicewave://settings-changed");
+      handler({ payload: settings });
+      return () => undefined;
+    });
+
+    await tauri.listenVoicewaveSettingsChanged(callback);
+
+    expect(callback).toHaveBeenCalledWith(settings);
+  });
+
   it("forwards bridge helpers to expected tauri commands", async () => {
     enableTauriRuntimeFlag();
 
@@ -100,6 +129,7 @@ describe("tauri bridge", () => {
     await tauri.setActiveDomainPacks(["general"] as never);
     await tauri.setAppProfileOverrides({} as never);
     await tauri.setCodeModeSettings({} as never);
+    await tauri.setDictationProfile("writing");
     await tauri.setProPostProcessingEnabled(true);
     await tauri.getDiagnosticsStatus();
     await tauri.setDiagnosticsOptIn(true);
@@ -120,6 +150,9 @@ describe("tauri bridge", () => {
     await tauri.stopDictation();
     await tauri.showMainWindow();
     await tauri.setPillReviewMode(true);
+    await tauri.getPillQuickControlsSnapshot();
+    await tauri.setPillQuickControlsMode(true);
+    await tauri.setPillWindowMode("notice", true);
     await tauri.triggerHotkeyAction("toggle" as never, "down" as never);
     await tauri.listModelCatalog();
     await tauri.listInstalledModels();
@@ -181,6 +214,20 @@ describe("tauri bridge", () => {
     expect(coreMocks.invoke).toHaveBeenCalledWith("start_dictation", {
       mode: "microphone",
       controlMode: "handsFree"
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("set_dictation_profile", {
+      profile: "writing"
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith(
+      "get_pill_quick_controls_snapshot",
+      undefined
+    );
+    expect(coreMocks.invoke).toHaveBeenCalledWith("set_pill_quick_controls_mode", {
+      open: true
+    });
+    expect(coreMocks.invoke).toHaveBeenCalledWith("set_pill_window_mode", {
+      mode: "notice",
+      interactive: true
     });
     expect(coreMocks.invoke).toHaveBeenCalledWith("search_session_history", {
       query: "hello",

@@ -12,6 +12,8 @@ pub mod insertion;
 pub mod model_manager;
 pub mod permissions;
 pub mod phase1;
+#[cfg(feature = "desktop")]
+mod pill_hit_target;
 mod secure_store;
 pub mod settings;
 pub mod snippet;
@@ -50,6 +52,8 @@ use model_manager::{InstalledModel, ModelCatalogItem, ModelDownloadRequest, Mode
 #[cfg(feature = "desktop")]
 use permissions::PermissionSnapshot;
 #[cfg(feature = "desktop")]
+use pill_hit_target::PillHitTarget;
+#[cfg(feature = "desktop")]
 use settings::{
     AppProfileOverrides, CodeModeSettings, DomainPackId, FormatProfile, VoiceWaveSettings,
 };
@@ -60,7 +64,10 @@ use state::{DictationControlMode, DictationMode, VoiceWaveController, VoiceWaveS
 #[cfg(feature = "desktop")]
 use stats::StatsSummary;
 #[cfg(feature = "desktop")]
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex as StdMutex,
+};
 #[cfg(feature = "desktop")]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
@@ -71,6 +78,9 @@ use tauri::{
 
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_LABEL: &str = "voicewave-pill";
+
+#[cfg(feature = "desktop")]
+const PILL_QUICK_CONTROLS_SPIKE_ENV: &str = "VOICEWAVE_PILL_QUICK_CONTROLS_SPIKE";
 
 #[cfg(feature = "desktop")]
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,11 +152,136 @@ const PILL_WINDOW_NOTICE_BOTTOM_MARGIN: f64 = 0.0;
 #[cfg(feature = "desktop")]
 const PILL_WINDOW_NUDGE_X: i32 = -22;
 #[cfg(feature = "desktop")]
+const PILL_HIT_TARGET_WIDTH: f64 = 72.0;
+#[cfg(feature = "desktop")]
+const PILL_HIT_TARGET_HEIGHT: f64 = 20.0;
+#[cfg(feature = "desktop")]
+const PILL_WINDOW_SPIKE_QUICK_WIDTH: f64 = 340.0;
+#[cfg(feature = "desktop")]
+const PILL_WINDOW_SPIKE_QUICK_HEIGHT: f64 = 184.0;
+#[cfg(feature = "desktop")]
+const PILL_WINDOW_SPIKE_QUICK_BOTTOM_MARGIN: f64 = 12.0;
+#[cfg(feature = "desktop")]
 const TRAY_ID: &str = "voicewave-tray";
 #[cfg(feature = "desktop")]
 const TRAY_SHOW_ID: &str = "show";
 #[cfg(feature = "desktop")]
+const TRAY_QUICK_CONTROLS_ID: &str = "quick-controls";
+#[cfg(feature = "desktop")]
 const TRAY_QUIT_ID: &str = "quit";
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum PillQuickControlsInvocation {
+    Mouse,
+    Focused,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PillQuickControlsSnapshot {
+    enabled: bool,
+    invocation: Option<PillQuickControlsInvocation>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PillQuickControlsEvent {
+    open: bool,
+    invocation: Option<PillQuickControlsInvocation>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Default)]
+struct PillQuickControlsSpikeInner {
+    invocation: Option<PillQuickControlsInvocation>,
+    session_generation: u64,
+    // HWND is process-local and pointer-sized. Store the integer value so the
+    // managed state remains Send + Sync; it is validated with IsWindow before
+    // every use and is never persisted across launches.
+    prior_foreground_hwnd: Option<isize>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug)]
+struct PillQuickControlsSpikeState {
+    enabled: bool,
+    inner: StdMutex<PillQuickControlsSpikeInner>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug)]
+struct PillHitTargetState {
+    target: StdMutex<Option<PillHitTarget>>,
+    blockers: StdMutex<PillHitTargetBlockers>,
+    desired_visible: AtomicBool,
+}
+
+#[cfg(feature = "desktop")]
+impl Default for PillHitTargetState {
+    fn default() -> Self {
+        Self {
+            target: StdMutex::new(None),
+            blockers: StdMutex::new(PillHitTargetBlockers::default()),
+            desired_visible: AtomicBool::new(false),
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Default)]
+struct PillHitTargetBlockers {
+    review: bool,
+    notice: bool,
+    lifecycle: bool,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PillWindowMode {
+    Compact,
+    Review,
+    Notice,
+}
+
+#[cfg(feature = "desktop")]
+impl PillQuickControlsSpikeState {
+    fn from_env() -> Self {
+        Self {
+            enabled: env_flag_enabled(std::env::var(PILL_QUICK_CONTROLS_SPIKE_ENV).ok().as_deref()),
+            inner: StdMutex::new(PillQuickControlsSpikeInner::default()),
+        }
+    }
+
+    fn snapshot(&self) -> PillQuickControlsSnapshot {
+        let invocation = self.inner.lock().ok().and_then(|inner| inner.invocation);
+        PillQuickControlsSnapshot {
+            enabled: self.enabled,
+            invocation,
+        }
+    }
+
+    fn focused_session_generation(&self) -> Option<u64> {
+        self.inner.lock().ok().and_then(|inner| {
+            (inner.invocation == Some(PillQuickControlsInvocation::Focused))
+                .then_some(inner.session_generation)
+        })
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
 
 #[cfg(feature = "desktop")]
 #[derive(Clone)]
@@ -194,6 +329,34 @@ fn ensure_pill_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, St
     let window = builder
         .build()
         .map_err(|err| format!("failed to create floating pill window: {err}"))?;
+    let focus_app = app.clone();
+    let focus_window = window.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, WindowEvent::Focused(false)) {
+            return;
+        }
+        let Some(generation) = focus_app
+            .state::<PillQuickControlsSpikeState>()
+            .focused_session_generation()
+        else {
+            return;
+        };
+        let app = focus_app.clone();
+        let pill = focus_window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(140)).await;
+            let still_same_session = app
+                .state::<PillQuickControlsSpikeState>()
+                .focused_session_generation()
+                == Some(generation);
+            let still_unfocused = pill.is_focused().map(|focused| !focused).unwrap_or(true);
+            if still_same_session && still_unfocused {
+                if let Err(err) = dismiss_pill_quick_controls_spike_if_open(&app) {
+                    eprintln!("voicewave: failed to close unfocused Quick Controls: {err}");
+                }
+            }
+        });
+    });
     if let Err(err) = position_pill_window(
         app,
         &window,
@@ -250,6 +413,341 @@ fn position_pill_window(
 }
 
 #[cfg(feature = "desktop")]
+fn pill_hit_target_bounds(app: &tauri::AppHandle) -> Result<(i32, i32, i32, i32), String> {
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|pos| app.monitor_from_point(pos.x, pos.y).ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|main| main.current_monitor().ok().flatten())
+        })
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no monitor available for pill hit target".to_string())?;
+    let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let width = (PILL_HIT_TARGET_WIDTH * scale).round() as i32;
+    let height = (PILL_HIT_TARGET_HEIGHT * scale).round() as i32;
+    let center_offset_x = ((work_area.size.width as i32 - width) / 2).max(0);
+    let bottom_offset_y = (work_area.size.height as i32 - height).max(0);
+    let nudge_x = ((PILL_WINDOW_NUDGE_X as f64) * scale).round() as i32;
+    Ok((
+        work_area.position.x + center_offset_x + nudge_x,
+        work_area.position.y + bottom_offset_y,
+        width,
+        height,
+    ))
+}
+
+#[cfg(feature = "desktop")]
+fn pill_window_geometry(mode: PillWindowMode) -> (f64, f64, f64) {
+    match mode {
+        PillWindowMode::Compact => (
+            PILL_WINDOW_COMPACT_WIDTH,
+            PILL_WINDOW_COMPACT_HEIGHT,
+            PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
+        ),
+        PillWindowMode::Review => (
+            PILL_WINDOW_REVIEW_WIDTH,
+            PILL_WINDOW_REVIEW_HEIGHT,
+            PILL_WINDOW_REVIEW_BOTTOM_MARGIN,
+        ),
+        PillWindowMode::Notice => (
+            PILL_WINDOW_NOTICE_WIDTH,
+            PILL_WINDOW_NOTICE_HEIGHT,
+            PILL_WINDOW_NOTICE_BOTTOM_MARGIN,
+        ),
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn show_pill_hit_target(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<PillHitTargetState>();
+    if !state.desired_visible.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if app
+        .state::<PillQuickControlsSpikeState>()
+        .snapshot()
+        .invocation
+        .is_some()
+    {
+        return Ok(());
+    }
+    let blocked = state
+        .blockers
+        .lock()
+        .map_err(|_| "pill hit-target blocker state is poisoned".to_string())?;
+    if blocked.review || blocked.notice || blocked.lifecycle {
+        return Ok(());
+    }
+    drop(blocked);
+    if foreground_is_fullscreen() {
+        hide_pill_hit_target(app);
+        return Ok(());
+    }
+    let (x, y, width, height) = pill_hit_target_bounds(app)?;
+    let target = state
+        .target
+        .lock()
+        .map_err(|_| "pill hit-target state is poisoned".to_string())?;
+    if let Some(target) = target.as_ref() {
+        target.show(x, y, width, height)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn foreground_is_fullscreen() -> bool {
+    use windows_sys::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        },
+        UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GWL_STYLE, WS_CAPTION,
+            WS_THICKFRAME,
+        },
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return false;
+    }
+    let mut window_rect: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0 {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return false;
+    }
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return false;
+    }
+
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let looks_like_normal_window = style & (WS_CAPTION | WS_THICKFRAME) != 0;
+    fullscreen_geometry_matches(
+        [
+            window_rect.left,
+            window_rect.top,
+            window_rect.right,
+            window_rect.bottom,
+        ],
+        [
+            info.rcMonitor.left,
+            info.rcMonitor.top,
+            info.rcMonitor.right,
+            info.rcMonitor.bottom,
+        ],
+        looks_like_normal_window,
+    )
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn foreground_is_fullscreen() -> bool {
+    false
+}
+
+#[cfg(feature = "desktop")]
+fn fullscreen_geometry_matches(
+    window_rect: [i32; 4],
+    monitor_rect: [i32; 4],
+    has_normal_frame: bool,
+) -> bool {
+    const TOLERANCE: i32 = 2;
+    let covers_monitor = window_rect[0] <= monitor_rect[0] + TOLERANCE
+        && window_rect[1] <= monitor_rect[1] + TOLERANCE
+        && window_rect[2] >= monitor_rect[2] - TOLERANCE
+        && window_rect[3] >= monitor_rect[3] - TOLERANCE;
+    covers_monitor && !has_normal_frame
+}
+
+#[cfg(feature = "desktop")]
+fn set_pill_hit_target_blocker(
+    app: &tauri::AppHandle,
+    review: Option<bool>,
+    notice: Option<bool>,
+    lifecycle: Option<bool>,
+) -> Result<(), String> {
+    let state = app.state::<PillHitTargetState>();
+    let mut blockers = state
+        .blockers
+        .lock()
+        .map_err(|_| "pill hit-target blocker state is poisoned".to_string())?;
+    if let Some(review) = review {
+        blockers.review = review;
+    }
+    if let Some(notice) = notice {
+        blockers.notice = notice;
+    }
+    if let Some(lifecycle) = lifecycle {
+        blockers.lifecycle = lifecycle;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+fn hide_pill_hit_target(app: &tauri::AppHandle) {
+    let state = app.state::<PillHitTargetState>();
+    if let Ok(target) = state.target.lock() {
+        if let Some(target) = target.as_ref() {
+            target.hide();
+        }
+    };
+}
+
+#[cfg(feature = "desktop")]
+fn initialize_pill_hit_target(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if !app.state::<PillQuickControlsSpikeState>().enabled {
+        return Ok(());
+    }
+    let click_app = app.clone();
+    let target = PillHitTarget::spawn(move || {
+        let spike = click_app.state::<PillQuickControlsSpikeState>();
+        if !spike.enabled || spike.snapshot().invocation.is_some() {
+            return;
+        }
+        hide_pill_hit_target(&click_app);
+        if let Err(err) = apply_pill_quick_controls_spike_mode(
+            &click_app,
+            &spike,
+            true,
+            PillQuickControlsInvocation::Mouse,
+        ) {
+            eprintln!("voicewave: native pill click failed to open Quick Controls: {err}");
+            let _ = show_pill_hit_target(&click_app);
+        }
+    })?;
+    *app.state::<PillHitTargetState>()
+        .target
+        .lock()
+        .map_err(|_| "pill hit-target state is poisoned".to_string())? = Some(target);
+    let monitor_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            if let Err(err) = show_pill_hit_target(&monitor_app) {
+                eprintln!("voicewave: pill hit-target safety refresh failed: {err}");
+            }
+        }
+    });
+    if visible {
+        show_pill_hit_target(app)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn set_spike_window_no_activate(
+    window: &tauri::WebviewWindow,
+    no_activate: bool,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+
+    let hwnd = window
+        .hwnd()
+        .map_err(|err| format!("failed to get floating pill HWND: {err}"))?;
+    let raw_hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+    let current = unsafe { GetWindowLongPtrW(raw_hwnd, GWL_EXSTYLE) };
+    let no_activate_bit = WS_EX_NOACTIVATE as isize;
+    let updated = if no_activate {
+        current | no_activate_bit
+    } else {
+        current & !no_activate_bit
+    };
+    if updated != current {
+        // SetWindowLongPtrW returns the previous value; a zero previous value
+        // is valid, so there is no reliable error sentinel without clearing
+        // GetLastError first. Read the style back and verify the exact bit.
+        unsafe {
+            SetWindowLongPtrW(raw_hwnd, GWL_EXSTYLE, updated);
+        }
+        let verified = unsafe { GetWindowLongPtrW(raw_hwnd, GWL_EXSTYLE) };
+        if (verified & no_activate_bit != 0) != no_activate {
+            return Err("failed to apply floating pill no-activate style".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn set_spike_window_no_activate(
+    _window: &tauri::WebviewWindow,
+    _no_activate: bool,
+) -> Result<(), String> {
+    Err("pill Quick Controls spike is Windows-only".to_string())
+}
+
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn resize_and_position_spike_window_no_activate(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    width_logical: f64,
+    height_logical: f64,
+    bottom_margin_logical: f64,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SWP_SHOWWINDOW,
+    };
+
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|pos| app.monitor_from_point(pos.x, pos.y).ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|main| main.current_monitor().ok().flatten())
+        })
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no monitor available for floating pill".to_string())?;
+    let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let width = (width_logical * scale).round() as i32;
+    let height = (height_logical * scale).round() as i32;
+    let margin = (bottom_margin_logical * scale).round() as i32;
+    let center_offset_x = ((work_area.size.width as i32 - width) / 2).max(0);
+    let bottom_offset_y = (work_area.size.height as i32 - height - margin).max(0);
+    let nudge_x = ((PILL_WINDOW_NUDGE_X as f64) * scale).round() as i32;
+    let x = work_area.position.x + center_offset_x + nudge_x;
+    let y = work_area.position.y + bottom_offset_y;
+    let hwnd = window
+        .hwnd()
+        .map_err(|err| format!("failed to get floating pill HWND: {err}"))?;
+    let succeeded = unsafe {
+        SetWindowPos(
+            hwnd.0 as windows_sys::Win32::Foundation::HWND,
+            std::ptr::null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_SHOWWINDOW,
+        )
+    };
+    if succeeded == 0 {
+        return Err("failed to resize and position floating pill without activation".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn resize_and_position_spike_window_no_activate(
+    _app: &tauri::AppHandle,
+    _window: &tauri::WebviewWindow,
+    _width_logical: f64,
+    _height_logical: f64,
+    _bottom_margin_logical: f64,
+) -> Result<(), String> {
+    Err("pill Quick Controls spike is Windows-only".to_string())
+}
+
+#[cfg(feature = "desktop")]
 fn show_pill_for_listening(app: &tauri::AppHandle) -> Result<(), String> {
     let pill = ensure_pill_window(app)?;
 
@@ -279,23 +777,44 @@ fn show_pill_for_listening(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 #[cfg(feature = "desktop")]
-fn state_payload_is_listening(payload: &str) -> bool {
+fn state_payload_hud_state(payload: &str) -> Option<state::VoiceWaveHudState> {
     serde_json::from_str::<serde_json::Value>(payload)
         .ok()
         .and_then(|value| {
             value
                 .get("state")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
+                .cloned()
+                .and_then(|state| serde_json::from_value(state).ok())
         })
-        .is_some_and(|state| state == "listening")
+}
+
+#[cfg(all(test, feature = "desktop"))]
+fn state_payload_is_listening(payload: &str) -> bool {
+    state_payload_hud_state(payload)
+        .is_some_and(|state| state == state::VoiceWaveHudState::Listening)
 }
 
 #[cfg(feature = "desktop")]
 fn sync_pill_visibility(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
+    app.state::<PillHitTargetState>()
+        .desired_visible
+        .store(visible, Ordering::Release);
     if visible {
-        show_pill_for_listening(app)?;
+        let spike = app.state::<PillQuickControlsSpikeState>();
+        // Updating an unrelated setting must not resize an open tray card.
+        // At every other time the original click-through pill owns the HUD.
+        if !spike.enabled || spike.snapshot().invocation.is_none() {
+            show_pill_for_listening(app)?;
+            if spike.enabled {
+                show_pill_hit_target(app)?;
+            }
+        }
     } else {
+        hide_pill_hit_target(app);
+        // A focused tray invocation temporarily owns the foreground. Restore
+        // its original target before hiding the pill; leaving a hidden focused
+        // WebView behind would make the next dictation insert into VoiceWave.
+        dismiss_pill_quick_controls_spike_if_open(app)?;
         let pill = ensure_pill_window(app)?;
         pill.hide()
             .map_err(|err| format!("failed to hide floating pill: {err}"))?;
@@ -333,13 +852,26 @@ fn configure_system_tray(app: &tauri::AppHandle) -> Result<(), String> {
     let show_item = MenuItemBuilder::with_id(TRAY_SHOW_ID, "Open VoiceWave")
         .build(app)
         .map_err(|err| format!("failed to build tray show item: {err}"))?;
+    let quick_controls_item = app
+        .try_state::<PillQuickControlsSpikeState>()
+        .filter(|state| state.enabled)
+        .map(|_| {
+            MenuItemBuilder::with_id(TRAY_QUICK_CONTROLS_ID, "Quick Controls (experiment)")
+                .build(app)
+                .map_err(|err| format!("failed to build tray Quick Controls item: {err}"))
+        })
+        .transpose()?;
     let quit_item = MenuItemBuilder::with_id(TRAY_QUIT_ID, "Quit VoiceWave")
         .build(app)
         .map_err(|err| format!("failed to build tray quit item: {err}"))?;
-    let menu = MenuBuilder::new(app)
-        .items(&[&show_item, &quit_item])
-        .build()
-        .map_err(|err| format!("failed to build tray menu: {err}"))?;
+    let menu_builder = MenuBuilder::new(app);
+    let menu = if let Some(quick_controls_item) = quick_controls_item.as_ref() {
+        menu_builder.items(&[&show_item, quick_controls_item, &quit_item])
+    } else {
+        menu_builder.items(&[&show_item, &quit_item])
+    }
+    .build()
+    .map_err(|err| format!("failed to build tray menu: {err}"))?;
 
     let icon = app
         .default_window_icon()
@@ -358,6 +890,17 @@ fn configure_system_tray(app: &tauri::AppHandle) -> Result<(), String> {
                     tauri::async_runtime::spawn(async move {
                         let _ = show_main_window(app_handle).await;
                     });
+                }
+                TRAY_QUICK_CONTROLS_ID => {
+                    let spike = app.state::<PillQuickControlsSpikeState>();
+                    if let Err(err) = apply_pill_quick_controls_spike_mode(
+                        app,
+                        &spike,
+                        true,
+                        PillQuickControlsInvocation::Focused,
+                    ) {
+                        eprintln!("voicewave: failed to open tray Quick Controls: {err}");
+                    }
                 }
                 TRAY_QUIT_ID => {
                     shutdown_inference_workers();
@@ -561,14 +1104,19 @@ async fn set_pro_post_processing_enabled(
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn set_dictation_profile(
+    app: tauri::AppHandle,
     runtime: State<'_, RuntimeContext>,
     profile: String,
 ) -> Result<VoiceWaveSettings, String> {
-    runtime
+    let updated = runtime
         .controller
         .set_dictation_profile(profile)
         .await
-        .map_err(|err| AppError::Controller(err).into())
+        .map_err(|err| String::from(AppError::Controller(err)))?;
+    if let Err(err) = app.emit("voicewave://settings-changed", updated.clone()) {
+        eprintln!("voicewave: failed to emit settings change: {err}");
+    }
+    Ok(updated)
 }
 
 #[cfg(feature = "desktop")]
@@ -588,40 +1136,271 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn capture_foreground_for_focused_spike(
+    app: &tauri::AppHandle,
+    pill: &tauri::WebviewWindow,
+) -> Result<Option<isize>, String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return Ok(None);
+    }
+    let pill_hwnd = pill
+        .hwnd()
+        .map_err(|err| format!("failed to get floating pill HWND: {err}"))?
+        .0 as windows_sys::Win32::Foundation::HWND;
+    let main_hwnd = app
+        .get_webview_window("main")
+        .and_then(|main| main.hwnd().ok())
+        .map(|hwnd| hwnd.0 as windows_sys::Win32::Foundation::HWND);
+    if foreground == pill_hwnd || main_hwnd.is_some_and(|hwnd| hwnd == foreground) {
+        return Ok(None);
+    }
+    Ok(Some(foreground as isize))
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn capture_foreground_for_focused_spike(
+    _app: &tauri::AppHandle,
+    _pill: &tauri::WebviewWindow,
+) -> Result<Option<isize>, String> {
+    Ok(None)
+}
+
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn restore_focused_spike_target_if_safe(
+    pill: &tauri::WebviewWindow,
+    prior_hwnd: Option<isize>,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindow, SetForegroundWindow,
+    };
+
+    let Some(prior_hwnd) = prior_hwnd else {
+        return Ok(());
+    };
+    let prior_hwnd = prior_hwnd as windows_sys::Win32::Foundation::HWND;
+    let pill_hwnd = pill
+        .hwnd()
+        .map_err(|err| format!("failed to get floating pill HWND: {err}"))?
+        .0 as windows_sys::Win32::Foundation::HWND;
+    let foreground = unsafe { GetForegroundWindow() };
+    // Never pull the user away from an application they intentionally focused
+    // while the card was open. Restore only when the pill itself still owns
+    // the foreground (focused tray path or an activating WebView2 control).
+    if foreground != pill_hwnd {
+        return Ok(());
+    }
+    if unsafe { IsWindow(prior_hwnd) } == 0 {
+        return Err("previous foreground window is no longer valid".to_string());
+    }
+    if unsafe { SetForegroundWindow(prior_hwnd) } == 0 {
+        return Err("Windows refused to restore the previous foreground window".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn restore_focused_spike_target_if_safe(
+    _pill: &tauri::WebviewWindow,
+    _prior_hwnd: Option<isize>,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+fn apply_pill_quick_controls_spike_mode(
+    app: &tauri::AppHandle,
+    state: &PillQuickControlsSpikeState,
+    open: bool,
+    invocation: PillQuickControlsInvocation,
+) -> Result<(), String> {
+    if !state.enabled {
+        return Err(format!(
+            "pill Quick Controls spike is disabled; set {PILL_QUICK_CONTROLS_SPIKE_ENV}=1 to enable it"
+        ));
+    }
+    let pill = ensure_pill_window(app)?;
+
+    if open {
+        hide_pill_hit_target(app);
+        // Capture for both paths. A native mouse click should not activate the
+        // pill, but WebView2 control interaction still might; collapse can
+        // then restore the original HWND without overriding a different app
+        // the user intentionally focused.
+        let prior_foreground_hwnd = capture_foreground_for_focused_spike(app, &pill)?;
+        set_spike_window_no_activate(&pill, invocation == PillQuickControlsInvocation::Mouse)?;
+        pill.set_ignore_cursor_events(false)
+            .map_err(|err| format!("failed to make Quick Controls interactive: {err}"))?;
+        resize_and_position_spike_window_no_activate(
+            app,
+            &pill,
+            PILL_WINDOW_SPIKE_QUICK_WIDTH,
+            PILL_WINDOW_SPIKE_QUICK_HEIGHT,
+            PILL_WINDOW_SPIKE_QUICK_BOTTOM_MARGIN,
+        )?;
+        if invocation == PillQuickControlsInvocation::Focused {
+            pill.set_focus()
+                .map_err(|err| format!("failed to focus Quick Controls experiment: {err}"))?;
+        }
+        let mut inner = state
+            .inner
+            .lock()
+            .map_err(|_| "pill Quick Controls spike state is poisoned".to_string())?;
+        inner.session_generation = inner.session_generation.wrapping_add(1);
+        inner.invocation = Some(invocation);
+        inner.prior_foreground_hwnd = prior_foreground_hwnd;
+    } else {
+        let (active_invocation, prior_foreground_hwnd) = {
+            let mut inner = state
+                .inner
+                .lock()
+                .map_err(|_| "pill Quick Controls spike state is poisoned".to_string())?;
+            inner.session_generation = inner.session_generation.wrapping_add(1);
+            let snapshot = (inner.invocation.take(), inner.prior_foreground_hwnd.take());
+            snapshot
+        };
+        // Always collapse back to the original 200x96, click-through visual
+        // pill. The separate native hit target owns only the initial click.
+        show_pill_for_listening(app)?;
+
+        // The compact, non-activating geometry is already back in place
+        // before we restore a tray invocation's target. If Windows rejects
+        // the restore, the UI is still safely collapsed and cannot steal the
+        // next dictation's insertion target.
+        let restore_error = if active_invocation.is_some() {
+            restore_focused_spike_target_if_safe(&pill, prior_foreground_hwnd).err()
+        } else {
+            None
+        };
+
+        let event = PillQuickControlsEvent {
+            open: false,
+            invocation: None,
+        };
+        app.emit_to(PILL_WINDOW_LABEL, "voicewave://pill-quick-controls", event)
+            .map_err(|err| format!("failed to emit Quick Controls spike state: {err}"))?;
+        if let Some(err) = restore_error {
+            return Err(err);
+        }
+        return Ok(());
+    }
+
+    let event = PillQuickControlsEvent {
+        open: true,
+        invocation: Some(invocation),
+    };
+    app.emit_to(PILL_WINDOW_LABEL, "voicewave://pill-quick-controls", event)
+        .map_err(|err| format!("failed to emit Quick Controls spike state: {err}"))?;
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+fn dismiss_pill_quick_controls_spike_if_open(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<PillQuickControlsSpikeState>();
+    let invocation = state
+        .inner
+        .lock()
+        .map_err(|_| "pill Quick Controls spike state is poisoned".to_string())?
+        .invocation;
+    if let Some(invocation) = invocation {
+        apply_pill_quick_controls_spike_mode(app, &state, false, invocation)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn get_pill_quick_controls_snapshot(
+    spike: State<'_, PillQuickControlsSpikeState>,
+) -> Result<PillQuickControlsSnapshot, String> {
+    Ok(spike.snapshot())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_pill_quick_controls_mode(
+    app: tauri::AppHandle,
+    spike: State<'_, PillQuickControlsSpikeState>,
+    open: bool,
+) -> Result<(), String> {
+    if open {
+        return Err(
+            "direct pill click is disabled after the Windows interaction gate failed".to_string(),
+        );
+    }
+    let invocation = spike
+        .inner
+        .lock()
+        .map_err(|_| "pill Quick Controls spike state is poisoned".to_string())?
+        .invocation
+        .unwrap_or(PillQuickControlsInvocation::Focused);
+    apply_pill_quick_controls_spike_mode(&app, &spike, false, invocation)?;
+    show_pill_hit_target(&app)
+}
+
+#[cfg(feature = "desktop")]
+fn apply_pill_window_mode(
+    app: &tauri::AppHandle,
+    mode: PillWindowMode,
+    interactive: bool,
+) -> Result<(), String> {
+    if app
+        .state::<PillQuickControlsSpikeState>()
+        .snapshot()
+        .invocation
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let pill = ensure_pill_window(app)?;
+    let review_mode = mode == PillWindowMode::Review;
+    let notice_mode = mode == PillWindowMode::Notice;
+    set_pill_hit_target_blocker(app, Some(review_mode), Some(notice_mode), None)?;
+
+    if mode != PillWindowMode::Compact {
+        hide_pill_hit_target(app);
+    }
+
+    let pointer_interactive = review_mode || (notice_mode && interactive);
+    let _ = pill.set_ignore_cursor_events(!pointer_interactive);
+    let (width, height, margin) = pill_window_geometry(mode);
+    pill.set_size(Size::Logical(LogicalSize::new(width, height)))
+        .map_err(|err| format!("failed to resize floating pill for {mode:?}: {err}"))?;
+    position_pill_window(app, &pill, width, height, margin)?;
+
+    if notice_mode {
+        // Notices may be emitted while the status HUD is between visible
+        // lifecycle states; the user still needs to see the notice.
+        let _ = pill.show();
+    } else if mode == PillWindowMode::Compact {
+        show_pill_hit_target(app)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_pill_window_mode(
+    app: tauri::AppHandle,
+    mode: PillWindowMode,
+    interactive: Option<bool>,
+) -> Result<(), String> {
+    apply_pill_window_mode(&app, mode, interactive.unwrap_or(false))
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn set_pill_review_mode(app: tauri::AppHandle, review_mode: bool) -> Result<(), String> {
-    let pill = ensure_pill_window(&app)?;
-    if review_mode {
-        let _ = pill.set_ignore_cursor_events(false);
-        pill.set_size(Size::Logical(LogicalSize::new(
-            PILL_WINDOW_REVIEW_WIDTH,
-            PILL_WINDOW_REVIEW_HEIGHT,
-        )))
-        .map_err(|err| format!("failed to expand floating pill: {err}"))?;
-        position_pill_window(
-            &app,
-            &pill,
-            PILL_WINDOW_REVIEW_WIDTH,
-            PILL_WINDOW_REVIEW_HEIGHT,
-            PILL_WINDOW_REVIEW_BOTTOM_MARGIN,
-        )?;
+    let mode = if review_mode {
+        PillWindowMode::Review
     } else {
-        let _ = pill.set_ignore_cursor_events(true);
-        pill.set_size(Size::Logical(LogicalSize::new(
-            PILL_WINDOW_COMPACT_WIDTH,
-            PILL_WINDOW_COMPACT_HEIGHT,
-        )))
-        .map_err(|err| format!("failed to collapse floating pill: {err}"))?;
-        position_pill_window(
-            &app,
-            &pill,
-            PILL_WINDOW_COMPACT_WIDTH,
-            PILL_WINDOW_COMPACT_HEIGHT,
-            PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-        )?;
-    }
-    Ok(())
+        PillWindowMode::Compact
+    };
+    apply_pill_window_mode(&app, mode, review_mode)
 }
 
 #[cfg(feature = "desktop")]
@@ -631,33 +1410,12 @@ async fn set_pill_notice_mode(
     notice_mode: bool,
     interactive: Option<bool>,
 ) -> Result<(), String> {
-    let pill = ensure_pill_window(&app)?;
-    // Plain notices are read-only and stay click-through; rescue notices with
-    // an action button need pointer input while expanded (like review mode).
-    let interactive = notice_mode && interactive.unwrap_or(false);
-    let _ = pill.set_ignore_cursor_events(!interactive);
-    let (width, height, margin) = if notice_mode {
-        (
-            PILL_WINDOW_NOTICE_WIDTH,
-            PILL_WINDOW_NOTICE_HEIGHT,
-            PILL_WINDOW_NOTICE_BOTTOM_MARGIN,
-        )
+    let mode = if notice_mode {
+        PillWindowMode::Notice
     } else {
-        (
-            PILL_WINDOW_COMPACT_WIDTH,
-            PILL_WINDOW_COMPACT_HEIGHT,
-            PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
-        )
+        PillWindowMode::Compact
     };
-    pill.set_size(Size::Logical(LogicalSize::new(width, height)))
-        .map_err(|err| format!("failed to resize floating pill for notice: {err}"))?;
-    position_pill_window(&app, &pill, width, height, margin)?;
-    // A notice must be visible even when the pill was hidden (e.g. idle with
-    // HUD hidden between dictations).
-    if notice_mode {
-        let _ = pill.show();
-    }
-    Ok(())
+    apply_pill_window_mode(&app, mode, interactive.unwrap_or(false))
 }
 
 #[cfg(feature = "desktop")]
@@ -1428,6 +2186,9 @@ pub fn run() {
         // and insert every dictation (text lands twice). A second launch must
         // focus the existing window instead. Must be the first plugin
         // registered.
+        // The PRIMARY guard now lives in `main()` (a named mutex claimed
+        // before any Tauri code); this plugin is the second line of defence
+        // and only ever runs after that guard has let us through.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -1472,6 +2233,11 @@ pub fn run() {
 
             let controller_for_pill_state = controller.clone();
             app.manage(RuntimeContext { controller });
+            app.manage(PillQuickControlsSpikeState::from_env());
+            app.manage(PillHitTargetState::default());
+            initialize_pill_hit_target(&app.handle().clone(), false).map_err(
+                |err| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(err)) },
+            )?;
 
             let app_handle = app.handle().clone();
             let tray_ready = match configure_system_tray(&app_handle) {
@@ -1499,18 +2265,55 @@ pub fn run() {
             {
                 let listening_handle = app.handle().clone();
                 app.handle().listen("voicewave://state", move |event| {
-                    if !state_payload_is_listening(event.payload()) {
+                    let Some(hud_state) = state_payload_hud_state(event.payload()) else {
                         return;
-                    }
+                    };
                     let handle = listening_handle.clone();
+                    let lifecycle_blocked = hud_state != state::VoiceWaveHudState::Idle;
+                    let _ =
+                        set_pill_hit_target_blocker(&handle, None, None, Some(lifecycle_blocked));
                     let controller = controller_for_pill_state.clone();
                     tauri::async_runtime::spawn(async move {
                         // Preserve the explicit user preference to disable
-                        // the HUD; otherwise every Listening transition must
-                        // end with a visible compact pill.
-                        if controller.load_settings().await.show_floating_hud {
-                            if let Err(err) = show_pill_for_listening(&handle) {
-                                eprintln!("voicewave: listening pill recovery failed: {err}");
+                        // the HUD. Recording/transcription must never leave a
+                        // click target over the user's foreground app.
+                        if !controller.load_settings().await.show_floating_hud {
+                            hide_pill_hit_target(&handle);
+                            return;
+                        }
+                        match hud_state {
+                            state::VoiceWaveHudState::Listening => {
+                                hide_pill_hit_target(&handle);
+                                let result = dismiss_pill_quick_controls_spike_if_open(&handle)
+                                    .and_then(|_| show_pill_for_listening(&handle));
+                                if let Err(err) = result {
+                                    eprintln!("voicewave: listening pill recovery failed: {err}");
+                                }
+                            }
+                            state::VoiceWaveHudState::Transcribing => {
+                                hide_pill_hit_target(&handle);
+                            }
+                            state::VoiceWaveHudState::Idle => {
+                                let _ = show_pill_hit_target(&handle);
+                            }
+                            state::VoiceWaveHudState::Inserted
+                            | state::VoiceWaveHudState::Error => {
+                                hide_pill_hit_target(&handle);
+                                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                                let snapshot = controller.snapshot().await;
+                                if matches!(
+                                    snapshot.state,
+                                    state::VoiceWaveHudState::Inserted
+                                        | state::VoiceWaveHudState::Error
+                                ) {
+                                    let _ = set_pill_hit_target_blocker(
+                                        &handle,
+                                        None,
+                                        None,
+                                        Some(false),
+                                    );
+                                    let _ = show_pill_hit_target(&handle);
+                                }
                             }
                         }
                     });
@@ -1535,6 +2338,9 @@ pub fn run() {
             set_pro_post_processing_enabled,
             set_dictation_profile,
             show_main_window,
+            get_pill_quick_controls_snapshot,
+            set_pill_quick_controls_mode,
+            set_pill_window_mode,
             set_pill_review_mode,
             set_pill_notice_mode,
             copy_text_to_clipboard,
@@ -1615,7 +2421,15 @@ pub fn run() {
 
 #[cfg(all(test, feature = "desktop"))]
 mod desktop_tests {
-    use super::state_payload_is_listening;
+    use super::{
+        env_flag_enabled, fullscreen_geometry_matches, pill_window_geometry,
+        state_payload_is_listening, PillQuickControlsInvocation, PillQuickControlsSpikeInner,
+        PillQuickControlsSpikeState, PillWindowMode, PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
+        PILL_WINDOW_COMPACT_HEIGHT, PILL_WINDOW_COMPACT_WIDTH, PILL_WINDOW_NOTICE_BOTTOM_MARGIN,
+        PILL_WINDOW_NOTICE_HEIGHT, PILL_WINDOW_NOTICE_WIDTH, PILL_WINDOW_REVIEW_BOTTOM_MARGIN,
+        PILL_WINDOW_REVIEW_HEIGHT, PILL_WINDOW_REVIEW_WIDTH,
+    };
+    use std::sync::Mutex;
 
     #[test]
     fn pill_recovery_only_runs_for_exact_listening_state() {
@@ -1626,5 +2440,89 @@ mod desktop_tests {
             r#"{"state":"processing","message":"listening back"}"#
         ));
         assert!(!state_payload_is_listening("not json"));
+    }
+
+    #[test]
+    fn quick_controls_spike_flag_is_explicit_and_case_insensitive() {
+        for enabled in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(
+                env_flag_enabled(Some(enabled)),
+                "{enabled} should enable spike"
+            );
+        }
+        for disabled in ["", "0", "false", "enabled", "quick-controls"] {
+            assert!(
+                !env_flag_enabled(Some(disabled)),
+                "{disabled} should leave spike off"
+            );
+        }
+        assert!(!env_flag_enabled(None));
+    }
+
+    #[test]
+    fn quick_controls_snapshot_exposes_only_enabled_and_invocation() {
+        let state = PillQuickControlsSpikeState {
+            enabled: true,
+            inner: Mutex::new(PillQuickControlsSpikeInner {
+                invocation: Some(PillQuickControlsInvocation::Focused),
+                session_generation: 1,
+                prior_foreground_hwnd: Some(42),
+            }),
+        };
+
+        let snapshot = state.snapshot();
+        assert!(snapshot.enabled);
+        assert_eq!(
+            snapshot.invocation,
+            Some(PillQuickControlsInvocation::Focused)
+        );
+    }
+
+    #[test]
+    fn pill_window_mode_has_one_authoritative_geometry_table() {
+        assert_eq!(
+            pill_window_geometry(PillWindowMode::Compact),
+            (
+                PILL_WINDOW_COMPACT_WIDTH,
+                PILL_WINDOW_COMPACT_HEIGHT,
+                PILL_WINDOW_COMPACT_BOTTOM_MARGIN
+            )
+        );
+        assert_eq!(
+            pill_window_geometry(PillWindowMode::Review),
+            (
+                PILL_WINDOW_REVIEW_WIDTH,
+                PILL_WINDOW_REVIEW_HEIGHT,
+                PILL_WINDOW_REVIEW_BOTTOM_MARGIN
+            )
+        );
+        assert_eq!(
+            pill_window_geometry(PillWindowMode::Notice),
+            (
+                PILL_WINDOW_NOTICE_WIDTH,
+                PILL_WINDOW_NOTICE_HEIGHT,
+                PILL_WINDOW_NOTICE_BOTTOM_MARGIN
+            )
+        );
+    }
+
+    #[test]
+    fn fullscreen_suppression_distinguishes_borderless_from_maximized_windows() {
+        let monitor = [0, 0, 1920, 1080];
+        assert!(fullscreen_geometry_matches(
+            [0, 0, 1920, 1080],
+            monitor,
+            false
+        ));
+        assert!(!fullscreen_geometry_matches(
+            [-8, -8, 1928, 1048],
+            monitor,
+            true
+        ));
+        assert!(!fullscreen_geometry_matches(
+            [100, 100, 1400, 900],
+            monitor,
+            false
+        ));
     }
 }

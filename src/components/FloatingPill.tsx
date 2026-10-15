@@ -6,23 +6,40 @@ import {
   canUseTauri,
   copyTextToClipboard,
   getDictionaryQueue,
+  getPillQuickControlsSnapshot,
   loadSettings,
   loadSnapshot,
   rejectDictionaryEntry,
   listenVoicewaveMicLevel,
+  listenVoicewaveDictionaryQueueChanged,
   listenVoicewavePillNotice,
+  listenVoicewavePillQuickControls,
+  listenVoicewaveSettingsChanged,
   listenVoicewaveState,
-  setPillNoticeMode,
-  setPillReviewMode,
+  setDictationProfile,
+  setPillQuickControlsMode,
+  setPillWindowMode,
+  startDictation,
   showMainWindow
 } from "../lib/tauri";
 import type {
   DictationControlMode,
   DictionaryQueueItem,
   PillNoticePayload,
+  PillQuickControlsInvocation,
   PolishProfile,
+  PillWindowMode,
   VoiceWaveHudState
 } from "../types/voicewave";
+import {
+  PillQuickControls,
+  type QuickControlsFeedback
+} from "./PillQuickControls";
+import {
+  derivePillDisplayMode,
+  shouldAutoDismissQuickControls,
+  shouldCloseQuickControlsOnKey
+} from "./pillDisplayMode";
 
 type VisualState = "idle" | "listening" | "transcribing" | "inserted" | "error";
 
@@ -44,6 +61,13 @@ const PROFILE_TITLES: Record<PolishProfile, string> = {
   casual: "Casual profile",
   literal: "Literal profile"
 };
+
+const QUICK_CONTROLS_IDLE_TIMEOUT_MS = 18_000;
+const QUICK_CONTROLS_CLOSE_ANIMATION_MS = 170;
+
+interface CloseQuickControlsOptions {
+  animate?: boolean;
+}
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -68,7 +92,19 @@ export function FloatingPill() {
   // post-action confirmation state ("Copied ✓" / "Added ✓") shared across
   // action kinds.
   const [actionDone, setActionDone] = useState(false);
+  const [quickControlsEnabled, setQuickControlsEnabled] = useState(false);
+  const [quickControlsOpen, setQuickControlsOpen] = useState(false);
+  const [quickControlsInvocation, setQuickControlsInvocation] =
+    useState<PillQuickControlsInvocation>("mouse");
+  const [pendingProfile, setPendingProfile] = useState<PolishProfile | null>(null);
+  const [startingHandsFree, setStartingHandsFree] = useState(false);
+  const [quickControlsFeedback, setQuickControlsFeedback] =
+    useState<QuickControlsFeedback>(null);
+  const [quickControlsClosing, setQuickControlsClosing] = useState(false);
+  const [quickControlsSettling, setQuickControlsSettling] = useState(false);
   const noticeTimerRef = useRef<number | null>(null);
+  const quickControlsTimerRef = useRef<number | null>(null);
+  const quickControlsClosingRef = useRef(false);
   const previousRawStateRef = useRef<VoiceWaveHudState>("idle");
   const micLevelRef = useRef(0);
   // Slowly-decaying running peak for auto-gain normalization of the waveform.
@@ -80,7 +116,6 @@ export function FloatingPill() {
   const lastWaveSampleTsRef = useRef(0);
   const reviewRequestRef = useRef(0);
   const reviewWindowStartRef = useRef(0);
-  const reviewModeActive = Boolean(reviewItem);
   const visualState: VisualState = displayState;
 
   // Hotkey cue sounds are played natively by the Rust core at the exact
@@ -114,6 +149,67 @@ export function FloatingPill() {
     },
     [clearNoticeDismiss]
   );
+
+  const clearQuickControlsDismiss = useCallback(() => {
+    if (quickControlsTimerRef.current !== null) {
+      window.clearTimeout(quickControlsTimerRef.current);
+      quickControlsTimerRef.current = null;
+    }
+  }, []);
+
+  const closeQuickControls = useCallback(async (
+    options: CloseQuickControlsOptions = {}
+  ) => {
+    if (quickControlsClosingRef.current) {
+      return false;
+    }
+
+    clearQuickControlsDismiss();
+    quickControlsClosingRef.current = true;
+    const shouldAnimate =
+      (options.animate ?? true) &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    try {
+      if (shouldAnimate) {
+        setQuickControlsClosing(true);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, QUICK_CONTROLS_CLOSE_ANIMATION_MS);
+        });
+      }
+
+      if (!canUseTauri()) {
+        setQuickControlsOpen(false);
+        return true;
+      }
+
+      await setPillQuickControlsMode(false);
+      // Native has now resized the overlay. Snap the compact geometry into
+      // place for one frame so it does not replay a second shrink animation.
+      setQuickControlsSettling(true);
+      setQuickControlsOpen(false);
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => setQuickControlsSettling(false));
+      });
+      return true;
+    } catch {
+      // Keep the card truthful and operable if native geometry/focus restore
+      // failed; starting dictation from a half-collapsed card is unsafe.
+      setQuickControlsOpen(true);
+      return false;
+    } finally {
+      setQuickControlsClosing(false);
+      quickControlsClosingRef.current = false;
+    }
+  }, [clearQuickControlsDismiss]);
+
+  const scheduleQuickControlsDismiss = useCallback(() => {
+    clearQuickControlsDismiss();
+    quickControlsTimerRef.current = window.setTimeout(() => {
+      quickControlsTimerRef.current = null;
+      void closeQuickControls();
+    }, QUICK_CONTROLS_IDLE_TIMEOUT_MS);
+  }, [clearQuickControlsDismiss, closeQuickControls]);
 
   const refreshActiveProfile = useCallback(async () => {
     if (!canUseTauri()) {
@@ -158,32 +254,69 @@ export function FloatingPill() {
       return;
     }
 
-    let stateUnlisten: (() => void) | null = null;
-    let micUnlisten: (() => void) | null = null;
-    let noticeUnlisten: (() => void) | null = null;
+    // Cleanup can run before the awaited registrations finish (StrictMode
+    // remounts, HMR); a listener that resolves after cleanup is released on
+    // the spot instead of leaking a duplicate handler.
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const keep = async (pending: Promise<() => void>) => {
+      const unlisten = await pending;
+      if (disposed) {
+        unlisten();
+      } else {
+        unlisteners.push(unlisten);
+      }
+    };
 
     void (async () => {
       try {
-        stateUnlisten = await listenVoicewaveState((payload) => {
+        await keep(listenVoicewaveState((payload) => {
           setRawState(payload.state);
           setControlMode((previous) =>
             payload.controlMode ?? (payload.state === "idle" ? null : previous)
           );
-        });
-        micUnlisten = await listenVoicewaveMicLevel((payload) => {
+        }));
+        await keep(listenVoicewaveMicLevel((payload) => {
           // The waveform loop reads the latest sample directly. Keeping raw
           // mic events out of React state avoids a render for every native
           // level update while listening.
           micLevelRef.current = clamp01(payload.level ?? 0);
-        });
-        noticeUnlisten = await listenVoicewavePillNotice((payload) => {
+        }));
+        await keep(listenVoicewavePillNotice((payload) => {
           setNotice(payload);
           // Rescue notices (transcript present) may hold their full duration up
           // to 10s so the user can read/copy; plain notices keep the 2.5-12s
           // clamp. Both share the same upper bound here.
           const holdMs = Math.min(Math.max(payload.durationMs || 5000, 2500), 12000);
           scheduleNoticeDismiss(holdMs);
-        });
+        }));
+        await keep(listenVoicewavePillQuickControls((payload) => {
+          // A locally initiated animated close owns the final state change.
+          // Ignoring its echoed native event prevents React from switching to
+          // compact CSS before the exit transition has completed.
+          if (!payload.open && quickControlsClosingRef.current) {
+            return;
+          }
+          if (payload.invocation) {
+            setQuickControlsInvocation(payload.invocation);
+          }
+          if (payload.open) {
+            quickControlsClosingRef.current = false;
+            setQuickControlsClosing(false);
+            setQuickControlsSettling(false);
+          }
+          setQuickControlsOpen(payload.open);
+          setQuickControlsFeedback(null);
+          if (payload.open) {
+            void refreshActiveProfile();
+          }
+        }));
+        await keep(listenVoicewaveSettingsChanged((settings) => {
+          setActiveProfile(settings.polishProfile ?? "standard");
+        }));
+        await keep(listenVoicewaveDictionaryQueueChanged(() => {
+          void loadReviewQueue();
+        }));
       } catch (err) {
         // If event listening is denied (e.g. this window is missing from the
         // Tauri capability config), the waveform receives no mic levels and
@@ -213,14 +346,36 @@ export function FloatingPill() {
 
     return () => {
       window.clearInterval(snapshotTimer);
-      stateUnlisten?.();
-      micUnlisten?.();
-      noticeUnlisten?.();
+      disposed = true;
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
       if (noticeTimerRef.current !== null) {
         window.clearTimeout(noticeTimerRef.current);
       }
+      if (quickControlsTimerRef.current !== null) {
+        window.clearTimeout(quickControlsTimerRef.current);
+      }
     };
-  }, [scheduleNoticeDismiss]);
+  }, [loadReviewQueue, refreshActiveProfile, scheduleNoticeDismiss]);
+
+  useEffect(() => {
+    if (!canUseTauri()) {
+      return;
+    }
+    void (async () => {
+      try {
+        const snapshot = await getPillQuickControlsSnapshot();
+        setQuickControlsEnabled(snapshot.enabled);
+        setQuickControlsInvocation(snapshot.invocation ?? "mouse");
+        setQuickControlsOpen(snapshot.enabled && snapshot.invocation !== null);
+      } catch {
+        // Missing/failed Phase 0 backend keeps the feature off by default.
+        setQuickControlsEnabled(false);
+        setQuickControlsOpen(false);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     if (rawState === "inserted" || rawState === "error") {
@@ -255,40 +410,78 @@ export function FloatingPill() {
 
     if (rawState === "inserted" && previous !== "inserted") {
       reviewWindowStartRef.current = Date.now();
-      void loadReviewQueue();
-      const followUpTimer = window.setTimeout(() => {
-        void loadReviewQueue();
-      }, 420);
-      const lateTimer = window.setTimeout(() => {
-        void loadReviewQueue();
-      }, 980);
-      return () => {
-        window.clearTimeout(followUpTimer);
-        window.clearTimeout(lateTimer);
-      };
     }
   }, [loadReviewQueue, rawState, refreshActiveProfile, resetReview]);
 
-  useEffect(() => {
-    if (!canUseTauri()) {
-      return;
-    }
-    void setPillReviewMode(reviewModeActive);
-  }, [reviewModeActive]);
-
-  // Review mode owns the pill window when both want it: it is interactive
-  // and larger. The notice re-expands (or collapses) once review ends.
-  const noticeActive = Boolean(notice) && !reviewModeActive;
-  // Only actionable notices (Copy button) make the OS window clickable; plain
-  // and transcript-preview-only notices stay click-through.
+  const pillDisplayMode = derivePillDisplayMode({
+    visualState,
+    quickControlsEnabled,
+    quickControlsOpen,
+    quickControlsInvocation,
+    reviewItem,
+    notice
+  });
+  const reviewModeActive = pillDisplayMode.kind === "review";
+  const noticeActive = pillDisplayMode.kind === "notice";
+  const quickControlsActive = pillDisplayMode.kind === "quickControls";
+  // Only actionable notices make the OS window clickable; plain notices stay
+  // click-through even while visually expanded.
   const noticeInteractive = noticeActive && notice?.action != null;
+  const nativeWindowMode: PillWindowMode = reviewModeActive
+    ? "review"
+    : noticeActive
+      ? "notice"
+      : "compact";
 
   useEffect(() => {
-    if (!canUseTauri() || reviewModeActive) {
+    if (quickControlsActive && shouldAutoDismissQuickControls(quickControlsInvocation)) {
+      scheduleQuickControlsDismiss();
+      return clearQuickControlsDismiss;
+    }
+    clearQuickControlsDismiss();
+    return undefined;
+  }, [
+    clearQuickControlsDismiss,
+    quickControlsActive,
+    quickControlsInvocation,
+    scheduleQuickControlsDismiss
+  ]);
+
+  useEffect(() => {
+    if (!quickControlsActive || quickControlsInvocation !== "focused") {
       return;
     }
-    void setPillNoticeMode(noticeActive, noticeInteractive);
-  }, [noticeActive, noticeInteractive, reviewModeActive]);
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!shouldCloseQuickControlsOnKey(quickControlsInvocation, event.key)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void closeQuickControls();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeQuickControls, quickControlsActive, quickControlsInvocation]);
+
+  useEffect(() => {
+    if (quickControlsOpen && pillDisplayMode.kind !== "quickControls") {
+      void closeQuickControls({ animate: false });
+    }
+  }, [closeQuickControls, pillDisplayMode.kind, quickControlsOpen]);
+
+  useEffect(() => {
+    // When a higher-priority state preempts an open card, let the native close
+    // finish first. Issuing Notice/Review geometry concurrently with that
+    // close would recreate the exact resize race this arbiter removes.
+    if (!canUseTauri() || quickControlsOpen) {
+      return;
+    }
+    void setPillWindowMode(nativeWindowMode, noticeInteractive);
+  }, [nativeWindowMode, noticeInteractive, quickControlsOpen]);
 
   // A fresh notice id means a new message — clear any stale confirmation state.
   useEffect(() => {
@@ -338,15 +531,83 @@ export function FloatingPill() {
     scheduleNoticeDismiss(2000);
   }, [scheduleNoticeDismiss]);
 
-  useEffect(
-    () => () => {
-      if (!canUseTauri()) {
+  const handleSelectProfile = useCallback(
+    async (profile: PolishProfile) => {
+      if (pendingProfile || startingHandsFree) {
         return;
       }
-      void setPillReviewMode(false);
+      if (profile === activeProfile) {
+        setQuickControlsFeedback({
+          tone: "success",
+          message: `${PROFILE_TITLES[profile]} is already active`
+        });
+        scheduleQuickControlsDismiss();
+        return;
+      }
+      setPendingProfile(profile);
+      setQuickControlsFeedback(null);
+      try {
+        const settings = await setDictationProfile(profile);
+        setActiveProfile(settings.polishProfile ?? profile);
+        setQuickControlsFeedback({
+          tone: "success",
+          message: `${PROFILE_TITLES[profile]} is ready`
+        });
+      } catch {
+        setQuickControlsFeedback({
+          tone: "error",
+          message: "Couldn’t change profile — try again"
+        });
+      } finally {
+        setPendingProfile(null);
+        scheduleQuickControlsDismiss();
+      }
     },
-    []
+    [activeProfile, pendingProfile, scheduleQuickControlsDismiss, startingHandsFree]
   );
+
+  const handleStartHandsFree = useCallback(async () => {
+    if (pendingProfile || startingHandsFree) {
+      return;
+    }
+    setStartingHandsFree(true);
+    setQuickControlsFeedback(null);
+    try {
+      // Focused tray entry must restore the prior app before dictation starts.
+      // The mouse path is also collapsed first for one predictable contract.
+      const closed = await closeQuickControls({ animate: false });
+      if (!closed) {
+        setQuickControlsFeedback({
+          tone: "error",
+          message: "Couldn’t close safely — try again"
+        });
+        return;
+      }
+      await startDictation("microphone", "handsFree");
+    } catch {
+      // The card is already safely collapsed; runtime failures continue to
+      // use VoiceWave's existing notice/recovery surface.
+    } finally {
+      setStartingHandsFree(false);
+    }
+  }, [closeQuickControls, pendingProfile, startingHandsFree]);
+
+  const handleOpenMain = useCallback(async () => {
+    const closed = await closeQuickControls();
+    if (!closed) {
+      setQuickControlsFeedback({
+        tone: "error",
+        message: "Couldn’t close safely — try again"
+      });
+      return;
+    }
+    try {
+      await showMainWindow();
+    } catch {
+      // Main-window failures are rare and the status pill is already restored;
+      // do not strand an invisible interactive window on top of the target app.
+    }
+  }, [closeQuickControls]);
 
   const handleApprove = useCallback(async () => {
     if (!reviewItem || reviewBusy) {
@@ -466,17 +727,24 @@ export function FloatingPill() {
 
   return (
     <div
-      className={`vw-pill-shell vw-pill-state-${visualState}${handsFreeActive ? " vw-pill-control-hands-free" : ""}${reviewModeActive ? " vw-pill-mode-review" : ""}${noticeActive ? ` vw-pill-mode-notice vw-pill-notice-${notice?.severity ?? "info"}${notice?.transcript ? " vw-pill-mode-rescue" : ""}` : ""}`}
+      className={`vw-pill-shell vw-pill-state-${visualState}${handsFreeActive ? " vw-pill-control-hands-free" : ""}${reviewModeActive ? " vw-pill-mode-review" : ""}${noticeActive ? ` vw-pill-mode-notice vw-pill-notice-${notice?.severity ?? "info"}${notice?.transcript ? " vw-pill-mode-rescue" : ""}` : ""}${quickControlsActive ? ` vw-pill-mode-quick-controls vw-pill-quick-${quickControlsInvocation}${quickControlsClosing ? " vw-pill-quick-closing" : ""}` : ""}${quickControlsSettling ? " vw-pill-quick-settling" : ""}`}
     >
       <div
         className={`vw-pill-surface${reviewModeActive ? " vw-pill-surface-review" : ""}`}
-        role="status"
-        aria-label={pillLabel}
-        title={pillLabel}
-        onDoubleClick={() => {
-          void showMainWindow();
-        }}
-        {...(reviewModeActive ? {} : { "data-tauri-drag-region": "" })}
+        role={quickControlsActive ? undefined : reviewModeActive || noticeInteractive ? "dialog" : "status"}
+        aria-label={
+          quickControlsActive
+            ? "VoiceWave Quick Controls"
+            : reviewModeActive
+              ? "VoiceWave dictionary suggestion"
+              : noticeInteractive
+                ? "VoiceWave action required"
+                : pillLabel
+        }
+        title={quickControlsActive ? "VoiceWave Quick Controls" : pillLabel}
+        {...(reviewModeActive || quickControlsActive
+          ? {}
+          : { "data-tauri-drag-region": "" })}
       >
         <div className="vw-pill-glow" />
 
@@ -498,6 +766,21 @@ export function FloatingPill() {
           </div>
           <div className="vw-pill-spinner" />
         </div>
+
+        {quickControlsActive ? (
+          <PillQuickControls
+            invocation={quickControlsInvocation}
+            activeProfile={activeProfile}
+            pendingProfile={pendingProfile}
+            startingHandsFree={startingHandsFree}
+            feedback={quickControlsFeedback}
+            onSelectProfile={(profile) => void handleSelectProfile(profile)}
+            onStartHandsFree={() => void handleStartHandsFree()}
+            onOpenMain={() => void handleOpenMain()}
+            onClose={() => void closeQuickControls()}
+            onActivity={scheduleQuickControlsDismiss}
+          />
+        ) : null}
 
         <div
           className="vw-pill-notice-panel"
