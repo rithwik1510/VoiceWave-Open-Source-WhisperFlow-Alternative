@@ -414,8 +414,8 @@ impl WorkerProcess {
         )
     }
 
-    fn wait_ready(&mut self) -> Result<(), Fault> {
-        let until = Instant::now() + SPAWN_READY_DEADLINE;
+    fn wait_ready(&mut self, deadline: Duration) -> Result<(), Fault> {
+        let until = Instant::now() + deadline;
         let line = loop {
             if let Some(line) = self.next_line(until, "start")? {
                 break line;
@@ -580,7 +580,11 @@ fn with_worker<T>(
     result
 }
 
-fn ensure_spawned(guard: &mut Option<WorkerProcess>, rung: Rung) -> Result<(), Fault> {
+fn ensure_spawned(
+    guard: &mut Option<WorkerProcess>,
+    rung: Rung,
+    ready_deadline: Duration,
+) -> Result<(), Fault> {
     if let Some(worker) = guard.as_mut() {
         if worker.alive() {
             return Ok(());
@@ -593,7 +597,7 @@ fn ensure_spawned(guard: &mut Option<WorkerProcess>, rung: Rung) -> Result<(), F
         );
         *guard = None;
     }
-    *guard = Some(spawn(rung)?);
+    *guard = Some(spawn(rung, ready_deadline)?);
     Ok(())
 }
 
@@ -608,7 +612,7 @@ fn worker_command(exe: &Path) -> Command {
     command
 }
 
-fn spawn(rung: Rung) -> Result<WorkerProcess, Fault> {
+fn spawn(rung: Rung, ready_deadline: Duration) -> Result<WorkerProcess, Fault> {
     // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
     // it would crash on.
     if cpu_support() != CpuSupport::Full {
@@ -678,7 +682,7 @@ fn spawn(rung: Rung) -> Result<WorkerProcess, Fault> {
             tail.push_back(line);
         }
     });
-    worker.wait_ready()?;
+    worker.wait_ready(ready_deadline)?;
     Ok(worker)
 }
 
@@ -946,7 +950,9 @@ fn ensure_loaded(
     model_path: &Path,
     deadline: Duration,
 ) -> Result<(u64, bool), Fault> {
-    ensure_spawned(guard, rung)?;
+    // A short load deadline (the fresh-worker retry) shortens the start
+    // too: a worker that hangs while starting must not cost the full 10 s.
+    ensure_spawned(guard, rung, SPAWN_READY_DEADLINE.min(deadline / 3))?;
     if guard
         .as_ref()
         .and_then(|worker| worker.loaded.as_ref())

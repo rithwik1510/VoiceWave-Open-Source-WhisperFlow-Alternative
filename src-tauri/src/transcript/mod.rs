@@ -525,12 +525,22 @@ pub(crate) fn stabilize_custom_terms(input: &str, custom_terms: &[String]) -> St
     let mut text = input.to_string();
     for term in custom_terms {
         let normalized = term.trim();
-        if normalized.len() < 2 {
+        if normalized.len() < 2 || !term_has_distinct_casing(normalized) {
             continue;
         }
         text = replace_boundary_phrase_case_insensitive(&text, normalized, normalized);
     }
     text
+}
+
+/// Whether a dictionary term's spelling carries casing worth enforcing:
+/// multi-word ("Claude Code"), inner capitals ("VoiceWave", "iOS"), or
+/// structure ("T-Rex", "v2"). A plain capitalized word ("Things") would only
+/// force mid-sentence capitals, so the model's own casing wins for those.
+fn term_has_distinct_casing(term: &str) -> bool {
+    term.contains(char::is_whitespace)
+        || term.chars().skip(1).any(|ch| ch.is_uppercase())
+        || term.chars().any(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn apply_format_profile(input: &str, profile: FormatProfile) -> String {

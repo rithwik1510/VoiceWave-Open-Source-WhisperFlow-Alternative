@@ -1289,9 +1289,15 @@ fn fw_retry_beats_primary(
         return true;
     }
 
+    // A primary that dropped words: the longer retry wins, but only when it
+    // is about as confident and not a repetition loop. Length alone let
+    // hallucinated tails win (and whisper.cpp's no_speech_prob is always ~0,
+    // so that check guards nothing on the worker path).
     if audio_duration_ms >= 2_200
         && retry_words >= primary_words.saturating_add(3)
         && retry.no_speech_prob <= primary.no_speech_prob + 0.08
+        && retry.avg_logprob >= primary.avg_logprob - 0.15
+        && retry.compression_ratio <= 2.2
     {
         return true;
     }
@@ -1403,6 +1409,10 @@ fn fw_primary_overrides(
         if !hint.trim().is_empty() {
             prompt.push_str(" Technical terms: ");
             prompt.push_str(hint.trim());
+            // Whisper reads the prompt as the previous sentence; closing it
+            // measured better (TTS A/B 2026-10: 0.83% -> 0.63% WER with a
+            // clean term list) than leaving it open.
+            prompt.push('.');
         }
     }
     let prompt = if prompt.chars().count() > 360 {
@@ -1441,6 +1451,7 @@ fn fw_literal_retry_overrides(
         if !hint.trim().is_empty() {
             prompt.push_str(" Prefer these technical terms when acoustically plausible: ");
             prompt.push_str(hint.trim());
+            prompt.push('.');
         }
     }
     if prompt.chars().count() > 420 {
