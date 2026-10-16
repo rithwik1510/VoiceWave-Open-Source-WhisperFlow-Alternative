@@ -13,7 +13,8 @@ if ([string]::IsNullOrWhiteSpace($BinDir)) {
   $BinDir = Join-Path $PSScriptRoot "..\..\src-tauri\windows\asr-worker\bin"
 }
 
-$dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+# Outside a VS dev shell dumpbin is not on PATH (the release workflow step).
+$dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
 if (-not $dumpbin) {
   $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
   $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
