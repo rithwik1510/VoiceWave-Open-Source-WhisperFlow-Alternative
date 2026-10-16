@@ -44,7 +44,7 @@ use history::{
 #[cfg(feature = "desktop")]
 use hotkey::{HotkeyAction, HotkeyConfig, HotkeyPhase, HotkeySnapshot};
 #[cfg(feature = "desktop")]
-use inference::{kill_faster_whisper_workers, llm_polish::kill_polish_worker};
+use inference::{kill_asr_workers, kill_faster_whisper_workers, llm_polish::kill_polish_worker};
 #[cfg(feature = "desktop")]
 use insertion::{InsertResult, InsertTextRequest, RecentInsertion, UndoResult};
 #[cfg(feature = "desktop")]
@@ -837,13 +837,15 @@ fn configure_main_window_close_behavior(app: &tauri::AppHandle, hide_to_tray: bo
     }
 }
 
-/// Kill the python side-processes before the app goes away. Both workers are
-/// spawned DETACHED_PROCESS, so without this a quit during the first-run model
-/// download leaves a python.exe downloading ~487 MB with no UI attached to it.
-/// Safe to call more than once (both helpers no-op when nothing is running).
+/// Kill the worker side-processes before the app goes away. Windows does not
+/// kill children with their parent, so without this a quit during the
+/// first-run model download leaves a python.exe downloading ~487 MB with no UI
+/// attached to it, and a speech worker would keep its model in (V)RAM.
+/// Safe to call more than once (the helpers no-op when nothing is running).
 #[cfg(feature = "desktop")]
 fn shutdown_inference_workers() {
     kill_faster_whisper_workers();
+    kill_asr_workers();
     kill_polish_worker();
 }
 

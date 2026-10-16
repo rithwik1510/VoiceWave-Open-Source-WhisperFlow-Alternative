@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// One decode's text and quality metrics. The whisper.cpp speech workers
+/// (`asr_worker`) produce it too, so both engines share the retry heuristics.
 #[derive(Debug, Clone)]
 pub struct FasterWhisperDecodeOutput {
     pub text: String,
@@ -417,7 +419,7 @@ fn unregister_worker_pid(pid: u32) {
 }
 
 #[cfg(target_os = "windows")]
-fn kill_process_by_pid(pid: u32) {
+pub(super) fn kill_process_by_pid(pid: u32) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
@@ -434,7 +436,7 @@ fn kill_process_by_pid(pid: u32) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn kill_process_by_pid(_pid: u32) {}
+pub(super) fn kill_process_by_pid(_pid: u32) {}
 
 /// Kill every live faster-whisper worker process (shared and download
 /// workers). Called on app shutdown: Windows does not kill children with
@@ -1478,7 +1480,7 @@ fn fw_without_timestamps_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn encode_pcm16_base64(samples: &[f32]) -> String {
+pub(super) fn encode_pcm16_base64(samples: &[f32]) -> String {
     let mut bytes = Vec::with_capacity(samples.len().saturating_mul(2));
     for sample in samples {
         let clamped = sample.clamp(-1.0, 1.0);

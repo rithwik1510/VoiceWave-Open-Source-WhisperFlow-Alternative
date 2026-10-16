@@ -5351,6 +5351,7 @@ dependencies = [
  "cpal",
  "directories",
  "ed25519-dalek",
+ "flate2",
  "rand 0.8.5",
  "serde",
  "serde_json",

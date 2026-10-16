@@ -1,3 +1,4 @@
+mod asr_worker;
 mod audio_pipeline;
 mod backend;
 mod executor;
@@ -7,6 +8,9 @@ pub mod llm_polish;
 mod policy;
 pub mod polish_gate;
 
+pub use asr_worker::{
+    kill_asr_workers, prewarm_asr_worker, release_idle_asr_workers, ErrorClass as AsrErrorClass,
+};
 pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};
 pub use faster_whisper::{
     cache_hint_for_model as faster_whisper_cache_hint,
@@ -43,6 +47,11 @@ pub struct DecodeTelemetry {
     pub backend_requested: String,
     pub backend_used: String,
     pub backend_fallback: bool,
+    /// Engine that produced the text: "faster-whisper", "whisper.cpp-vulkan"
+    /// or "whisper.cpp-cpu". Empty for fixture decodes.
+    pub asr_engine: String,
+    /// Why this dictation left the GPU rung, when it did.
+    pub asr_step_down_reason: Option<String>,
     pub fw_segment_count: Option<u32>,
     pub fw_avg_logprob: Option<f32>,
     pub fw_no_speech_prob: Option<f32>,
@@ -311,6 +320,11 @@ pub enum InferenceError {
     Cancelled,
     #[error("decode task join failed: {0}")]
     RuntimeJoin(String),
+    #[error("speech worker {class} error: {reason}")]
+    AsrWorker {
+        class: asr_worker::ErrorClass,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +336,15 @@ enum InferenceBackend {
     FasterWhisper {
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
+    },
+    /// whisper.cpp GGML model in the speech worker processes (plan 019).
+    AsrWorker {
+        model_path: PathBuf,
+        decode_mode: DecodeMode,
+        terminology_hint: Option<String>,
+        /// Installed faster-whisper counterpart: the CPU rung when the GPU
+        /// attempt fails. Without one the CPU worker decodes the same file.
+        fw_fallback_model: Option<String>,
     },
     Scripted,
 }
@@ -406,6 +429,49 @@ impl InferenceWorker {
         }
     }
 
+    pub fn new_asr_worker(
+        active_model: impl Into<String>,
+        model_path: impl Into<PathBuf>,
+        decode_mode: DecodeMode,
+        terminology_hint: Option<String>,
+        fw_fallback_model: Option<String>,
+    ) -> Self {
+        let active_model = active_model.into();
+        let profile = decode_profile_for_mode(&active_model, decode_mode);
+        Self {
+            active_model,
+            scripted_output: None,
+            partial_delay_ms: profile.partial_delay_ms,
+            decode_mode,
+            backend: InferenceBackend::AsrWorker {
+                model_path: model_path.into(),
+                decode_mode,
+                terminology_hint: terminology_hint
+                    .map(|hint| hint.trim().to_string())
+                    .filter(|hint| !hint.is_empty()),
+                fw_fallback_model,
+            },
+        }
+    }
+
+    /// Outer timeout for a speech-worker decode: the GPU attempt plus the CPU
+    /// rung. `fw_timeout` is the controller's faster-whisper budget, used when
+    /// the faster-whisper counterpart is the CPU rung. None for other backends.
+    pub fn asr_worker_timeout(&self, audio_ms: u64, fw_timeout: Duration) -> Option<Duration> {
+        let InferenceBackend::AsrWorker {
+            fw_fallback_model, ..
+        } = &self.backend
+        else {
+            return None;
+        };
+        let cpu_rung = if fw_fallback_model.is_some() {
+            fw_timeout
+        } else {
+            asr_worker::rung_budget(asr_worker::Rung::Cpu, audio_ms)
+        };
+        Some(asr_worker::rung_budget(asr_worker::Rung::Gpu, audio_ms) + cpu_rung)
+    }
+
     pub fn with_script(
         active_model: impl Into<String>,
         scripted_output: impl Into<String>,
@@ -431,7 +497,8 @@ impl InferenceWorker {
 
     pub fn model_path(&self) -> Option<&Path> {
         match &self.backend {
-            InferenceBackend::Whisper { model_path, .. } => Some(model_path.as_path()),
+            InferenceBackend::Whisper { model_path, .. }
+            | InferenceBackend::AsrWorker { model_path, .. } => Some(model_path.as_path()),
             InferenceBackend::FasterWhisper { .. } => None,
             InferenceBackend::Scripted => None,
         }
@@ -488,12 +555,35 @@ impl InferenceWorker {
                 decode_mode,
                 terminology_hint,
             } => {
-                let decode = transcribe_with_faster_whisper(
-                    samples.to_vec(),
-                    self.active_model.clone(),
+                let runtime_model = runtime_model_or_err(&self.active_model)?;
+                let decode = transcribe_with_whisper_pipeline(
+                    samples,
+                    &self.active_model,
+                    WhisperEngine::FasterWhisper { runtime_model },
                     *decode_mode,
-                    terminology_hint.clone(),
-                    cancel_token.clone(),
+                    terminology_hint.as_deref(),
+                    cancel_token,
+                )
+                .await?;
+                SegmentTranscription {
+                    transcript: Some(decode.text),
+                    telemetry: decode.telemetry,
+                }
+            }
+            InferenceBackend::AsrWorker {
+                model_path,
+                decode_mode,
+                terminology_hint,
+                fw_fallback_model,
+            } => {
+                let decode = transcribe_with_asr_worker(
+                    samples,
+                    &self.active_model,
+                    model_path,
+                    *decode_mode,
+                    terminology_hint.as_deref(),
+                    fw_fallback_model.as_deref(),
+                    cancel_token,
                 )
                 .await?;
                 SegmentTranscription {
@@ -518,7 +608,9 @@ impl InferenceWorker {
 
         if matches!(
             self.backend,
-            InferenceBackend::Whisper { .. } | InferenceBackend::FasterWhisper { .. }
+            InferenceBackend::Whisper { .. }
+                | InferenceBackend::FasterWhisper { .. }
+                | InferenceBackend::AsrWorker { .. }
         ) {
             // Runtime decode is already complete here; avoid synthetic per-word delay.
             on_event(&text, true, started.elapsed().as_millis() as u64);
@@ -593,6 +685,23 @@ pub fn is_whisper_cpp_model(model_id: &str) -> bool {
     model_id.starts_with("wcpp-")
 }
 
+/// Models that go through the shared Whisper pipeline (full capture,
+/// conditioning, confidence retry, quality gates): faster-whisper and
+/// whisper.cpp via the speech workers.
+pub fn uses_whisper_pipeline(model_id: &str) -> bool {
+    is_faster_whisper_model(model_id) || is_whisper_cpp_model(model_id)
+}
+
+/// faster-whisper model with the same weights as a whisper.cpp model; when
+/// installed it is that model's CPU rung.
+pub fn faster_whisper_counterpart(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        "wcpp-small.en" => Some("fw-small.en"),
+        "wcpp-large-v3-turbo" => Some("fw-large-v3-turbo"),
+        _ => None,
+    }
+}
+
 /// Classification of how a given active model should be warmed up at app
 /// startup so the first transcription doesn't pay a cold-start penalty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -601,8 +710,8 @@ pub enum WarmupPlan {
     /// load the weights into the worker's MODEL_CACHE. After this, the first
     /// real transcription hits the cache path (~500 ms instead of 2-5 s).
     FasterWhisper,
-    /// whisper.cpp backend: load the ggml weights via `prewarm_runtime` so
-    /// the first real transcription uses the pre-initialized WhisperContext.
+    /// whisper.cpp backend: spawn the speech worker and load the GGML model
+    /// (`prewarm_asr_worker`) so the first dictation decodes warm.
     WhisperCpp,
     /// Model ID we don't know how to warm up. Skip silently.
     Unsupported,
@@ -752,12 +861,154 @@ async fn transcribe_with_whisper(
     .map_err(|err| InferenceError::RuntimeJoin(err.to_string()))?
 }
 
-async fn transcribe_with_faster_whisper(
-    samples: Vec<f32>,
-    model_id: String,
+/// Engine behind one decode of the shared Whisper pipeline.
+#[derive(Clone, Copy)]
+enum WhisperEngine<'a> {
+    FasterWhisper {
+        runtime_model: &'static str,
+    },
+    AsrWorker {
+        rung: asr_worker::Rung,
+        model_path: &'a Path,
+    },
+}
+
+impl WhisperEngine<'_> {
+    fn label(&self) -> &'static str {
+        match self {
+            WhisperEngine::FasterWhisper { .. } => "faster-whisper",
+            WhisperEngine::AsrWorker { rung, .. } => rung.engine(),
+        }
+    }
+
+    async fn decode(
+        &self,
+        samples: &[f32],
+        decode_mode: DecodeMode,
+        overrides: FasterWhisperRequestOverrides,
+        cancel_token: &CancellationToken,
+    ) -> Result<faster_whisper::FasterWhisperDecodeOutput, InferenceError> {
+        match self {
+            WhisperEngine::FasterWhisper { runtime_model } => {
+                faster_whisper::transcribe_samples_with_overrides(
+                    samples,
+                    runtime_model,
+                    decode_mode,
+                    overrides,
+                    cancel_token,
+                )
+                .await
+            }
+            WhisperEngine::AsrWorker { rung, model_path } => {
+                asr_worker::transcribe(
+                    *rung,
+                    model_path,
+                    samples,
+                    decode_mode,
+                    &overrides,
+                    cancel_token,
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// whisper.cpp decode with the plan 019 rungs: the primary worker (GPU when
+/// one was selected), and on failure the same retained audio once more on
+/// the CPU rung (faster-whisper counterpart if installed, else the CPU
+/// worker). Text comes from exactly one rung.
+async fn transcribe_with_asr_worker(
+    samples: &[f32],
+    model_id: &str,
+    model_path: &Path,
     decode_mode: DecodeMode,
-    terminology_hint: Option<String>,
-    cancel_token: CancellationToken,
+    terminology_hint: Option<&str>,
+    fw_fallback_model: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> Result<WhisperDecodeOutput, InferenceError> {
+    let (primary, lock_reason) = asr_worker::primary_rung().await;
+    let primary_engine = WhisperEngine::AsrWorker {
+        rung: primary,
+        model_path,
+    };
+    let err = match transcribe_with_whisper_pipeline(
+        samples,
+        model_id,
+        primary_engine,
+        decode_mode,
+        terminology_hint,
+        cancel_token,
+    )
+    .await
+    {
+        Ok(mut decode) => {
+            decode.telemetry.asr_step_down_reason = lock_reason;
+            return Ok(decode);
+        }
+        Err(InferenceError::Cancelled) => return Err(InferenceError::Cancelled),
+        Err(err) => err,
+    };
+    if cancel_token.is_cancelled() {
+        return Err(InferenceError::Cancelled);
+    }
+    // A damaged model file fails the CPU worker the same way; only the
+    // faster-whisper counterpart (different file) can still help.
+    let artifact = matches!(
+        err,
+        InferenceError::AsrWorker {
+            class: asr_worker::ErrorClass::Artifact,
+            ..
+        }
+    );
+    let fallback = match fw_fallback_model {
+        Some(fw_model) => WhisperEngine::FasterWhisper {
+            runtime_model: runtime_model_or_err(fw_model)?,
+        },
+        None if primary == asr_worker::Rung::Gpu && !artifact => WhisperEngine::AsrWorker {
+            rung: asr_worker::Rung::Cpu,
+            model_path,
+        },
+        None if artifact => {
+            return Err(InferenceError::DecodeFailed {
+                model_id: model_id.to_string(),
+                reason: format!(
+                    "the speech model file is damaged; re-download it from Models ({err})"
+                ),
+            })
+        }
+        None => return Err(err),
+    };
+    let reason = err.to_string();
+    eprintln!(
+        "voicewave: {} decode failed, retrying on {}: {reason}",
+        primary.engine(),
+        fallback.label()
+    );
+    let mut decode = transcribe_with_whisper_pipeline(
+        samples,
+        model_id,
+        fallback,
+        decode_mode,
+        terminology_hint,
+        cancel_token,
+    )
+    .await?;
+    decode.telemetry.backend_requested = primary.backend().to_string();
+    decode.telemetry.backend_fallback = primary == asr_worker::Rung::Gpu;
+    decode.telemetry.asr_step_down_reason = Some(reason);
+    Ok(decode)
+}
+
+/// Shared Whisper pipeline: conditioning, primary decode, confidence retry,
+/// optional shadow candidate, telemetry. Engine-agnostic.
+async fn transcribe_with_whisper_pipeline(
+    samples: &[f32],
+    model_id: &str,
+    engine: WhisperEngine<'_>,
+    decode_mode: DecodeMode,
+    terminology_hint: Option<&str>,
+    cancel_token: &CancellationToken,
 ) -> Result<WhisperDecodeOutput, InferenceError> {
     if cancel_token.is_cancelled() {
         return Err(InferenceError::Cancelled);
@@ -765,35 +1016,30 @@ async fn transcribe_with_faster_whisper(
 
     if samples.is_empty() {
         return Err(InferenceError::DecodeFailed {
-            model_id,
+            model_id: model_id.to_string(),
             reason: "no usable audio samples captured".to_string(),
         });
     }
     let condition_started = Instant::now();
-    let baseline_processed = audio_pipeline::process_for_faster_whisper_primary(&samples);
+    let baseline_processed = audio_pipeline::process_for_faster_whisper_primary(samples);
     let audio_condition_ms = condition_started.elapsed().as_millis() as u64;
     let conditioned_samples = baseline_processed.samples;
     if conditioned_samples.is_empty() {
         return Err(InferenceError::DecodeFailed {
-            model_id,
+            model_id: model_id.to_string(),
             reason: "no usable audio samples after conditioning".to_string(),
         });
     }
 
-    let runtime_model =
-        faster_whisper_runtime_model_id(&model_id).ok_or_else(|| InferenceError::DecodeFailed {
-            model_id: model_id.clone(),
-            reason: "unsupported faster-whisper model id".to_string(),
-        })?;
     let audio_duration_ms = ((conditioned_samples.len() as f64 / 16_000.0) * 1000.0).round() as u64;
-    let baseline_run = run_faster_whisper_decode_with_conditioned(
+    let baseline_run = run_whisper_decode_with_conditioned(
         &conditioned_samples,
-        runtime_model,
-        &model_id,
+        engine,
+        model_id,
         decode_mode,
-        terminology_hint.as_deref(),
+        terminology_hint,
         audio_duration_ms,
-        &cancel_token,
+        cancel_token,
     )
     .await?;
 
@@ -832,17 +1078,17 @@ async fn transcribe_with_faster_whisper(
     let mut shadow_candidate_decode_compute_ms = None;
     let mut shadow_candidate_won = None;
     if let Some(candidate_processed) =
-        audio_pipeline::maybe_shadow_for_active(&samples, baseline_processed.version)
+        audio_pipeline::maybe_shadow_for_active(samples, baseline_processed.version)
     {
         if !candidate_processed.samples.is_empty() && !cancel_token.is_cancelled() {
-            if let Ok(candidate_run) = run_faster_whisper_decode_with_conditioned(
+            if let Ok(candidate_run) = run_whisper_decode_with_conditioned(
                 &candidate_processed.samples,
-                runtime_model,
-                &model_id,
+                engine,
+                model_id,
                 decode_mode,
-                terminology_hint.as_deref(),
+                terminology_hint,
                 audio_duration_ms,
-                &cancel_token,
+                cancel_token,
             )
             .await
             {
@@ -899,6 +1145,8 @@ async fn transcribe_with_faster_whisper(
                 baseline_run.final_decode.backend_used
             },
             backend_fallback: baseline_run.final_decode.backend_fallback,
+            asr_engine: engine.label().to_string(),
+            asr_step_down_reason: None,
             fw_segment_count: Some(baseline_run.final_decode.segment_count),
             fw_avg_logprob: Some(baseline_run.final_decode.avg_logprob),
             fw_no_speech_prob: Some(baseline_run.final_decode.no_speech_prob),
@@ -931,9 +1179,9 @@ struct FasterWhisperRunResult {
     literal_retry_used: bool,
 }
 
-async fn run_faster_whisper_decode_with_conditioned(
+async fn run_whisper_decode_with_conditioned(
     conditioned_samples: &[f32],
-    runtime_model: &str,
+    engine: WhisperEngine<'_>,
     frontend_model_id: &str,
     decode_mode: DecodeMode,
     terminology_hint: Option<&str>,
@@ -951,7 +1199,7 @@ async fn run_faster_whisper_decode_with_conditioned(
         "src-tauri/src/inference/mod.rs:573",
         "fw primary decode start",
         &[
-            ("modelId", runtime_model.to_string()),
+            ("engine", engine.label().to_string()),
             ("frontendModelId", frontend_model_id.to_string()),
             ("primaryMode", format!("{:?}", primary_mode)),
             ("requestedMode", format!("{:?}", decode_mode)),
@@ -959,14 +1207,14 @@ async fn run_faster_whisper_decode_with_conditioned(
         ],
     );
 
-    let primary = faster_whisper::transcribe_samples_with_overrides(
-        conditioned_samples,
-        runtime_model,
-        primary_mode,
-        fw_primary_overrides(primary_mode, terminology_hint, audio_duration_ms),
-        cancel_token,
-    )
-    .await?;
+    let primary = engine
+        .decode(
+            conditioned_samples,
+            primary_mode,
+            fw_primary_overrides(primary_mode, terminology_hint, audio_duration_ms),
+            cancel_token,
+        )
+        .await?;
     if cancel_token.is_cancelled() {
         return Err(InferenceError::Cancelled);
     }
@@ -994,14 +1242,14 @@ async fn run_faster_whisper_decode_with_conditioned(
         } else {
             FasterWhisperRequestOverrides::default()
         };
-        let retry = faster_whisper::transcribe_samples_with_overrides(
-            conditioned_samples,
-            runtime_model,
-            retry_mode,
-            retry_overrides,
-            cancel_token,
-        )
-        .await?;
+        let retry = engine
+            .decode(
+                conditioned_samples,
+                retry_mode,
+                retry_overrides,
+                cancel_token,
+            )
+            .await?;
         if cancel_token.is_cancelled() {
             return Err(InferenceError::Cancelled);
         }
@@ -1494,6 +1742,8 @@ pub(crate) fn decode_with_context(
             backend_requested: backend_requested.as_str().to_string(),
             backend_used: backend_used.as_str().to_string(),
             backend_fallback,
+            asr_engine: "whisper-rs".to_string(),
+            asr_step_down_reason: None,
             fw_segment_count: None,
             fw_avg_logprob: None,
             fw_no_speech_prob: None,
