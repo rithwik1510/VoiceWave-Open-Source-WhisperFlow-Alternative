@@ -5,11 +5,13 @@ import {
   canUseTauri,
   getPillQuickControlsSnapshot,
   listenVoicewaveMicLevel,
+  openMicrophonePrivacySettings,
   setMicLevelForwarding,
   startMicLevelMonitor,
   stopMicLevelMonitor
 } from "../lib/tauri";
 import type { ModelCatalogItem, ModelStatus, VoiceWaveSnapshot } from "../types/voicewave";
+import { ModelDownloadProgress } from "./ModelDownloadProgress";
 
 type OnboardingStep = "welcome" | "mic" | "speak" | "done";
 
@@ -25,8 +27,14 @@ interface OnboardingProps {
   catalog: ModelCatalogItem[];
   statuses: Record<string, ModelStatus>;
   hasInstalledModel: boolean;
-  installModel: (modelId: string) => Promise<void>;
+  /** Resolves true once the model is installed (see useVoiceWave). */
+  installModel: (modelId: string) => Promise<boolean>;
+  cancelModelInstall: (modelId: string) => Promise<void>;
   makeModelActive: (modelId: string) => Promise<void>;
+  /** Mic step device picker; same list and setting as Settings > Audio. */
+  inputDevices: string[];
+  inputDevice: string | null;
+  setInputDevice: (deviceName: string | null) => Promise<void>;
   hotkeyLabel: string;
   snapshot: VoiceWaveSnapshot;
   /** Anonymous usage count, on by default. Disclosed on the first screen so
@@ -171,8 +179,18 @@ function useParticleBurst() {
 /* ------------------------------------------------------------- mic meter */
 
 /** Circular voice visualizer: 30 bars around a gradient orb, driven directly
- * (no React re-renders) from live mic-level events at ~30 fps. */
-function MicMeter({ heard, onHeard }: { heard: boolean; onHeard: () => void }) {
+ * (no React re-renders) from live mic-level events at ~30 fps. `onError`
+ * reports a microphone that could not be opened (the monitor emits that as a
+ * mic-level event, not as a failed command). */
+function MicMeter({
+  heard,
+  onHeard,
+  onError
+}: {
+  heard: boolean;
+  onHeard: () => void;
+  onError: (message: string) => void;
+}) {
   const barsRef = useRef<Array<HTMLDivElement | null>>([]);
   const haloRef = useRef<HTMLDivElement | null>(null);
   const levelRef = useRef(0);
@@ -189,25 +207,30 @@ function MicMeter({ heard, onHeard }: { heard: boolean; onHeard: () => void }) {
     let energy = 0;
     let active = true;
 
-    // Cleanup can land mid-setup (fast Continue, StrictMode remount): bail
-    // before starting the monitor, and release a listener that resolves late.
+    // Listen before starting the monitor: a mic that fails to open reports
+    // it in the very first event. Cleanup can land mid-setup (fast Continue,
+    // StrictMode remount): release a listener that resolves late and bail
+    // before starting the monitor.
     void (async () => {
+      const fn = await listenVoicewaveMicLevel((event) => {
+        levelRef.current = event.error ? 0 : event.level;
+        if (event.error) {
+          onError(event.error);
+        }
+      });
+      if (!active) {
+        fn();
+        return;
+      }
+      unlisten = fn;
       try {
         await setMicLevelForwarding(true);
         if (!active) {
           return;
         }
         await startMicLevelMonitor();
-      } catch {
-        // The hint copy below the meter covers the "we hear nothing" case.
-      }
-      const fn = await listenVoicewaveMicLevel((event) => {
-        levelRef.current = event.error ? 0 : event.level;
-      });
-      if (active) {
-        unlisten = fn;
-      } else {
-        fn();
+      } catch (err) {
+        onError(err instanceof Error ? err.message : String(err));
       }
     })();
 
@@ -269,7 +292,7 @@ function MicMeter({ heard, onHeard }: { heard: boolean; onHeard: () => void }) {
         }
       })();
     };
-  }, [onHeard]);
+  }, [onError, onHeard]);
 
   return (
     <div className="vw-onb-meter" role="img" aria-label="Live microphone level">
@@ -300,7 +323,11 @@ export function Onboarding({
   statuses,
   hasInstalledModel,
   installModel,
+  cancelModelInstall,
   makeModelActive,
+  inputDevices,
+  inputDevice,
+  setInputDevice,
   hotkeyLabel,
   snapshot,
   usageOptIn,
@@ -313,9 +340,13 @@ export function Onboarding({
     () => catalog.find((row) => row.recommended)?.modelId ?? "fw-small.en"
   );
   const modelPickedRef = useRef(false);
-  const [downloadStarted, setDownloadStarted] = useState(false);
+  // A ref, not state: Retry calls startDownload in the same tick the previous
+  // attempt settled, and a state guard read through a stale closure made the
+  // first Retry click a no-op.
+  const downloadInFlightRef = useRef(false);
   const [micHeard, setMicHeard] = useState(false);
   const [micHintVisible, setMicHintVisible] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   const [spokeDone, setSpokeDone] = useState(false);
   const [quickControlsPreviewOpen, setQuickControlsPreviewOpen] = useState(false);
   const [quickControlsAvailable, setQuickControlsAvailable] = useState(
@@ -356,13 +387,10 @@ export function Onboarding({
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
-  const downloadFailed =
-    !modelReady && (status?.state === "failed" || status?.state === "cancelled");
   const smallRecommended = catalog.some((row) => row.modelId === "fw-small.en" && row.recommended);
   const turboRecommended = catalog.some(
     (row) => row.modelId === "fw-large-v3-turbo" && row.recommended
   );
-  const progress = modelReady ? 100 : Math.max(0, Math.min(100, status?.progress ?? 0));
   const catalogRow = catalog.find((row) => row.modelId === modelChoice);
 
   const motes = useMemo(
@@ -381,21 +409,27 @@ export function Onboarding({
     []
   );
 
+  // The download outlives this component: finishing or skipping onboarding
+  // mid-download leaves it running, the model gate shows its progress, and
+  // this chain still activates the model when it lands.
   const startDownload = useCallback(() => {
-    if (modelReady || downloadStarted) {
+    if (modelReady || downloadInFlightRef.current) {
       return;
     }
-    setDownloadStarted(true);
+    downloadInFlightRef.current = true;
+    const modelId = modelChoice;
     void (async () => {
       try {
-        await installModel(modelChoice);
-        await makeModelActive(modelChoice);
+        if (await installModel(modelId)) {
+          await makeModelActive(modelId);
+        }
       } catch {
         // Surfaced through the model status (state === "failed" or "cancelled") with a retry.
-        setDownloadStarted(false);
+      } finally {
+        downloadInFlightRef.current = false;
       }
     })();
-  }, [downloadStarted, installModel, makeModelActive, modelChoice, modelReady]);
+  }, [installModel, makeModelActive, modelChoice, modelReady]);
 
   const begin = useCallback(() => {
     startDownload();
@@ -411,8 +445,33 @@ export function Onboarding({
     }
   }, [burst]);
 
+  const handleMicError = useCallback((message: string) => {
+    setMicError(message);
+  }, []);
+
+  // Switching input restarts the level monitor in place (forwarding stays on)
+  // rather than remounting the meter, whose async teardown could switch
+  // forwarding off after the new monitor started.
+  const changeInputDevice = useCallback(
+    async (deviceName: string | null) => {
+      setMicError(null);
+      await setInputDevice(deviceName);
+      if (!canUseTauri()) {
+        return;
+      }
+      try {
+        await stopMicLevelMonitor();
+        await startMicLevelMonitor();
+      } catch (err) {
+        setMicError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [setInputDevice]
+  );
+
   // Nudge quiet mics: if nothing has been heard after a while on the mic step,
-  // point at Windows input volume (the most common silent failure we see).
+  // point at Windows input volume and mic privacy (the most common silent
+  // failures we see).
   useEffect(() => {
     if (step !== "mic" || micHeard) {
       setMicHintVisible(false);
@@ -481,16 +540,13 @@ export function Onboarding({
   const formatSize = (bytes?: number) =>
     bytes ? `${Math.round(bytes / (1024 * 1024))} MB` : "";
 
-  // A bare percent hides how much of a ~487 MB download is left (and stalls
-  // read as "nothing is happening"). Show the bytes when the backend sends them.
-  const downloadedLabel =
-    typeof status?.downloadedBytes === "number" &&
-    typeof status?.totalBytes === "number" &&
-    status.totalBytes > 0
-      ? `${Math.round(status.downloadedBytes / (1024 * 1024))} MB of ${Math.round(
-          status.totalBytes / (1024 * 1024)
-        )} MB`
-      : null;
+  // The monitor reports cpal's wording; "no input device" is the one case
+  // with a different fix than Windows privacy / another app holding the mic.
+  const micErrorCopy = micError
+    ? /no input device/i.test(micError)
+      ? "No microphone found. Plug one in, or pick another input below."
+      : "VoiceWave can't open your microphone. Windows may be blocking desktop apps from using it, or another app is holding it."
+    : null;
 
   return (
     <div className="vw-onb-backdrop" role="dialog" aria-modal="true" aria-label="Welcome to VoiceWave">
@@ -583,16 +639,37 @@ export function Onboarding({
                 </p>
 
                 <div className="flex flex-1 items-center justify-center py-4">
-                  <MicMeter heard={micHeard} onHeard={handleMicHeard} />
+                  <MicMeter heard={micHeard} onHeard={handleMicHeard} onError={handleMicError} />
                 </div>
 
-                {!micHeard && micHintVisible && (
-                  <p className="text-center text-xs text-status-warn-text">
-                    Not hearing anything — check that your mic isn't muted and its Windows input volume is up.
+                {!micHeard && (micErrorCopy || micHintVisible) && (
+                  <p className="text-center text-xs text-status-warn-text" role={micErrorCopy ? "alert" : undefined}>
+                    {micErrorCopy ??
+                      "Not hearing anything — check that your mic isn't muted, its Windows input volume is up, and Windows lets desktop apps use it."}{" "}
+                    <button
+                      type="button"
+                      className="font-semibold underline underline-offset-2"
+                      onClick={() => void openMicrophonePrivacySettings().catch(() => undefined)}
+                    >
+                      Open microphone privacy settings
+                    </button>
                   </p>
                 )}
 
-                <div className="mt-auto flex items-center justify-end pt-4">
+                <div className="mt-auto flex items-center justify-between gap-3 pt-4">
+                  <select
+                    className="vw-field max-w-[260px]"
+                    aria-label="Microphone input device"
+                    value={inputDevice ?? ""}
+                    onChange={(event) => void changeInputDevice(event.target.value ? event.target.value : null)}
+                  >
+                    <option value="">Default system input</option>
+                    {inputDevices.map((device) => (
+                      <option key={device} value={device}>
+                        {device}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     className={micHeard ? "vw-btn-primary" : "vw-btn-secondary"}
@@ -649,45 +726,34 @@ export function Onboarding({
                             ? "Transcribing…"
                             : " "}
                     </p>
+                    <p className="mt-1 text-xs text-hint">
+                      Longer thought? Double-tap {hotkeyLabel} for hands-free, then pause or press it again.
+                    </p>
                   </>
                 ) : (
-                  <div className="mt-6 flex flex-1 flex-col justify-center">
-                    <div className="rounded-2xl border border-edge bg-inset px-5 py-5">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-ink-strong">
-                          {downloadFailed
-                            ? "The model download hit a snag."
-                            : "Finishing the speech model download…"}
-                        </p>
-                        {downloadFailed ? (
-                          <button
-                            type="button"
-                            className="vw-btn-primary vw-btn-sm"
-                            onClick={() => {
-                              setDownloadStarted(false);
-                              startDownload();
-                            }}
-                          >
-                            Retry
-                          </button>
-                        ) : (
-                          <span className="text-sm tabular-nums text-accent-text">{progress}%</span>
-                        )}
+                  // While the model downloads, teach both gestures so the wait
+                  // is useful; the rehearsal replaces this once it lands.
+                  <div className="mt-5 flex flex-1 flex-col">
+                    <div className="vw-row-list">
+                      <div className="flex items-center gap-3 px-4 py-3 text-[15px] text-faint">
+                        <kbd className="vw-onb-kbd">{hotkeyLabel}</kbd>
+                        <span>Hold to talk, let go to drop the words where you're typing.</span>
                       </div>
-                      {!downloadFailed && (
-                        <div className="vw-onb-progress mt-3">
-                          <div className="vw-onb-progress-fill" style={{ width: `${Math.max(4, progress)}%` }} />
-                        </div>
-                      )}
-                      {!downloadFailed && downloadedLabel && (
-                        <p className="mt-2 text-xs tabular-nums text-hint">{downloadedLabel}</p>
-                      )}
-                      {downloadFailed && status?.message && (
-                        <p className="mt-2 text-xs text-status-danger-text">{status.message}</p>
-                      )}
+                      <div className="flex items-center gap-3 px-4 py-3 text-[15px] text-faint">
+                        <kbd className="vw-onb-kbd">{hotkeyLabel}</kbd>
+                        <span>Double-tap for hands-free. Pause when you're done, or press it again.</span>
+                      </div>
+                    </div>
+                    <div className="mt-5">
+                      <ModelDownloadProgress
+                        status={status}
+                        onRetry={startDownload}
+                        onCancel={() => void cancelModelInstall(modelChoice)}
+                      />
                     </div>
                     <p className="mt-3 text-xs text-hint">
-                      This is the one-time download — dictation is fully offline after it lands.
+                      One-time download. You can finish setup now; it keeps going in the background,
+                      and dictation is fully offline once it lands.
                     </p>
                   </div>
                 )}
@@ -697,7 +763,6 @@ export function Onboarding({
                     type="button"
                     className={spokeDone ? "vw-btn-primary" : "vw-btn-secondary"}
                     onClick={() => setStep("done")}
-                    disabled={!modelReady && !downloadFailed}
                   >
                     Continue
                     <ArrowRight size={16} className="ml-1.5 inline-block" />
@@ -715,7 +780,11 @@ export function Onboarding({
                   You're set.
                 </h2>
                 <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-faint">
-                  VoiceWave works in every app — try your email or notes next.
+                  {modelReady
+                    ? "VoiceWave works in every app — try your email or notes next."
+                    : status?.state === "failed" || status?.state === "cancelled"
+                      ? "The speech model download didn't finish. Pick it up on the next screen, then dictation works in every app."
+                      : "The speech model is still downloading. Dictation works in every app the moment it lands."}{" "}
                   Say “new line” or “bullet point” to add structure as you speak.
                 </p>
                 {quickControlsAvailable ? <button

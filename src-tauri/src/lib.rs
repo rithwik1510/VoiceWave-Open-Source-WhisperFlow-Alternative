@@ -1136,6 +1136,26 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens Windows Settings > Privacy > Microphone, where desktop-app mic
+/// access is switched off when onboarding hears nothing. The URI is fixed, so
+/// nothing from the frontend reaches the shell.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn open_microphone_privacy_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg("ms-settings:privacy-microphone")
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("failed to open microphone privacy settings: {err}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("microphone privacy settings are only available on Windows".to_string())
+    }
+}
+
 #[cfg(all(feature = "desktop", target_os = "windows"))]
 fn capture_foreground_for_focused_spike(
     app: &tauri::AppHandle,
@@ -2338,6 +2358,7 @@ pub fn run() {
             set_pro_post_processing_enabled,
             set_dictation_profile,
             show_main_window,
+            open_microphone_privacy_settings,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
             set_pill_window_mode,

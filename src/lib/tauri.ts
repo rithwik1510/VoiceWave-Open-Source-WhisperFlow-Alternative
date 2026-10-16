@@ -391,6 +391,11 @@ export async function stopMicLevelMonitor(): Promise<void> {
   await invokeVoicewave<void>("stop_mic_level_monitor");
 }
 
+/** Windows Settings > Privacy > Microphone (desktop-app mic access). */
+export async function openMicrophonePrivacySettings(): Promise<void> {
+  await invokeVoicewave<void>("open_microphone_privacy_settings");
+}
+
 export async function runAudioQualityDiagnostic(durationMs?: number): Promise<AudioQualityReport> {
   return invokeVoicewave<AudioQualityReport>("run_audio_quality_diagnostic", {
     durationMs: durationMs ?? null

@@ -35,6 +35,7 @@ import { firebaseEnabled } from "./lib/firebase";
 import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard } from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
+import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
 import { Onboarding } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
@@ -64,7 +65,6 @@ type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
  * `set_dictation_profile`. New code speaks `PolishProfile`. */
 type ProToolsMode = "default" | "coding" | "writing" | "study";
 type AuthMode = "signin" | "signup";
-type SetupModelChoice = "fw-small.en" | "fw-large-v3-turbo";
 type SettingsSection = "general" | "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
 type DictionarySyncStatus = "device-local" | "syncing" | "synced" | "pending";
 type SnippetSyncStatus = DictionarySyncStatus | "limit-exceeded";
@@ -509,9 +509,8 @@ function App() {
   const [dictionarySyncStatus, setDictionarySyncStatus] = useState<DictionarySyncStatus>("device-local");
   const [snippetSyncStatus, setSnippetSyncStatus] = useState<SnippetSyncStatus>("device-local");
   const [snippetSyncError, setSnippetSyncError] = useState<string | null>(null);
-  const [setupModelChoice, setSetupModelChoice] = useState<SetupModelChoice>("fw-small.en");
-  const [setupModelPending, setSetupModelPending] = useState(false);
-  const [setupModelError, setSetupModelError] = useState<string | null>(null);
+  // The user's explicit pick in the model gate; null follows the per-PC default.
+  const [setupModelChoice, setSetupModelChoice] = useState<string | null>(null);
   const {
     activeState,
     approveDictionaryQueueEntry,
@@ -677,15 +676,30 @@ function App() {
     !showOnboarding &&
     !showModelSetupGate &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
-  const selectedSetupCatalogRow = setupCatalog.find((row) => row.modelId === setupModelChoice) ?? null;
-  const selectedSetupStatus = modelStatuses[setupModelChoice] ?? null;
-
-  useEffect(() => {
-    if (!showModelSetupGate) {
-      return;
-    }
-    setSetupModelChoice("fw-small.en");
-  }, [showModelSetupGate]);
+  // The gate shows, in order: a download already running (picked in
+  // onboarding before "Skip setup", or started here), the user's pick, a
+  // download that failed or was cancelled (so Resume is one click), then the
+  // catalog's recommendation for this PC. A running download locks the tabs,
+  // so the gate can never start a second one.
+  const downloadingSetupModelId =
+    setupCatalog.find((row) => modelStatuses[row.modelId]?.state === "downloading")?.modelId ?? null;
+  const interruptedSetupModelId =
+    setupCatalog.find((row) => {
+      const state = modelStatuses[row.modelId]?.state;
+      return state === "failed" || state === "cancelled";
+    })?.modelId ?? null;
+  const gateModelId =
+    downloadingSetupModelId ??
+    setupModelChoice ??
+    interruptedSetupModelId ??
+    setupCatalog.find((row) => row.recommended)?.modelId ??
+    "fw-small.en";
+  const selectedSetupCatalogRow = setupCatalog.find((row) => row.modelId === gateModelId) ?? null;
+  const selectedSetupStatus = modelStatuses[gateModelId];
+  const gateDownloadVisible =
+    selectedSetupStatus?.state === "downloading" ||
+    selectedSetupStatus?.state === "failed" ||
+    selectedSetupStatus?.state === "cancelled";
 
   useEffect(() => {
     if (proRequiredFeature) {
@@ -879,21 +893,13 @@ function App() {
     setActiveNav(nextNav);
   };
 
+  // installModel never throws: failures and cancels show up in the gate's
+  // progress card with Retry/Resume, so only a finished install activates.
   const handleSetupModelInstall = async () => {
-    setSetupModelError(null);
-    setSetupModelPending(true);
-    try {
-      await installModel(setupModelChoice);
-      await makeModelActive(setupModelChoice);
+    const modelId = gateModelId;
+    if (await installModel(modelId)) {
+      await makeModelActive(modelId);
       setActiveNav("home");
-    } catch (setupErr) {
-      if (setupErr instanceof Error && setupErr.message) {
-        setSetupModelError(setupErr.message);
-      } else {
-        setSetupModelError("Model installation failed. Please retry.");
-      }
-    } finally {
-      setSetupModelPending(false);
     }
   };
 
@@ -3452,7 +3458,11 @@ function App() {
           statuses={modelStatuses}
           hasInstalledModel={hasInstalledModel}
           installModel={installModel}
+          cancelModelInstall={cancelModelInstall}
           makeModelActive={makeModelActive}
+          inputDevices={inputDevices}
+          inputDevice={settings.inputDevice}
+          setInputDevice={setInputDevice}
           hotkeyLabel={settings.pushToTalkHotkey}
           snapshot={snapshot}
           usageOptIn={settings.anonymousUsageOptIn}
@@ -3499,67 +3509,53 @@ function App() {
           <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Enable Dictation">
             <header>
               <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">Enable Dictation</h3>
-              <p className="mt-1 text-sm text-faint">Install a model to start transcription.</p>
+              <p className="mt-1 text-sm text-faint">
+                {downloadingSetupModelId
+                  ? "Downloading your speech model. Dictation works the moment it lands."
+                  : "Install a speech model to start dictating. It's a one-time download."}
+              </p>
             </header>
 
             <div className="vw-model-gate-tabs" role="tablist" aria-label="Model size selector">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={setupModelChoice === "fw-small.en"}
-                className={`vw-model-gate-tab ${setupModelChoice === "fw-small.en" ? "vw-model-gate-tab-active" : ""}`}
-                onClick={() => setSetupModelChoice("fw-small.en")}
-                disabled={setupModelPending}
-              >
-                <span className="vw-model-gate-badge">Recommended</span>
-                <span className="vw-model-gate-tab-title">Small</span>
-                <span className="vw-model-gate-tab-copy">Fast setup. Best for most devices.</span>
-              </button>
-
-              <button
-                type="button"
-                role="tab"
-                aria-selected={setupModelChoice === "fw-large-v3-turbo"}
-                className={`vw-model-gate-tab ${setupModelChoice === "fw-large-v3-turbo" ? "vw-model-gate-tab-active" : ""}`}
-                onClick={() => setSetupModelChoice("fw-large-v3-turbo")}
-                disabled={setupModelPending}
-              >
-                <span className="vw-model-gate-tab-title">Large Turbo</span>
-                <span className="vw-model-gate-tab-copy">
-                  Higher quality. Use only on high-power devices with strong GPU.
-                </span>
-              </button>
+              {setupCatalog.map((row) => (
+                <button
+                  key={row.modelId}
+                  type="button"
+                  role="tab"
+                  aria-selected={gateModelId === row.modelId}
+                  className={`vw-model-gate-tab ${gateModelId === row.modelId ? "vw-model-gate-tab-active" : ""}`}
+                  onClick={() => setSetupModelChoice(row.modelId)}
+                  disabled={downloadingSetupModelId !== null}
+                >
+                  {row.recommended && <span className="vw-model-gate-badge">Recommended</span>}
+                  <span className="vw-model-gate-tab-title">
+                    {row.modelId === "fw-small.en" ? "Small" : "Large Turbo"}
+                  </span>
+                  <span className="vw-model-gate-tab-copy">{row.hardwareNote}</span>
+                </button>
+              ))}
             </div>
 
             <div className="vw-model-gate-meta">
-              <span className="vw-chip">{selectedSetupCatalogRow?.displayName ?? setupModelChoice}</span>
+              <span className="vw-chip">{selectedSetupCatalogRow?.displayName ?? gateModelId}</span>
               {selectedSetupCatalogRow && (
                 <span className="vw-chip">{formatBytes(selectedSetupCatalogRow.sizeBytes)}</span>
               )}
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className="vw-btn-primary"
-                onClick={() => void handleSetupModelInstall()}
-                disabled={setupModelPending || selectedSetupStatus?.state === "downloading"}
-              >
-                {setupModelPending
-                  ? "Starting Download..."
-                  : selectedSetupStatus?.state === "downloading"
-                    ? `Downloading ${selectedSetupStatus.progress}%`
-                    : setupModelChoice === "fw-small.en"
-                      ? "Download Small Model"
-                      : "Download Large Model"}
-              </button>
+            <div className="mt-4">
+              {gateDownloadVisible ? (
+                <ModelDownloadProgress
+                  status={selectedSetupStatus}
+                  onRetry={() => void handleSetupModelInstall()}
+                  onCancel={() => void cancelModelInstall(gateModelId)}
+                />
+              ) : (
+                <button type="button" className="vw-btn-primary" onClick={() => void handleSetupModelInstall()}>
+                  {gateModelId === "fw-small.en" ? "Download Small Model" : "Download Large Model"}
+                </button>
+              )}
             </div>
-
-            {(setupModelError || selectedSetupStatus?.message || displayError) && (
-              <section className="mt-4 rounded-2xl border border-edge bg-inset px-4 py-3 text-sm text-label">
-                {setupModelError ?? selectedSetupStatus?.message ?? displayError}
-              </section>
-            )}
           </section>
         </div>
       )}

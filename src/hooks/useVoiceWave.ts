@@ -1514,11 +1514,16 @@ export function useVoiceWave() {
     }
   }, [refreshPhase3Data, refreshRecentInsertions, settings.preferClipboardFallback, snapshot.lastFinal, tauriAvailable]);
 
+  // Resolves true only when the model finished installing. Never throws:
+  // failures and cancels land in modelStatuses, so callers just decide whether
+  // to activate the model. A request for a model that is already downloading
+  // resolves false straight away (the backend reports progress instead of
+  // starting a second download), leaving activation to the first caller.
   const installModel = useCallback(
-    async (modelId: string) => {
+    async (modelId: string): Promise<boolean> => {
       if (!tauriAvailable) {
         setError("Desktop runtime is required to download models. Run npm run tauri:dev.");
-        return;
+        return false;
       }
       const catalogRow = modelCatalog.find((item) => item.modelId === modelId);
       const resumable =
@@ -1542,6 +1547,7 @@ export function useVoiceWave() {
         const status = await downloadModel({ modelId });
         setModelStatuses((prev) => ({ ...prev, [modelId]: status }));
         await refreshPhase3Data();
+        return status.state === "installed";
       } catch (modelErr) {
         const message = modelErr instanceof Error ? modelErr.message : "Model install failed";
         setError(message);
@@ -1573,6 +1579,7 @@ export function useVoiceWave() {
             }
           };
         });
+        return false;
       }
     },
     [modelCatalog, refreshPhase3Data, settings.activeModel, tauriAvailable]
