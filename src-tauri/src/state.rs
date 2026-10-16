@@ -28,7 +28,7 @@ use crate::{
         HotkeySnapshot,
     },
     inference::{
-        cancel_faster_whisper_downloads, cpu_runtime_pool_enabled,
+        cancel_faster_whisper_download, cpu_runtime_pool_enabled,
         download_faster_whisper_model, ensure_faster_whisper_ready, faster_whisper_cache_hint,
         faster_whisper_runtime_model_id, is_faster_whisper_model,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
@@ -1912,6 +1912,9 @@ impl VoiceWaveController {
                     );
                     return;
                 }
+                // The pill's error color-flash carries no text; the notice is
+                // the only place the user actually learns what went wrong.
+                let (notice_title, notice_detail) = controller.dictation_failure_notice(&err).await;
                 controller
                     .set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
@@ -1919,22 +1922,71 @@ impl VoiceWaveController {
                     .update_state(
                         &app,
                         VoiceWaveHudState::Error,
-                        Some(format!("Dictation failed: {err}")),
+                        Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
-                // The pill's error color-flash carries no text; the notice is
-                // the only place the user actually learns what went wrong.
-                let (notice_title, notice_detail) = match &err {
-                    ControllerError::MissingModel(_) => (
-                        "Install a model to start",
-                        "Double-click the pill, open Models, and install fw-small.en.".to_string(),
-                    ),
-                    _ => ("Dictation failed", err.to_string()),
-                };
                 emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                // No model and nothing downloading: the fix lives in the main
+                // window (onboarding or the model gate), and the compact pill
+                // takes no clicks, so bring the window to the user.
+                if matches!(err, ControllerError::MissingModel(_))
+                    && controller.model_download_cancels.lock().await.is_empty()
+                {
+                    if let Err(show_err) = crate::show_main_window(app.clone()).await {
+                        eprintln!("voicewave: could not show main window for setup: {show_err}");
+                    }
+                }
             }
         });
         Ok(())
+    }
+
+    /// Pill copy for a failed dictation. Setup problems (no model, model
+    /// still downloading, microphone unavailable, speech engine down) say what
+    /// to do next; anything unexpected keeps the raw error.
+    async fn dictation_failure_notice(&self, err: &ControllerError) -> (&'static str, String) {
+        let (title, detail) = match err {
+            ControllerError::MissingModel(_) => {
+                if self.model_download_cancels.lock().await.is_empty() {
+                    (
+                        "Finish setting up VoiceWave",
+                        "Choose a speech model in the VoiceWave window to start dictating.",
+                    )
+                } else {
+                    (
+                        "Speech model is still downloading",
+                        "Dictation works as soon as it finishes. Progress is in the VoiceWave window.",
+                    )
+                }
+            }
+            ControllerError::Audio(AudioError::MissingInputDevice) => (
+                "No microphone found",
+                "Plug in a microphone, or pick one in VoiceWave Settings > Audio.",
+            ),
+            ControllerError::Audio(AudioError::DeviceNotFound(_)) => (
+                "Microphone not connected",
+                "Reconnect it, or pick another one in VoiceWave Settings > Audio.",
+            ),
+            ControllerError::Audio(
+                AudioError::Devices(_)
+                | AudioError::DefaultInputConfig(_)
+                | AudioError::BuildStream(_)
+                | AudioError::PlayStream(_),
+            ) => (
+                "Couldn't open the microphone",
+                "Check that Windows lets desktop apps use the microphone (Settings > Privacy > Microphone) and that no other app is holding it.",
+            ),
+            ControllerError::Runtime(message)
+                if message.starts_with("Faster-Whisper runtime is not ready") =>
+            {
+                (
+                    "Speech engine didn't start",
+                    "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
+                )
+            }
+            _ => return ("Dictation failed", err.to_string()),
+        };
+        (title, detail.to_string())
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
@@ -2598,6 +2650,40 @@ impl VoiceWaveController {
                 .map(|item| item.size_bytes)
                 .unwrap_or(0);
 
+            // Registered before any other await so Cancel can reach this
+            // download for its whole lifetime (runtime prep included), and
+            // checked in the same lock so a second request for a model that is
+            // already downloading (onboarding started it, then the setup gate
+            // or Models page asked again) reports progress instead of racing a
+            // second worker into the same cache. Removed on every exit path.
+            let cancel_token = {
+                let mut cancels = self.model_download_cancels.lock().await;
+                if cancels.contains_key(&model_id) {
+                    drop(cancels);
+                    let (downloaded, progress) =
+                        faster_whisper_download_progress(&model_id, expected_total_bytes);
+                    return Ok(ModelStatus {
+                        model_id: model_id.clone(),
+                        state: ModelStatusState::Downloading,
+                        progress,
+                        active: active_model == model_id,
+                        installed: false,
+                        message: Some(format!(
+                            "Downloading model weights ({} MB of {} MB)...",
+                            downloaded / 1_048_576,
+                            expected_total_bytes / 1_048_576,
+                        )),
+                        installed_model: None,
+                        downloaded_bytes: Some(downloaded),
+                        total_bytes: Some(expected_total_bytes.max(1)),
+                        resumable: false,
+                    });
+                }
+                let token = CancellationToken::new();
+                cancels.insert(model_id.clone(), token.clone());
+                token
+            };
+
             let preparing = ModelStatus {
                 model_id: model_id.clone(),
                 state: ModelStatusState::Downloading,
@@ -2615,15 +2701,6 @@ impl VoiceWaveController {
                 .await
                 .insert(model_id.clone(), preparing.clone());
             self.emit_model_status(&app, &preparing);
-
-            // Registered before any await so Cancel can reach this download for
-            // its whole lifetime (runtime prep included). Removed on every exit
-            // path below.
-            let cancel_token = CancellationToken::new();
-            self.model_download_cancels
-                .lock()
-                .await
-                .insert(model_id.clone(), cancel_token.clone());
 
             if let Err(err) = ensure_faster_whisper_ready().await {
                 // Cancel kills the worker, which can be what made runtime prep
@@ -2968,9 +3045,9 @@ impl VoiceWaveController {
                 return Ok(status);
             };
             token.cancel();
-            // Kills only the dedicated download worker; the warm dictation
-            // worker keeps running.
-            cancel_faster_whisper_downloads();
+            // Kills only this model's download worker; the warm dictation
+            // worker and any other model's download keep running.
+            cancel_faster_whisper_download(&model_id);
             let expected_total_bytes: u64 = self
                 .model_manager
                 .lock()
@@ -3649,6 +3726,20 @@ impl VoiceWaveController {
         let silence_timeout_ms = ((max_capture_ms as f32) * 0.22).round() as u64;
         let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
         let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
+        // Fail on the press, not after the user has spoken a whole sentence: a
+        // faster-whisper model only counts once its download finished and was
+        // registered (a half-downloaded cache must never reach the worker).
+        if mode == DictationMode::Microphone
+            && use_faster_whisper
+            && self
+                .model_manager
+                .lock()
+                .await
+                .get_installed(&settings.active_model)
+                .is_none()
+        {
+            return Err(ControllerError::MissingModel(settings.active_model.clone()));
+        }
         let incremental_enabled = mode == DictationMode::Microphone
             && incremental_pre_release_decode_enabled()
             && !use_faster_whisper;
@@ -4337,17 +4428,10 @@ impl VoiceWaveController {
                 // setup state, not a decode failure: feeding it to the policy
                 // or the audio-pipeline fallback counters would degrade later
                 // dictations once the download finishes.
+                // The pill notice comes from `dictation_failure_notice`.
                 if err.to_string().contains("is not downloaded yet") {
-                    emit_pill_notice(
-                        &app,
-                        "warning",
-                        "Speech model isn't ready yet",
-                        Some("Finish the download in VoiceWave, then try again.".to_string()),
-                        4_000,
-                    );
-                    return Err(ControllerError::Runtime(
-                        "The speech model is still downloading. Finish the download in VoiceWave, then try again."
-                            .to_string(),
+                    return Err(ControllerError::MissingModel(
+                        final_worker.active_model().to_string(),
                     ));
                 }
                 if mode == DictationMode::Microphone {

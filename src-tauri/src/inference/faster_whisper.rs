@@ -143,9 +143,10 @@ static WORKER: OnceLock<Mutex<Option<WorkerProcess>>> = OnceLock::new();
 /// first-run model download — exactly when cancelling or quitting has to reach
 /// the process — the slot is empty and the pid is the only handle left.
 static LIVE_WORKER_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-/// PIDs of dedicated model-download workers (see `download_model`), so Cancel
-/// can stop a download without also killing the warm dictation worker.
-static DOWNLOAD_WORKER_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Dedicated model-download workers (see `download_model`) as (runtime model
+/// id, pid), so Cancel stops exactly that download without also killing the
+/// warm dictation worker or another model's download.
+static DOWNLOAD_WORKER_PIDS: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
 /// Serializes requests on the shared worker. Without this, a dictation
 /// arriving while the startup prefetch is still loading the model checks out
 /// an empty slot, spawns a SECOND worker, and pays the full model load itself
@@ -289,11 +290,12 @@ pub async fn download_model(
     cancel_token: CancellationToken,
 ) -> Result<FasterWhisperPrefetchOutput, InferenceError> {
     let request = prefetch_request_for(model_id, true);
+    let download_model_id = model_id.to_string();
     let response = tokio::task::spawn_blocking(move || {
         let mut worker = spawn_worker()?;
         let pid = worker.child.id();
         if let Ok(mut guard) = DOWNLOAD_WORKER_PIDS.lock() {
-            guard.push(pid);
+            guard.push((download_model_id, pid));
         }
         // Checked after registering: a cancel that landed during the spawn
         // found nothing to kill, so honour it here instead.
@@ -303,7 +305,7 @@ pub async fn download_model(
             exchange_with_worker(&mut worker, &request)
         };
         if let Ok(mut guard) = DOWNLOAD_WORKER_PIDS.lock() {
-            guard.retain(|value| *value != pid);
+            guard.retain(|(_, value)| *value != pid);
         }
         // Dropping `worker` kills the process; it has served its purpose.
         result
@@ -318,14 +320,25 @@ pub async fn download_model(
     })
 }
 
-/// Abort in-flight model downloads. The download is blocked inside the
-/// worker's `WhisperModel()` call and never reads stdin, so killing the
-/// process is the only way to stop it. HuggingFace keeps the partial blob, so
-/// the next download resumes from it.
-pub fn cancel_model_downloads() {
-    let pids = DOWNLOAD_WORKER_PIDS
+/// Abort the in-flight download of one runtime model (e.g. "small.en"). The
+/// download is blocked inside the worker's `WhisperModel()` call and never
+/// reads stdin, so killing the process is the only way to stop it.
+/// HuggingFace keeps the partial blob, so the next download resumes from it.
+pub fn cancel_model_download(model_id: &str) {
+    let pids: Vec<u32> = DOWNLOAD_WORKER_PIDS
         .lock()
-        .map(|mut guard| std::mem::take(&mut *guard))
+        .map(|mut guard| {
+            let mut killed = Vec::new();
+            guard.retain(|(id, pid)| {
+                if id == model_id {
+                    killed.push(*pid);
+                    false
+                } else {
+                    true
+                }
+            });
+            killed
+        })
         .unwrap_or_default();
     for pid in pids {
         kill_process_by_pid(pid);

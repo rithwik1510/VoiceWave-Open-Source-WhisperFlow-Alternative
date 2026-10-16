@@ -10,7 +10,7 @@ pub mod polish_gate;
 pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};
 pub use faster_whisper::{
     cache_hint_for_model as faster_whisper_cache_hint,
-    cancel_model_downloads as cancel_faster_whisper_downloads, ensure_faster_whisper_ready,
+    ensure_faster_whisper_ready,
     gpu_acceleration_available, kill_worker_processes as kill_faster_whisper_workers,
 };
 pub use policy::RuntimeDecodePolicy;
@@ -665,7 +665,7 @@ pub async fn prefetch_faster_whisper_model(
 }
 
 /// Download a model (resuming partial downloads) in a dedicated worker and
-/// confirm it loads. Cancel via `cancel_faster_whisper_downloads`.
+/// confirm it loads. Cancel via `cancel_faster_whisper_download`.
 pub async fn download_faster_whisper_model(
     model_id: &str,
     cancel_token: CancellationToken,
@@ -673,6 +673,14 @@ pub async fn download_faster_whisper_model(
     let runtime_model = runtime_model_or_err(model_id)?;
     let prefetch = faster_whisper::download_model(runtime_model, cancel_token).await?;
     Ok(prefetch_result(runtime_model, prefetch))
+}
+
+/// Stop the in-flight download of one model, leaving other downloads and the
+/// warm dictation worker running.
+pub fn cancel_faster_whisper_download(model_id: &str) {
+    if let Some(runtime_model) = faster_whisper_runtime_model_id(model_id) {
+        faster_whisper::cancel_model_download(runtime_model);
+    }
 }
 
 fn runtime_model_or_err(model_id: &str) -> Result<&'static str, InferenceError> {
