@@ -1,7 +1,6 @@
 mod asr_worker;
 mod audio_pipeline;
 mod faster_whisper;
-pub mod gpu_runtime;
 pub mod gpu_select;
 pub mod llm_polish;
 mod policy;

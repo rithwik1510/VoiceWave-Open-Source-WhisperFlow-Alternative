@@ -1041,43 +1041,6 @@ fn worker_path_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// Whether the speech worker can decode on an NVIDIA GPU on this machine:
-/// an NVIDIA driver is installed AND a CUDA 12 cuBLAS the worker can load is
-/// present (optional GPU runtime pack, nvidia wheels next to the python, or a
-/// CUDA toolkit). The shipped runtime is CPU-only, so for most users this is
-/// false. Approximates the worker's own `cuda_runtime_libs_ready` check for
-/// model recommendation; the worker still decides per request.
-///
-/// Filesystem checks only (no process spawns), cached for the process
-/// lifetime — installing the GPU runtime requires a restart anyway.
-pub fn gpu_acceleration_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        if env_flag("VOICEWAVE_FORCE_CPU", false) || !env_flag("VOICEWAVE_AUTO_GPU", true) {
-            return false;
-        }
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        let nvidia_driver = Path::new(&system_root)
-            .join("System32")
-            .join("nvcuda.dll")
-            .exists();
-        if !nvidia_driver {
-            return false;
-        }
-        let mut bin_dirs = super::gpu_runtime::installed_bin_paths();
-        if let Some(python) = bundled_python_candidates()
-            .into_iter()
-            .find(|path| path.exists())
-        {
-            bin_dirs.extend(resolve_python_cuda_bin_paths(&python.to_string_lossy()));
-        }
-        bin_dirs.extend(resolve_cuda_bin_path());
-        bin_dirs
-            .iter()
-            .any(|dir| dir.join("cublas64_12.dll").exists())
-    })
-}
-
 fn python_path_candidates() -> Vec<PathBuf> {
     let mut candidates = bundled_python_candidates();
     candidates.extend(installed_system_python_candidates());
@@ -1224,8 +1187,8 @@ fn resolve_cuda_bin_path() -> Option<PathBuf> {
 }
 
 fn resolve_cuda_bin_paths(python_path: &str) -> Vec<PathBuf> {
-    let mut paths = super::gpu_runtime::installed_bin_paths();
-    paths.extend(resolve_python_cuda_bin_paths(python_path));
+    // Optional CUDA (owner/dev setups): nvidia wheels next to the python, or a CUDA toolkit.
+    let mut paths = resolve_python_cuda_bin_paths(python_path);
     if let Some(cuda_bin) = resolve_cuda_bin_path() {
         paths.push(cuda_bin);
     }
