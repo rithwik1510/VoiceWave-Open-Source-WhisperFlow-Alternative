@@ -62,8 +62,14 @@ const POLL_SLICE: Duration = Duration::from_millis(50);
 const STDERR_TAIL_LINES: usize = 40;
 /// Longest failure reason kept for logs and diagnostics.
 const MAX_REASON_CHARS: usize = 320;
-/// Backend failures in one session after which the GPU is off until restart.
+/// Backend failures in a row after which dictation uses the CPU for
+/// `GPU_COOLDOWN`, then gives the GPU another chance.
 const SESSION_GPU_FAILURE_LIMIT: u32 = 2;
+const GPU_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// Load deadline for the fresh GPU worker a dictation retries on after a GPU
+/// fault: a warm (shader-cached) load takes 2-8 s, and a driver that is still
+/// stuck should cost the user little before the CPU rung takes over.
+pub(crate) const GPU_RETRY_LOAD_DEADLINE: Duration = Duration::from_secs(12);
 
 // Qualification (plan 019): pass bars for a discrete GPU, warm decodes.
 const QUALIFY_SHORT_MAX_MS: u64 = 1_000;
@@ -91,7 +97,9 @@ const QUALIFY_MAX_RETRIES: usize = 3;
 
 fn transcribe_deadline(rung: Rung, audio_ms: u64) -> Duration {
     match rung {
-        Rung::Gpu => Duration::from_millis(10_000 + audio_ms),
+        // Warm decodes run ~0.07x real time (0.25x right after the GPU
+        // idles down), so this catches a hung GPU in seconds, not minutes.
+        Rung::Gpu => Duration::from_millis(4_000 + audio_ms * 2 / 5),
         Rung::Cpu => Duration::from_millis(30_000 + audio_ms.saturating_mul(3)),
     }
 }
@@ -113,6 +121,14 @@ pub(crate) fn rung_budget(rung: Rung, audio_ms: u64) -> Duration {
         Rung::Cpu => SPAWN_READY_DEADLINE + LOAD_CPU_DEADLINE,
     };
     setup + transcribe_deadline(rung, audio_ms) * 2 + REAP_WAIT * 2
+}
+
+/// Worst case for the fresh GPU worker retried after a GPU fault.
+pub(crate) fn gpu_retry_budget(audio_ms: u64) -> Duration {
+    SPAWN_READY_DEADLINE
+        + GPU_RETRY_LOAD_DEADLINE
+        + transcribe_deadline(Rung::Gpu, audio_ms) * 2
+        + REAP_WAIT * 2
 }
 
 /// Which worker a decode runs on.
@@ -500,14 +516,17 @@ static LIVE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
 static SESSION: Mutex<Session> = Mutex::new(Session {
     gpu_failures: 0,
+    gpu_cooldown_until: None,
     qualifying: None,
     retry_next_session: Vec::new(),
     last_report: None,
 });
 
 struct Session {
-    /// Backend failures of the GPU rung this session.
+    /// Backend failures of the GPU rung since its last success or cooldown.
     gpu_failures: u32,
+    /// After repeated failures: CPU until then, then the GPU again.
+    gpu_cooldown_until: Option<Instant>,
     /// Cache key of the qualification running now.
     qualifying: Option<String>,
     /// Keys whose qualification was correct-but-slow or hit a transient
@@ -823,14 +842,21 @@ fn primary_rung_blocking(model: &AsrModel) -> (Rung, Option<StepDown>) {
     let Some(device) = hardware_profile().gpu else {
         return (Rung::Cpu, None);
     };
-    if lock(&SESSION).gpu_failures >= SESSION_GPU_FAILURE_LIMIT {
-        return (
-            Rung::Cpu,
-            Some(StepDown::new(
-                StepDownKind::Unavailable,
-                "session-cpu-lock: repeated GPU failures this session",
-            )),
-        );
+    {
+        let mut session = lock(&SESSION);
+        match session.gpu_cooldown_until {
+            Some(until) if Instant::now() < until => {
+                return (
+                    Rung::Cpu,
+                    Some(StepDown::new(
+                        StepDownKind::Unavailable,
+                        "gpu-cooldown: repeated GPU failures, retrying the GPU in a few minutes",
+                    )),
+                );
+            }
+            Some(_) => session.gpu_cooldown_until = None,
+            None => {}
+        }
     }
     if gpu_select::driver_disabled(&device) {
         return (
@@ -878,12 +904,18 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
     {
         let mut session = lock(&SESSION);
         session.gpu_failures += 1;
-        if session.gpu_failures == SESSION_GPU_FAILURE_LIMIT {
-            eprintln!(
-                "voicewave: GPU speech worker failed twice; using CPU for the rest of this session"
-            );
+        if session.gpu_failures < SESSION_GPU_FAILURE_LIMIT {
+            return;
         }
+        session.gpu_failures = 0;
+        session.gpu_cooldown_until = Some(Instant::now() + GPU_COOLDOWN);
+        eprintln!(
+            "voicewave: GPU speech worker failed twice in a row; using CPU for {} min",
+            GPU_COOLDOWN.as_secs() / 60
+        );
     }
+    // Only a cooldown counts toward the per-driver disable: one stray fault
+    // per session must never turn the GPU off for a week.
     if let Some(device) = hardware_profile().gpu {
         if gpu_select::record_backend_failure(&device) {
             eprintln!(
@@ -997,6 +1029,7 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
 }
 
 struct TranscribeJob {
+    load_deadline: Duration,
     audio_pcm16_b64: String,
     audio_ms: u64,
     beam_size: u32,
@@ -1021,7 +1054,7 @@ fn transcribe_blocking(
         return Err(Fault::Cancelled);
     }
 
-    let result = ensure_loaded(&mut guard, rung, model_path, load_deadline(rung)).and_then(
+    let result = ensure_loaded(&mut guard, rung, model_path, job.load_deadline).and_then(
         |(model_init_ms, cache_hit)| {
             let mut body = json!({
                 "command": "transcribe",
@@ -1037,6 +1070,9 @@ fn transcribe_blocking(
                 worker.request(body, transcribe_deadline(rung, job.audio_ms), Some(cancel))
             })?;
             note_report(model_path, &reply);
+            if rung == Rung::Gpu {
+                lock(&SESSION).gpu_failures = 0;
+            }
             let text = reply["text"]
                 .as_str()
                 .unwrap_or_default()
@@ -1536,10 +1572,12 @@ pub(crate) async fn primary_rung(model: &AsrModel) -> (Rung, Option<StepDown>) {
 
 /// One decode on `rung`. `overrides` carries the shared pipeline's beam size
 /// and prompt; the worker always decodes at temperature 0 without previous
-/// text conditioning.
+/// text conditioning. `load_deadline` overrides the rung's default (the
+/// fresh-worker retry after a GPU fault uses a short one).
 pub(crate) async fn transcribe(
     rung: Rung,
     model_path: &Path,
+    load_deadline: Option<Duration>,
     samples: &[f32],
     decode_mode: DecodeMode,
     overrides: &FasterWhisperRequestOverrides,
@@ -1554,6 +1592,7 @@ pub(crate) async fn transcribe(
         5
     };
     let job = TranscribeJob {
+        load_deadline: load_deadline.unwrap_or_else(|| self::load_deadline(rung)),
         audio_pcm16_b64: encode_pcm16_base64(samples),
         audio_ms: samples.len() as u64 * 1000 / 16_000,
         beam_size: overrides.beam_size.unwrap_or(default_beam).clamp(1, 8),

@@ -294,7 +294,7 @@ is covered by the same deadline. Every phase has one:
 | Spawn to ready | 10 s |
 | `list_devices` | 5 s |
 | `load` (+ warm-up) | 30 s GPU (120 s on first use: driver shader compile, see Phase 0 results), 60 s CPU |
-| `transcribe` | 10 s + 1× audio length GPU; 30 s + 3× audio length CPU (CPU rung loads with max(cores − 2, 2) threads) |
+| `transcribe` | 4 s + 0.4× audio length GPU (warm decodes run ~0.07×, so a hang shows in seconds); 30 s + 3× audio length CPU (CPU rung loads with max(cores − 2, 2) threads) |
 | Request write | inside the request's deadline |
 
 On any missed deadline: kill the worker, **reap it** (wait for exit) before
@@ -378,12 +378,12 @@ at once.
 
 | Event | Class | Action |
 |---|---|---|
-| Worker exits or misses a deadline during a dictation | backend | Retry that dictation on the CPU rung; respawn the GPU worker in the background |
+| Worker exits or misses a deadline during a dictation | backend | Retry that dictation once on a fresh GPU worker (12 s load deadline), then on the CPU rung |
 | Worker reports out-of-memory | resource | CPU rung for this dictation; retry GPU on the next dictation; never counts toward disabling GPU |
 | Model unreadable or corrupt | artifact | Offer re-download; not a GPU failure |
 | Malformed response, id mismatch | protocol | Kill, reap, respawn; counts as a worker bug in diagnostics |
-| Second backend failure in one session | backend | CPU rung for the rest of the session |
-| Backend failures in two sessions on the same driver | backend | GPU disabled for that driver; one pill notice. **Expires** after 7 days or on any app/worker update, then re-qualifies |
+| Second backend failure in a row (a GPU success resets the count) | backend | CPU rung for 5 minutes, then the GPU again |
+| A 5-minute cooldown in two sessions on the same driver | backend | GPU disabled for that driver; one pill notice. **Expires** after 7 days or on any app/worker update, then re-qualifies |
 | Worker found dead while idle (e.g. after sleep/resume) | – | Respawn lazily on the next dictation; not a failure |
 | Cancelled dictation, empty speech | – | Normal |
 

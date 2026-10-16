@@ -296,10 +296,10 @@ impl InferenceWorker {
         }
     }
 
-    /// Outer timeout for a speech-worker decode: the GPU attempt plus the CPU
-    /// rung. `fw_timeout` is the controller's faster-whisper budget, used when
-    /// an installed faster-whisper model is the CPU rung. None for other
-    /// backends.
+    /// Outer timeout for a speech-worker decode: the GPU attempt, its
+    /// fresh-worker retry, and the CPU rung. `fw_timeout` is the controller's
+    /// faster-whisper budget, used when an installed faster-whisper model is
+    /// the CPU rung. None for other backends.
     pub fn asr_worker_timeout(&self, audio_ms: u64, fw_timeout: Duration) -> Option<Duration> {
         let InferenceBackend::AsrWorker {
             fw_fallback_model, ..
@@ -312,7 +312,11 @@ impl InferenceWorker {
         } else {
             asr_worker::rung_budget(asr_worker::Rung::Cpu, audio_ms)
         };
-        Some(asr_worker::rung_budget(asr_worker::Rung::Gpu, audio_ms) + cpu_rung)
+        Some(
+            asr_worker::rung_budget(asr_worker::Rung::Gpu, audio_ms)
+                + asr_worker::gpu_retry_budget(audio_ms)
+                + cpu_rung,
+        )
     }
 
     pub fn with_script(
@@ -646,6 +650,8 @@ enum WhisperEngine<'a> {
     AsrWorker {
         rung: asr_worker::Rung,
         model_path: &'a Path,
+        /// None = the rung's default load deadline.
+        load_deadline: Option<std::time::Duration>,
     },
 }
 
@@ -675,10 +681,15 @@ impl WhisperEngine<'_> {
                 )
                 .await
             }
-            WhisperEngine::AsrWorker { rung, model_path } => {
+            WhisperEngine::AsrWorker {
+                rung,
+                model_path,
+                load_deadline,
+            } => {
                 asr_worker::transcribe(
                     *rung,
                     model_path,
+                    *load_deadline,
                     samples,
                     decode_mode,
                     &overrides,
@@ -724,12 +735,14 @@ async fn transcribe_with_asr_worker(
         None => WhisperEngine::AsrWorker {
             rung: asr_worker::Rung::Cpu,
             model_path: &model.path,
+            load_deadline: None,
         },
     };
     let primary_engine = match primary {
         asr_worker::Rung::Gpu => WhisperEngine::AsrWorker {
             rung: asr_worker::Rung::Gpu,
             model_path: &model.path,
+            load_deadline: None,
         },
         asr_worker::Rung::Cpu => cpu_rung,
     };
@@ -790,7 +803,50 @@ async fn transcribe_with_asr_worker(
     if primary == asr_worker::Rung::Cpu {
         return Err(err);
     }
-    let reason = asr_worker::trim_reason(&err.to_string());
+    let mut reason = asr_worker::trim_reason(&err.to_string());
+    // A device fault or hang kills the GPU worker; most are one-offs, and a
+    // fresh worker (2-8 s warm load) beats the CPU rung, which can take half
+    // a minute for Turbo. One retry, on a short load deadline; a second fault
+    // in a row starts the GPU cooldown.
+    let backend_fault = matches!(
+        err,
+        InferenceError::AsrWorker {
+            class: asr_worker::ErrorClass::Backend,
+            ..
+        }
+    );
+    if backend_fault {
+        eprintln!(
+            "voicewave: {} decode failed, retrying on a fresh worker: {reason}",
+            primary.engine()
+        );
+        let fresh_gpu = WhisperEngine::AsrWorker {
+            rung: asr_worker::Rung::Gpu,
+            model_path: &model.path,
+            load_deadline: Some(asr_worker::GPU_RETRY_LOAD_DEADLINE),
+        };
+        match transcribe_with_whisper_pipeline(
+            samples,
+            &model.id,
+            fresh_gpu,
+            decode_mode,
+            terminology_hint,
+            cancel_token,
+        )
+        .await
+        {
+            Ok(mut decode) => {
+                decode.telemetry.asr_step_down_reason =
+                    Some(format!("gpu-retry-recovered: {reason}"));
+                return Ok(decode);
+            }
+            Err(InferenceError::Cancelled) => return Err(InferenceError::Cancelled),
+            Err(retry_err) => reason = asr_worker::trim_reason(&retry_err.to_string()),
+        }
+        if cancel_token.is_cancelled() {
+            return Err(InferenceError::Cancelled);
+        }
+    }
     eprintln!(
         "voicewave: {} decode failed, retrying on {}: {reason}",
         primary.engine(),
