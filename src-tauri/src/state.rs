@@ -2951,11 +2951,19 @@ impl VoiceWaveController {
         }
         let app_for_emit = app.clone();
 
-        let cancel_token = CancellationToken::new();
-        self.model_download_cancels
-            .lock()
-            .await
-            .insert(model_id.clone(), cancel_token.clone());
+        // Same guard as the faster-whisper path: a second request for a model
+        // already downloading reports its progress instead of writing a second
+        // stream into the same partial file. Removed on every exit path below.
+        let cancel_token = {
+            let mut cancels = self.model_download_cancels.lock().await;
+            if cancels.contains_key(&model_id) {
+                drop(cancels);
+                return self.get_model_status(model_id).await;
+            }
+            let token = CancellationToken::new();
+            cancels.insert(model_id.clone(), token.clone());
+            token
+        };
 
         let pause_flag = {
             let mut pauses = self.model_download_pauses.lock().await;
@@ -2969,18 +2977,33 @@ impl VoiceWaveController {
 
         let mut latest_progress = None::<ModelStatus>;
         let model_id_for_events = model_id.clone();
-        let result = self.model_manager.lock().await.install_model_resumable(
-            &model_id,
-            || cancel_token.is_cancelled(),
-            || pause_flag.load(Ordering::Relaxed),
-            |status| {
-                latest_progress = Some(status.clone());
-                if let Ok(mut statuses) = self.model_statuses.try_lock() {
-                    statuses.insert(model_id_for_events.clone(), status.clone());
-                }
-                self.emit_model_status(&app_for_emit, &status);
-            },
-        );
+        // The model_manager lock is held only to plan the download and to
+        // record its result. The transfer itself (minutes for a 1.6 GB model)
+        // runs unlocked, so status queries, cancel and other model operations
+        // stay responsive; block_in_place keeps it off the async workers.
+        let begun = self.model_manager.lock().await.begin_download(&model_id);
+        let result = match begun {
+            Ok(mut plan) => {
+                let outcome = tokio::task::block_in_place(|| {
+                    plan.run(
+                        || cancel_token.is_cancelled(),
+                        || pause_flag.load(Ordering::Relaxed),
+                        |status| {
+                            latest_progress = Some(status.clone());
+                            if let Ok(mut statuses) = self.model_statuses.try_lock() {
+                                statuses.insert(model_id_for_events.clone(), status.clone());
+                            }
+                            self.emit_model_status(&app_for_emit, &status);
+                        },
+                    )
+                });
+                self.model_manager
+                    .lock()
+                    .await
+                    .finish_download(plan, outcome)
+            }
+            Err(err) => Err(err),
+        };
 
         self.model_download_cancels.lock().await.remove(&model_id);
 
