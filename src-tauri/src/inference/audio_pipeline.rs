@@ -26,14 +26,6 @@ pub struct ProcessedAudio {
     pub samples: Vec<f32>,
 }
 
-pub fn process_for_active(samples: &[f32]) -> ProcessedAudio {
-    let version = active_pipeline_version();
-    ProcessedAudio {
-        version,
-        samples: process_for_version(samples, version),
-    }
-}
-
 pub fn process_for_faster_whisper_primary(samples: &[f32]) -> ProcessedAudio {
     let version = select_primary_pipeline_for_faster_whisper();
     ProcessedAudio {
@@ -99,14 +91,6 @@ pub fn process_for_version(samples: &[f32], version: AudioPipelineVersion) -> Ve
         AudioPipelineVersion::V1 => condition_audio_v1(samples),
         AudioPipelineVersion::V2 => condition_audio_v2(samples),
     }
-}
-
-fn active_pipeline_version() -> AudioPipelineVersion {
-    // v1 should only be reachable through explicit emergency switches.
-    if force_v1_enabled() || emergency_v1_enabled() {
-        return AudioPipelineVersion::V1;
-    }
-    AudioPipelineVersion::V2
 }
 
 fn select_primary_pipeline_for_faster_whisper() -> AudioPipelineVersion {

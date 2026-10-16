@@ -1,14 +1,10 @@
 # Phase A CPU Latency Artifacts
 
-Place generated CPU latency evidence in `docs/phaseA/artifacts/` using this filename pattern:
-
-- `cpu-latency-YYYY-MM-DD.json`
-
-Use:
-
-- `npm run phaseA:cpu:generate` to run the live Phase A CPU sweep (real whisper runtime path).
-- `npm run phaseA:cpu` for non-blocking checks.
-- `npm run phaseA:cpu:gate` for blocking gate checks.
+Historical CPU latency evidence from the in-process whisper.cpp runtime
+(`cpu-latency-YYYY-MM-DD.json`). That runtime and its sweep generator were
+removed in plan 019 (whisper.cpp now runs in the speech worker; benchmark it
+with `scripts/bench/`). `scripts/phaseB/run-phaseB-live-fw-report.ps1` still
+reads the latest artifact as a baseline.
 
 Expected JSON shape:
 

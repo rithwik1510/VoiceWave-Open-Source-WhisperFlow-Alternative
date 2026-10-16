@@ -102,47 +102,6 @@ pub fn finalize_literal_transcript(
     normalize_output_whitespace(&text)
 }
 
-pub fn merge_incremental_transcript(
-    committed: &str,
-    incoming: &str,
-    overlap_token_limit: usize,
-) -> String {
-    let committed_norm = normalize_whitespace(committed);
-    let incoming_norm = normalize_whitespace(incoming);
-    if committed_norm.is_empty() {
-        return incoming_norm;
-    }
-    if incoming_norm.is_empty() {
-        return committed_norm;
-    }
-
-    let committed_tokens = committed_norm.split_whitespace().collect::<Vec<_>>();
-    let incoming_tokens = incoming_norm.split_whitespace().collect::<Vec<_>>();
-    let overlap_cap = overlap_token_limit
-        .max(1)
-        .min(committed_tokens.len())
-        .min(incoming_tokens.len());
-
-    for overlap_len in (1..=overlap_cap).rev() {
-        let committed_tail = &committed_tokens[committed_tokens.len() - overlap_len..];
-        let incoming_head = &incoming_tokens[..overlap_len];
-        if tokens_match_case_insensitive(committed_tail, incoming_head) {
-            let mut merged = committed_tokens
-                .iter()
-                .map(|token| (*token).to_string())
-                .collect::<Vec<_>>();
-            merged.extend(
-                incoming_tokens[overlap_len..]
-                    .iter()
-                    .map(|token| (*token).to_string()),
-            );
-            return merged.join(" ");
-        }
-    }
-
-    format!("{committed_norm} {incoming_norm}")
-}
-
 fn strip_bracket_artifacts(input: &str) -> String {
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(input.len());
@@ -932,20 +891,11 @@ fn replace_boundary_phrase_case_insensitive(
     out
 }
 
-fn tokens_match_case_insensitive(left: &[&str], right: &[&str]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right.iter())
-        .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_pro_transcript, finalize_user_transcript, merge_incremental_transcript,
-        sanitize_user_transcript, ProTranscriptOptions,
+        finalize_pro_transcript, finalize_user_transcript, sanitize_user_transcript,
+        ProTranscriptOptions,
     };
     use crate::settings::{
         AppProfileBehavior, CodeCasingStyle, CodeModeSettings, DomainPackId, FormatProfile,
@@ -973,24 +923,6 @@ mod tests {
             sanitize_user_transcript("  hello   [MUSIC]   world  "),
             "hello world"
         );
-    }
-
-    #[test]
-    fn merge_uses_overlap_to_replace_tail() {
-        let merged = merge_incremental_transcript("how is it going", "it going to work now", 8);
-        assert_eq!(merged, "how is it going to work now");
-    }
-
-    #[test]
-    fn merge_appends_when_no_overlap_exists() {
-        let merged = merge_incremental_transcript("hello world", "fresh segment", 8);
-        assert_eq!(merged, "hello world fresh segment");
-    }
-
-    #[test]
-    fn merge_is_case_insensitive_for_overlap_matching() {
-        let merged = merge_incremental_transcript("VoiceWave Works", "works great", 8);
-        assert_eq!(merged, "VoiceWave Works great");
     }
 
     #[test]

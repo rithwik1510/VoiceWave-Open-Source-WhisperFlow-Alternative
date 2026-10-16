@@ -46,11 +46,11 @@ function Resolve-MingwRuntimeDirectory {
   )
 
   # Return the first directory that actually CONTAINS the runtime DLL. The old
-  # logic returned the first existing directory on PATH — which, once NSIS and
-  # the VS cmake dir are prepended, is not the MinGW dir. That made the DLL copy
-  # fall through to the stale committed src-tauri/windows/libstdc++-6.dll, which
-  # is too old for the std::codecvt symbols whisper.cpp needs ("Entry Point Not
-  # Found" at app launch).
+  # logic returned the first existing directory on PATH — which, once other tool
+  # dirs are prepended, is not the MinGW dir. That made the DLL copy fall
+  # through to the stale committed src-tauri/windows/libstdc++-6.dll, which was
+  # too old for the std::codecvt symbols the in-process whisper.cpp (removed in
+  # plan 019) needed ("Entry Point Not Found" at app launch).
   foreach ($dir in $candidates) {
     if ([string]::IsNullOrWhiteSpace($dir)) {
       continue

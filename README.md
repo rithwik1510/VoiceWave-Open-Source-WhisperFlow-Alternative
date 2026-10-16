@@ -232,7 +232,7 @@ Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/prici
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Runtime               | `Tauri 2` shell + `Rust` core + `React/Tailwind` frontend                                                                                         |
 | ASR (default)         | `faster-whisper` via a bundled CPU Python runtime (`fw-small.en` / `fw-large-v3`), CUDA auto-detected when present — works offline out of the box |
-| ASR (opt-in)          | `whisper.cpp` via `whisper-rs` (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan feature flag                                                     |
+| ASR (opt-in)          | `whisper.cpp` speech worker processes (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan GPU with CPU step-down                                    |
 | Privacy Path          | No outbound audio transport, no cloud transcription path in v1                                                                                    |
 | UX Contract           | Explicit state model: `idle -> listening -> transcribing -> inserted/error`                                                                       |
 | Insertion Reliability | Direct insert -> clipboard fallback -> history fallback (blocked on Windows security dialogs)                                                     |
@@ -296,7 +296,7 @@ References:
 1. Desktop shell: `Tauri 2`
 1. Core runtime: `Rust`
 1. ASR (default): `faster-whisper` (CTranslate2) via Python subprocess; CUDA auto-detected
-1. ASR (opt-in): `whisper.cpp` via `whisper-rs`; Vulkan behind `whisper-vulkan` cargo feature
+1. ASR (opt-in): `whisper.cpp` in separate speech worker processes (`voicewave-asr-vk.exe` / `voicewave-asr-cpu.exe`); Vulkan GPU with CPU step-down
 1. Local storage/ops: encrypted billing files + local runtime state/history artifacts
 
 ## ![Quick Start](docs/assets/readme/section-quickstart.svg) Quick Start
@@ -372,10 +372,7 @@ npm run tauri:dev
 | `npm run security:firestore-rules -- -Enforce` | Firestore rules schema/policy contract gate                          |
 | `npm run quality:frontend:gate`                | Frontend quality gate (coverage + build)                             |
 | `npm run quality:backend:gate`                 | Backend quality gate (tests + inventory threshold)                   |
-| `npm run phaseA:cpu`                           | CPU latency sweep                                                    |
 | `npm run phaseB:gpu:check`                     | GPU readiness check                                                  |
-| `npm run phaseB:gpu`                           | GPU latency sweep                                                    |
-| `npm run phaseB:fw`                            | Faster-whisper latency sweep                                         |
 
 ## ![Contract](docs/assets/readme/section-contract.svg) Runtime Contract Surface (High-Level)
 
@@ -461,7 +458,6 @@ src-tauri/             # Rust core runtime + Tauri shell
 voicewave-website/     # Marketing website
 docs/                  # RFCs, phase plans, evidence, security, testing
 scripts/               # Validation, readiness, benchmark, tauri utilities
-vendor/                # Local whisper-rs / whisper.cpp vendored deps
 ```
 
 ## ![Docs](docs/assets/readme/section-docs.svg) Source of Truth Docs

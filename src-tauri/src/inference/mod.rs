@@ -1,7 +1,5 @@
 mod asr_worker;
 mod audio_pipeline;
-mod backend;
-mod executor;
 mod faster_whisper;
 pub mod gpu_runtime;
 pub mod llm_polish;
@@ -11,7 +9,6 @@ pub mod polish_gate;
 pub use asr_worker::{
     kill_asr_workers, prewarm_asr_worker, release_idle_asr_workers, ErrorClass as AsrErrorClass,
 };
-pub use executor::{cpu_runtime_pool_enabled, prewarm_runtime};
 pub use faster_whisper::{
     cache_hint_for_model as faster_whisper_cache_hint,
     ensure_faster_whisper_ready,
@@ -20,10 +17,6 @@ pub use faster_whisper::{
 pub use policy::RuntimeDecodePolicy;
 
 use crate::settings::DecodeMode;
-use backend::{
-    context_params_for_backend, note_gpu_runtime_failure, preferred_backend_for_model,
-    RuntimeBackend,
-};
 use directories::ProjectDirs;
 use faster_whisper::FasterWhisperRequestOverrides;
 use std::{
@@ -35,7 +28,6 @@ use std::{
 };
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
 
 #[derive(Debug, Clone, Default)]
 pub struct DecodeTelemetry {
@@ -149,155 +141,24 @@ pub struct SegmentTranscription {
     pub telemetry: DecodeTelemetry,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum DecodeStrategy {
-    Greedy { best_of: i32 },
-    BeamSearch { beam_size: i32, patience: f32 },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ModelDecodeProfile {
-    pub partial_delay_ms: u64,
-    pub strategy: DecodeStrategy,
-    pub no_speech_thold: f32,
-    pub thread_cap: usize,
-    pub no_context: bool,
-}
-
-pub fn decode_profile(model_id: &str) -> ModelDecodeProfile {
-    decode_profile_for_mode(model_id, DecodeMode::Balanced)
-}
-
-pub fn decode_profile_for_mode(model_id: &str, decode_mode: DecodeMode) -> ModelDecodeProfile {
-    let balanced = match model_id {
-        "fw-small.en" => ModelDecodeProfile {
-            partial_delay_ms: 70,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 2,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.5,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "fw-large-v3" => ModelDecodeProfile {
-            partial_delay_ms: 120,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 3,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.45,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "fw-large-v3-turbo" => ModelDecodeProfile {
-            partial_delay_ms: 90,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 3,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.45,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "wcpp-small.en" => ModelDecodeProfile {
-            partial_delay_ms: 70,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 2,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.5,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "wcpp-large-v3-turbo" => ModelDecodeProfile {
-            partial_delay_ms: 110,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 3,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.45,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "tiny.en" => ModelDecodeProfile {
-            partial_delay_ms: 60,
-            strategy: DecodeStrategy::Greedy { best_of: 2 },
-            no_speech_thold: 0.55,
-            thread_cap: 8,
-            no_context: false,
-        },
-        "base.en" => ModelDecodeProfile {
-            partial_delay_ms: 85,
-            strategy: DecodeStrategy::Greedy { best_of: 2 },
-            no_speech_thold: 0.5,
-            thread_cap: 8,
-            no_context: false,
-        },
-        "small.en" => ModelDecodeProfile {
-            partial_delay_ms: 95,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 2,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.45,
-            thread_cap: 12,
-            no_context: false,
-        },
-        "medium.en" => ModelDecodeProfile {
-            partial_delay_ms: 150,
-            strategy: DecodeStrategy::BeamSearch {
-                beam_size: 5,
-                patience: -1.0,
-            },
-            no_speech_thold: 0.4,
-            thread_cap: 8,
-            no_context: false,
-        },
-        _ => ModelDecodeProfile {
-            partial_delay_ms: 120,
-            strategy: DecodeStrategy::Greedy { best_of: 2 },
-            no_speech_thold: 0.5,
-            thread_cap: 8,
-            no_context: false,
-        },
+/// Delay between the words a scripted (fixture) worker emits as partials.
+fn scripted_partial_delay_ms(model_id: &str, decode_mode: DecodeMode) -> u64 {
+    let balanced: u64 = match model_id {
+        "fw-small.en" | "wcpp-small.en" => 70,
+        "fw-large-v3" => 120,
+        "fw-large-v3-turbo" => 90,
+        "wcpp-large-v3-turbo" => 110,
+        "tiny.en" => 60,
+        "base.en" => 85,
+        "small.en" => 95,
+        "medium.en" => 150,
+        _ => 120,
     };
-
     match decode_mode {
+        DecodeMode::Fast => balanced.saturating_sub(20).max(20),
         DecodeMode::Balanced => balanced,
-        DecodeMode::Fast => ModelDecodeProfile {
-            partial_delay_ms: balanced.partial_delay_ms.saturating_sub(20).max(20),
-            strategy: DecodeStrategy::Greedy { best_of: 1 },
-            no_speech_thold: (balanced.no_speech_thold + 0.05).clamp(0.1, 0.9),
-            thread_cap: 12,
-            no_context: true,
-        },
-        DecodeMode::Quality => {
-            let strategy = match balanced.strategy {
-                DecodeStrategy::Greedy { .. } => DecodeStrategy::Greedy { best_of: 3 },
-                DecodeStrategy::BeamSearch { beam_size, .. } => DecodeStrategy::BeamSearch {
-                    beam_size: (beam_size + 1).min(6),
-                    patience: -1.0,
-                },
-            };
-            ModelDecodeProfile {
-                partial_delay_ms: balanced.partial_delay_ms + 25,
-                strategy,
-                no_speech_thold: (balanced.no_speech_thold - 0.05).clamp(0.1, 0.9),
-                thread_cap: 8,
-                no_context: false,
-            }
-        }
+        DecodeMode::Quality => balanced + 25,
     }
-}
-
-pub fn decode_profile_from_str(model_id: &str, decode_mode: &str) -> ModelDecodeProfile {
-    let mode = match decode_mode.to_ascii_lowercase().as_str() {
-        "fast" => DecodeMode::Fast,
-        "quality" => DecodeMode::Quality,
-        _ => DecodeMode::Balanced,
-    };
-    decode_profile_for_mode(model_id, mode)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -329,10 +190,6 @@ pub enum InferenceError {
 
 #[derive(Debug, Clone)]
 enum InferenceBackend {
-    Whisper {
-        model_path: PathBuf,
-        decode_mode: DecodeMode,
-    },
     FasterWhisper {
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
@@ -359,36 +216,13 @@ pub struct InferenceWorker {
 }
 
 impl InferenceWorker {
-    pub fn new_runtime(active_model: impl Into<String>, model_path: impl Into<PathBuf>) -> Self {
-        Self::new_runtime_with_mode(active_model, model_path, DecodeMode::Balanced)
-    }
-
-    pub fn new_runtime_with_mode(
-        active_model: impl Into<String>,
-        model_path: impl Into<PathBuf>,
-        decode_mode: DecodeMode,
-    ) -> Self {
-        let active_model = active_model.into();
-        let profile = decode_profile_for_mode(&active_model, decode_mode);
-        Self {
-            active_model,
-            scripted_output: None,
-            partial_delay_ms: profile.partial_delay_ms,
-            decode_mode,
-            backend: InferenceBackend::Whisper {
-                model_path: model_path.into(),
-                decode_mode,
-            },
-        }
-    }
-
     pub fn new_fixture(active_model: impl Into<String>) -> Self {
         let active_model = active_model.into();
-        let profile = decode_profile_for_mode(&active_model, DecodeMode::Balanced);
+        let partial_delay_ms = scripted_partial_delay_ms(&active_model, DecodeMode::Balanced);
         Self {
             active_model,
             scripted_output: None,
-            partial_delay_ms: profile.partial_delay_ms,
+            partial_delay_ms,
             decode_mode: DecodeMode::Balanced,
             backend: InferenceBackend::Scripted,
         }
@@ -411,7 +245,7 @@ impl InferenceWorker {
         terminology_hint: Option<String>,
     ) -> Self {
         let active_model = active_model.into();
-        let profile = decode_profile_for_mode(&active_model, decode_mode);
+        let partial_delay_ms = scripted_partial_delay_ms(&active_model, decode_mode);
         let hint = terminology_hint
             .as_deref()
             .map(str::trim)
@@ -420,7 +254,7 @@ impl InferenceWorker {
         Self {
             active_model,
             scripted_output: None,
-            partial_delay_ms: profile.partial_delay_ms,
+            partial_delay_ms,
             decode_mode,
             backend: InferenceBackend::FasterWhisper {
                 decode_mode,
@@ -437,11 +271,11 @@ impl InferenceWorker {
         fw_fallback_model: Option<String>,
     ) -> Self {
         let active_model = active_model.into();
-        let profile = decode_profile_for_mode(&active_model, decode_mode);
+        let partial_delay_ms = scripted_partial_delay_ms(&active_model, decode_mode);
         Self {
             active_model,
             scripted_output: None,
-            partial_delay_ms: profile.partial_delay_ms,
+            partial_delay_ms,
             decode_mode,
             backend: InferenceBackend::AsrWorker {
                 model_path: model_path.into(),
@@ -477,11 +311,11 @@ impl InferenceWorker {
         scripted_output: impl Into<String>,
     ) -> Self {
         let active_model = active_model.into();
-        let profile = decode_profile_for_mode(&active_model, DecodeMode::Balanced);
+        let partial_delay_ms = scripted_partial_delay_ms(&active_model, DecodeMode::Balanced);
         Self {
             active_model,
             scripted_output: Some(scripted_output.into()),
-            partial_delay_ms: profile.partial_delay_ms,
+            partial_delay_ms,
             decode_mode: DecodeMode::Balanced,
             backend: InferenceBackend::Scripted,
         }
@@ -493,15 +327,6 @@ impl InferenceWorker {
 
     pub fn decode_mode(&self) -> DecodeMode {
         self.decode_mode
-    }
-
-    pub fn model_path(&self) -> Option<&Path> {
-        match &self.backend {
-            InferenceBackend::Whisper { model_path, .. }
-            | InferenceBackend::AsrWorker { model_path, .. } => Some(model_path.as_path()),
-            InferenceBackend::FasterWhisper { .. } => None,
-            InferenceBackend::Scripted => None,
-        }
     }
 
     pub fn with_partial_delay_ms(mut self, delay_ms: u64) -> Self {
@@ -532,23 +357,6 @@ impl InferenceWorker {
                 SegmentTranscription {
                     transcript: Some(text),
                     telemetry: DecodeTelemetry::default(),
-                }
-            }
-            InferenceBackend::Whisper {
-                model_path,
-                decode_mode,
-            } => {
-                let decode = transcribe_with_whisper(
-                    samples.to_vec(),
-                    self.active_model.clone(),
-                    model_path.clone(),
-                    *decode_mode,
-                    cancel_token.clone(),
-                )
-                .await?;
-                SegmentTranscription {
-                    transcript: Some(decode.text),
-                    telemetry: decode.telemetry,
                 }
             }
             InferenceBackend::FasterWhisper {
@@ -608,9 +416,7 @@ impl InferenceWorker {
 
         if matches!(
             self.backend,
-            InferenceBackend::Whisper { .. }
-                | InferenceBackend::FasterWhisper { .. }
-                | InferenceBackend::AsrWorker { .. }
+            InferenceBackend::FasterWhisper { .. } | InferenceBackend::AsrWorker { .. }
         ) {
             // Runtime decode is already complete here; avoid synthetic per-word delay.
             on_event(&text, true, started.elapsed().as_millis() as u64);
@@ -821,44 +627,6 @@ pub async fn warmup_faster_whisper_model(model_id: &str) -> Result<(), Inference
             reason: "unsupported faster-whisper model id".to_string(),
         })?;
     faster_whisper::warmup_model(runtime_model).await
-}
-
-async fn transcribe_with_whisper(
-    samples: Vec<f32>,
-    model_id: String,
-    model_path: PathBuf,
-    decode_mode: DecodeMode,
-    cancel_token: CancellationToken,
-) -> Result<WhisperDecodeOutput, InferenceError> {
-    if cancel_token.is_cancelled() {
-        return Err(InferenceError::Cancelled);
-    }
-
-    if cpu_runtime_pool_enabled() {
-        match executor::decode_with_runtime_pool(
-            samples.clone(),
-            model_id.clone(),
-            model_path.clone(),
-            decode_mode,
-            cancel_token.clone(),
-        )
-        .await
-        {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                eprintln!(
-                    "voicewave: runtime pool decode failed for model '{}', falling back to cold path: {}",
-                    model_id, err
-                );
-            }
-        }
-    }
-
-    tokio::task::spawn_blocking(move || {
-        cold_decode_whisper_blocking(&samples, &model_id, &model_path, decode_mode, &cancel_token)
-    })
-    .await
-    .map_err(|err| InferenceError::RuntimeJoin(err.to_string()))?
 }
 
 /// Engine behind one decode of the shared Whisper pipeline.
@@ -1607,281 +1375,6 @@ pub(crate) struct WhisperDecodeOutput {
     pub telemetry: DecodeTelemetry,
 }
 
-pub(crate) fn cold_decode_whisper_blocking(
-    samples: &[f32],
-    model_id: &str,
-    model_path: &Path,
-    decode_mode: DecodeMode,
-    cancel_token: &CancellationToken,
-) -> Result<WhisperDecodeOutput, InferenceError> {
-    validate_model_artifact(model_path)?;
-    let model_path_str = model_path.to_string_lossy().to_string();
-    let context_init = initialize_context_with_backend(model_id, &model_path_str)?;
-    decode_with_context(
-        &context_init.context,
-        samples,
-        model_id,
-        decode_mode,
-        cancel_token,
-        context_init.model_init_ms,
-        false,
-        context_init.backend_requested,
-        context_init.backend_used,
-        context_init.backend_fallback,
-    )
-}
-
-pub(crate) fn decode_with_context(
-    ctx: &WhisperContext,
-    samples: &[f32],
-    model_id: &str,
-    decode_mode: DecodeMode,
-    cancel_token: &CancellationToken,
-    model_init_ms: u64,
-    runtime_cache_hit: bool,
-    backend_requested: RuntimeBackend,
-    backend_used: RuntimeBackend,
-    backend_fallback: bool,
-) -> Result<WhisperDecodeOutput, InferenceError> {
-    let condition_started = Instant::now();
-    let processed_audio = audio_pipeline::process_for_active(samples);
-    let conditioned_samples = processed_audio.samples;
-    let audio_condition_ms = condition_started.elapsed().as_millis() as u64;
-    if conditioned_samples.is_empty() {
-        return Err(InferenceError::DecodeFailed {
-            model_id: model_id.to_string(),
-            reason: "no usable audio samples after conditioning".to_string(),
-        });
-    }
-
-    let profile = decode_profile_for_mode(model_id, decode_mode);
-    let sampling_strategy = match profile.strategy {
-        DecodeStrategy::Greedy { best_of } => SamplingStrategy::Greedy { best_of },
-        DecodeStrategy::BeamSearch {
-            beam_size,
-            patience,
-        } => SamplingStrategy::BeamSearch {
-            beam_size,
-            patience,
-        },
-    };
-    let mut params = FullParams::new(sampling_strategy);
-    params.set_language(Some("en"));
-    params.set_translate(false);
-    params.set_no_context(profile.no_context);
-    params.set_no_timestamps(true);
-    params.set_single_segment(false);
-    params.set_max_len(0);
-    params.set_max_tokens(0);
-    params.set_suppress_blank(true);
-    params.set_suppress_nst(true);
-    params.set_temperature(0.0);
-    params.set_temperature_inc(0.0);
-    params.set_no_speech_thold(profile.no_speech_thold);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_n_threads(
-        std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(2)
-            .clamp(1, profile.thread_cap) as i32,
-    );
-    let token_for_abort = cancel_token.clone();
-    let abort_callback: Box<dyn FnMut() -> bool> = Box::new(move || token_for_abort.is_cancelled());
-    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
-
-    let mut state = ctx
-        .create_state()
-        .map_err(|err| InferenceError::StateInitFailed(err.to_string()))?;
-    let decode_started = Instant::now();
-    state.full(params, &conditioned_samples).map_err(|err| {
-        if cancel_token.is_cancelled() {
-            InferenceError::Cancelled
-        } else {
-            InferenceError::DecodeFailed {
-                model_id: model_id.to_string(),
-                reason: err.to_string(),
-            }
-        }
-    })?;
-
-    if cancel_token.is_cancelled() {
-        return Err(InferenceError::Cancelled);
-    }
-
-    let mut transcript = String::new();
-    for segment in state.as_iter() {
-        let text = segment.to_string();
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !transcript.is_empty() {
-            transcript.push(' ');
-        }
-        transcript.push_str(trimmed);
-    }
-
-    if transcript.trim().is_empty() {
-        return Err(InferenceError::DecodeFailed {
-            model_id: model_id.to_string(),
-            reason: "whisper returned empty transcript".to_string(),
-        });
-    }
-
-    Ok(WhisperDecodeOutput {
-        text: transcript,
-        telemetry: DecodeTelemetry {
-            model_init_ms,
-            audio_condition_ms,
-            decode_compute_ms: decode_started.elapsed().as_millis() as u64,
-            audio_pipeline_version: processed_audio.version.as_str().to_string(),
-            runtime_cache_hit,
-            backend_requested: backend_requested.as_str().to_string(),
-            backend_used: backend_used.as_str().to_string(),
-            backend_fallback,
-            asr_engine: "whisper-rs".to_string(),
-            asr_step_down_reason: None,
-            fw_segment_count: None,
-            fw_avg_logprob: None,
-            fw_no_speech_prob: None,
-            fw_compression_ratio: None,
-            fw_low_coherence: false,
-            fw_retry_used: false,
-            fw_literal_retry_used: false,
-            fw_shadow_candidate_version: None,
-            fw_shadow_quality_delta: None,
-            fw_shadow_candidate_avg_logprob: None,
-            fw_shadow_candidate_no_speech_prob: None,
-            fw_shadow_candidate_retry_used: None,
-            fw_shadow_candidate_low_coherence: None,
-            fw_shadow_candidate_decode_compute_ms: None,
-            fw_shadow_candidate_won: None,
-            audio_pipeline_fallback_engaged: false,
-            audio_pipeline_fallback_remaining: 0,
-        },
-    })
-}
-
-pub(crate) struct ContextInitResult {
-    pub context: WhisperContext,
-    pub model_init_ms: u64,
-    pub backend_requested: RuntimeBackend,
-    pub backend_used: RuntimeBackend,
-    pub backend_fallback: bool,
-}
-
-pub(crate) fn initialize_context_with_backend(
-    model_id: &str,
-    model_path: &str,
-) -> Result<ContextInitResult, InferenceError> {
-    let requested_backend = preferred_backend_for_model(model_id);
-    let init_started = Instant::now();
-    let requested_params = context_params_for_backend(requested_backend);
-
-    match WhisperContext::new_with_params(model_path, requested_params) {
-        Ok(context) => {
-            let model_init_ms = init_started.elapsed().as_millis() as u64;
-            Ok(ContextInitResult {
-                context,
-                model_init_ms,
-                backend_requested: requested_backend,
-                backend_used: requested_backend,
-                backend_fallback: false,
-            })
-        }
-        Err(requested_err) => {
-            if requested_backend == RuntimeBackend::Cpu {
-                return Err(InferenceError::ModelLoadFailed {
-                    model_id: model_id.to_string(),
-                    path: model_path.to_string(),
-                    reason: requested_err.to_string(),
-                });
-            }
-            let gpu_locked = note_gpu_runtime_failure();
-            let lock_note = if gpu_locked {
-                " gpu backend locked to CPU for this app session after repeated failures."
-            } else {
-                ""
-            };
-
-            let fallback_backend = RuntimeBackend::Cpu;
-            let fallback_params = context_params_for_backend(fallback_backend);
-            WhisperContext::new_with_params(model_path, fallback_params)
-                .map(|context| ContextInitResult {
-                    context,
-                    model_init_ms: init_started.elapsed().as_millis() as u64,
-                    backend_requested: requested_backend,
-                    backend_used: fallback_backend,
-                    backend_fallback: true,
-                })
-                .map_err(|fallback_err| InferenceError::ModelLoadFailed {
-                    model_id: model_id.to_string(),
-                    path: model_path.to_string(),
-                    reason: format!(
-                        "preferred backend '{}' failed: {}; cpu fallback failed: {}.{}",
-                        requested_backend.as_str(),
-                        requested_err,
-                        fallback_err,
-                        lock_note
-                    ),
-                })
-        }
-    }
-}
-
-pub(crate) fn validate_model_artifact(model_path: &Path) -> Result<(), InferenceError> {
-    if !model_path.exists() {
-        return Err(InferenceError::ModelFileMissing {
-            path: model_path.to_string_lossy().to_string(),
-        });
-    }
-
-    let is_supported = model_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf") || ext.eq_ignore_ascii_case("bin"));
-    if !is_supported {
-        return Err(InferenceError::ModelFormatUnsupported {
-            path: model_path.to_string_lossy().to_string(),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn model_artifact_fingerprint(model_path: &Path) -> Result<String, InferenceError> {
-    let metadata =
-        std::fs::metadata(model_path).map_err(|err| InferenceError::ModelLoadFailed {
-            model_id: "unknown".to_string(),
-            path: model_path.to_string_lossy().to_string(),
-            reason: format!("failed to read metadata: {err}"),
-        })?;
-    let modified_secs = metadata
-        .modified()
-        .ok()
-        .and_then(|row| row.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|row| row.as_secs())
-        .unwrap_or_default();
-    Ok(format!("{}:{modified_secs}", metadata.len()))
-}
-
-pub(crate) fn decode_profile_version(model_id: &str, decode_mode: DecodeMode) -> String {
-    let profile = decode_profile_for_mode(model_id, decode_mode);
-    let strategy = match profile.strategy {
-        DecodeStrategy::Greedy { best_of } => format!("g:{best_of}"),
-        DecodeStrategy::BeamSearch {
-            beam_size,
-            patience,
-        } => format!("b:{beam_size}:{patience:.2}"),
-    };
-    format!(
-        "{strategy}:{}:{}:{}:{}",
-        profile.partial_delay_ms, profile.no_speech_thold, profile.thread_cap, profile.no_context
-    )
-}
-
 #[cfg(test)]
 fn condition_audio_for_decode(samples: &[f32]) -> Vec<f32> {
     const FRAME_SIZE: usize = 320;
@@ -2054,9 +1547,9 @@ mod tests {
     }
 
     #[test]
-    fn warmup_plan_routes_whisper_cpp_models_to_prewarm_runtime() {
-        // wcpp-* models use the existing Rust prewarm_runtime path so the
-        // WhisperContext is initialized before the first transcription.
+    fn warmup_plan_routes_whisper_cpp_models_to_the_speech_worker() {
+        // wcpp-* models prewarm the speech worker (spawn + load) so the
+        // first dictation decodes warm.
         assert_eq!(
             warmup_plan_for_model("wcpp-small.en"),
             WarmupPlan::WhisperCpp
@@ -2075,24 +1568,6 @@ mod tests {
         assert_eq!(
             warmup_plan_for_model("some-future-backend"),
             WarmupPlan::Unsupported
-        );
-    }
-
-    #[test]
-    fn wcpp_models_use_beam_search_not_greedy_default() {
-        // Greedy is the default fallback profile and produces noticeably worse
-        // accuracy on Whisper. wcpp models must opt into BeamSearch like fw.
-        let small = decode_profile_for_mode("wcpp-small.en", DecodeMode::Balanced);
-        assert!(
-            matches!(small.strategy, DecodeStrategy::BeamSearch { .. }),
-            "wcpp-small.en should use BeamSearch, got {:?}",
-            small.strategy
-        );
-        let large = decode_profile_for_mode("wcpp-large-v3-turbo", DecodeMode::Balanced);
-        assert!(
-            matches!(large.strategy, DecodeStrategy::BeamSearch { .. }),
-            "wcpp-large-v3-turbo should use BeamSearch, got {:?}",
-            large.strategy
         );
     }
 
@@ -2115,23 +1590,6 @@ mod tests {
             backend_used: "cpu".to_string(),
             backend_fallback: false,
         }
-    }
-
-    fn profile_sweep(
-        model_ids: &[&str],
-        modes: &[DecodeMode],
-    ) -> Vec<(String, DecodeMode, ModelDecodeProfile)> {
-        let mut rows = Vec::new();
-        for model_id in model_ids {
-            for mode in modes {
-                rows.push((
-                    (*model_id).to_string(),
-                    *mode,
-                    decode_profile_for_mode(model_id, *mode),
-                ));
-            }
-        }
-        rows
     }
 
     #[tokio::test]
@@ -2167,10 +1625,10 @@ mod tests {
     }
 
     #[test]
-    fn decode_profiles_scale_by_model() {
+    fn scripted_partial_delay_scales_by_model() {
         assert!(
-            decode_profile("tiny.en").partial_delay_ms
-                < decode_profile("medium.en").partial_delay_ms
+            scripted_partial_delay_ms("tiny.en", DecodeMode::Balanced)
+                < scripted_partial_delay_ms("medium.en", DecodeMode::Balanced)
         );
     }
 
@@ -2178,17 +1636,6 @@ mod tests {
     fn rtf_calculation_is_nonzero_for_valid_audio() {
         let rtf = estimate_rtf(500, 16_000);
         assert!(rtf > 0.0);
-    }
-
-    #[test]
-    fn runtime_constructor_tracks_model_path() {
-        let worker = InferenceWorker::new_runtime("small.en", "C:\\models\\small.en.gguf");
-        assert_eq!(
-            worker
-                .model_path()
-                .map(|path| path.to_string_lossy().to_string()),
-            Some("C:\\models\\small.en.gguf".to_string())
-        );
     }
 
     #[test]
@@ -2208,49 +1655,6 @@ mod tests {
         let mut samples = vec![0.15_f32; 16_000];
         high_pass_filter_in_place(&mut samples, 90.0, 16_000.0);
         assert!(rms(&samples) < 0.02);
-    }
-
-    #[test]
-    fn decode_profile_prefers_beam_for_larger_models() {
-        assert!(matches!(
-            decode_profile("small.en").strategy,
-            DecodeStrategy::BeamSearch { .. }
-        ));
-        assert!(matches!(
-            decode_profile("tiny.en").strategy,
-            DecodeStrategy::Greedy { .. }
-        ));
-    }
-
-    #[test]
-    fn fast_mode_uses_greedy_strategy() {
-        let profile = decode_profile_for_mode("small.en", DecodeMode::Fast);
-        assert!(matches!(
-            profile.strategy,
-            DecodeStrategy::Greedy { best_of: 1 }
-        ));
-        assert!(profile.no_context);
-    }
-
-    #[test]
-    fn profile_sweep_covers_tiny_and_small_for_balanced_and_fast_modes() {
-        let rows = profile_sweep(
-            &["tiny.en", "small.en"],
-            &[DecodeMode::Balanced, DecodeMode::Fast],
-        );
-        assert_eq!(rows.len(), 4);
-
-        let small_balanced = rows
-            .iter()
-            .find(|(model_id, mode, _)| model_id == "small.en" && *mode == DecodeMode::Balanced)
-            .expect("small.en balanced profile should exist");
-        let small_fast = rows
-            .iter()
-            .find(|(model_id, mode, _)| model_id == "small.en" && *mode == DecodeMode::Fast)
-            .expect("small.en fast profile should exist");
-
-        assert!(small_fast.2.partial_delay_ms <= small_balanced.2.partial_delay_ms);
-        assert!(small_balanced.2.thread_cap >= 10);
     }
 
     #[test]

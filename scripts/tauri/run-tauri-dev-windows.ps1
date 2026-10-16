@@ -137,30 +137,6 @@ function Ensure-DevRuntimeDlls([string]$repoRoot, [string]$cargoTargetDir, [stri
   }
 }
 
-function Ensure-VisualStudioClInPath {
-  if (Test-CommandAvailable "cl.exe") {
-    return $true
-  }
-
-  $msvcRoot = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
-  if (-not (Test-Path $msvcRoot)) {
-    return $false
-  }
-
-  $hostBin = Get-ChildItem -Path $msvcRoot -Directory -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending |
-    ForEach-Object { Join-Path $_.FullName "bin\Hostx64\x64" } |
-    Where-Object { Test-Path (Join-Path $_ "cl.exe") } |
-    Select-Object -First 1
-
-  if ($hostBin) {
-    $env:PATH = "$hostBin;$env:PATH"
-    return $true
-  }
-
-  return $false
-}
-
 function Configure-FasterWhisperRuntime([string]$repoRoot) {
   $venvPython = Join-Path $repoRoot ".venv-faster-whisper\\Scripts\\python.exe"
   if (Test-Path $venvPython) {
@@ -246,75 +222,6 @@ function Ensure-NoSpaceTargetDir {
   $env:CARGO_TARGET_DIR = Join-Path $safeRoot "target-gnu"
 }
 
-function Test-TruthyValue([string]$value) {
-  if ([string]::IsNullOrWhiteSpace($value)) {
-    return $false
-  }
-  switch ($value.Trim().ToLowerInvariant()) {
-    "1" { return $true }
-    "true" { return $true }
-    "yes" { return $true }
-    "on" { return $true }
-    default { return $false }
-  }
-}
-
-function Test-CommandAvailable([string]$commandName) {
-  $command = Get-Command $commandName -ErrorAction SilentlyContinue
-  return $null -ne $command
-}
-
-function Resolve-WhisperFeatureArgs {
-  if (Test-TruthyValue $env:VOICEWAVE_DISABLE_CUDA_FEATURE) {
-    return @()
-  }
-
-  if ($env:RUSTUP_TOOLCHAIN -eq "stable-x86_64-pc-windows-gnu") {
-    if (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH) -or (Test-TruthyValue $env:VOICEWAVE_FORCE_CUDA_FEATURE)) {
-      if (Test-TruthyValue $env:VOICEWAVE_FORCE_CUDA_FEATURE) {
-        throw "VOICEWAVE_FORCE_CUDA_FEATURE is not supported by scripts/tauri/run-tauri-dev-windows.ps1 because this flow uses the GNU toolchain. Use an MSVC-based run/build flow for CUDA."
-      }
-      Write-Warning "CUDA toolkit detected, but this dev script uses the GNU toolchain, so the Rust whisper-cuda path stays off here. VoiceWave can still use GPU through the default faster-whisper backend when fw-small.en/fw-large-v3 is active."
-    }
-    return @()
-  }
-
-  $cudaToolkitDetected = $false
-  $forceCuda = Test-TruthyValue $env:VOICEWAVE_FORCE_CUDA_FEATURE
-  if ($forceCuda) {
-    $cudaToolkitDetected = $true
-  }
-  elseif (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
-    $cudaLibPath = Join-Path $env:CUDA_PATH "lib\\x64"
-    if (Test-Path $cudaLibPath) {
-      $cudaToolkitDetected = $true
-    }
-  }
-
-  if (-not $cudaToolkitDetected) {
-    return @()
-  }
-
-  $clReady = Ensure-VisualStudioClInPath
-  if (-not $clReady) {
-    if ($forceCuda) {
-      throw "VOICEWAVE_FORCE_CUDA_FEATURE is set, but cl.exe was not found in PATH. Install Visual Studio Build Tools or unset VOICEWAVE_FORCE_CUDA_FEATURE."
-    }
-    Write-Warning "CUDA toolkit detected but cl.exe was not found. Falling back to CPU build for this run."
-    return @()
-  }
-
-  if (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
-    $cudaBinPath = Join-Path $env:CUDA_PATH "bin"
-    if (Test-Path $cudaBinPath) {
-      $env:PATH = "$cudaBinPath;$env:PATH"
-    }
-  }
-
-  Write-Host "CUDA toolkit detected. Enabling whisper-cuda feature for this Tauri run."
-  return @("--features", "whisper-cuda")
-}
-
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Ensure-GnuRustToolchain
 $mingwRuntimeDir = Add-MingwToPathIfAvailable
@@ -332,7 +239,6 @@ if (-not (Test-Path $tauriCli)) {
 }
 
 $commandArgs = @("dev")
-$commandArgs += Resolve-WhisperFeatureArgs
 if ($TauriArgs) {
   $commandArgs += $TauriArgs
 }

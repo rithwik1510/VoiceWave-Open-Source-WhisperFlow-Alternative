@@ -63,15 +63,6 @@ function Prepend-PathEntryIfExists([string]$pathEntry) {
   $env:PATH = "$pathEntry;$env:PATH"
 }
 
-function Add-VsCmakeToPath {
-  $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-  if (-not (Test-Path $vswhere)) { return }
-  $installPath = & $vswhere -latest -products * -property installationPath 2>$null
-  if ([string]::IsNullOrWhiteSpace($installPath)) { return }
-  $cmakeBin = Join-Path $installPath.Trim() "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
-  Prepend-PathEntryIfExists $cmakeBin
-}
-
 function Add-BundlerToolsToPath {
   $candidatePaths = @(
     "C:\\Program Files (x86)\\NSIS",
@@ -176,46 +167,6 @@ function Resolve-BundleTargetArgs([string[]]$existingArgs) {
   throw "No supported Windows bundler tools were found. Install NSIS (makensis.exe) and/or WiX Toolset (candle.exe + light.exe), then rerun npm run tauri:build."
 }
 
-function Resolve-WhisperFeatureArgs {
-  if (Test-TruthyValue $env:VOICEWAVE_DISABLE_CUDA_FEATURE) {
-    return @()
-  }
-
-  $cudaToolkitDetected = $false
-  $forceCuda = Test-TruthyValue $env:VOICEWAVE_FORCE_CUDA_FEATURE
-  if ($forceCuda) {
-    $cudaToolkitDetected = $true
-  }
-  elseif (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
-    $cudaLibPath = Join-Path $env:CUDA_PATH "lib\\x64"
-    if (Test-Path $cudaLibPath) {
-      $cudaToolkitDetected = $true
-    }
-  }
-
-  if (-not $cudaToolkitDetected) {
-    return @()
-  }
-
-  if (-not (Test-CommandAvailable "cl.exe")) {
-    if ($forceCuda) {
-      throw "VOICEWAVE_FORCE_CUDA_FEATURE is set, but cl.exe was not found in PATH. Install Visual Studio Build Tools or unset VOICEWAVE_FORCE_CUDA_FEATURE."
-    }
-    Write-Warning "CUDA toolkit detected but cl.exe was not found. Falling back to CPU build for this build."
-    return @()
-  }
-
-  if (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
-    $cudaBinPath = Join-Path $env:CUDA_PATH "bin"
-    if (Test-Path $cudaBinPath) {
-      $env:PATH = "$cudaBinPath;$env:PATH"
-    }
-  }
-
-  Write-Host "CUDA toolkit detected. Enabling whisper-cuda feature for this Tauri build."
-  return @("--features", "whisper-cuda")
-}
-
 function Set-UpdaterSigningEnv([string]$repoRoot) {
   # CI (or the caller) can provide the key directly; never override that.
   if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
@@ -240,7 +191,6 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-UpdaterSigningEnv $repoRoot
 Ensure-GnuRustToolchain
 Add-MingwToPathIfAvailable
-Add-VsCmakeToPath
 Add-BundlerToolsToPath
 Ensure-NoSpaceTargetDir
 Ensure-EmbeddedRuntime $repoRoot
@@ -253,7 +203,6 @@ if (-not (Test-Path $tauriCli)) {
 }
 
 $commandArgs = @("build")
-$commandArgs += Resolve-WhisperFeatureArgs
 $commandArgs += Resolve-BundleTargetArgs $TauriArgs
 if ($TauriArgs) {
   $commandArgs += $TauriArgs

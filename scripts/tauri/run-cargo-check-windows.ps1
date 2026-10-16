@@ -115,20 +115,12 @@ function Resolve-LatestWindowsSdkVersion {
   return $null
 }
 
-function Add-VsCmakeToPath([string]$installPath) {
-  if ([string]::IsNullOrWhiteSpace($installPath)) { return }
-  $cmakeBin = Join-Path $installPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
-  Prepend-PathEntryIfExists $cmakeBin
-}
-
 function Configure-MsvcEnvironment([string]$installPath) {
   $msvcVersionPath = Resolve-MsvcVersionPath $installPath
   $sdkVersion = Resolve-LatestWindowsSdkVersion
   if (-not $msvcVersionPath -or -not $sdkVersion) {
     return $false
   }
-
-  Add-VsCmakeToPath $installPath
 
   $binPath = Join-Path $msvcVersionPath "bin\Hostx64\x64"
   $libPath = Join-Path $msvcVersionPath "lib\x64"

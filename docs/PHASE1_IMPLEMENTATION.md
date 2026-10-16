@@ -23,8 +23,9 @@ Phase I desktop dictation uses real whisper.cpp runtime decoding. Fixture mode i
 2. Runtime dictation flow + state/events:
    - `src-tauri/src/state.rs`
    - `src-tauri/src/lib.rs`
-3. Whisper runtime decode (whisper-rs / whisper.cpp):
+3. Whisper runtime decode (faster-whisper / whisper.cpp speech workers):
    - `src-tauri/src/inference/mod.rs`
+   - `src-tauri/src/inference/asr_worker.rs`
 4. Settings persistence + safe VAD bounds:
    - `src-tauri/src/settings/mod.rs`
    - `src-tauri/src/state.rs`

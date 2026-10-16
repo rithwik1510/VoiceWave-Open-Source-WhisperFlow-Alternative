@@ -163,8 +163,6 @@ jobs:
           # The wrapper prepends this dir to PATH so the bundle step finds the
           # MinGW runtime DLLs (libstdc++, libgcc, libwinpthread) reliably.
           VOICEWAVE_MINGW_BIN: C:\msys64\mingw64\bin
-          # bindgen (whisper-rs-sys) needs libclang; LLVM is preinstalled on the runner.
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --bundles nsis

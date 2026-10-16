@@ -58,8 +58,8 @@ use crate::{
     },
     stats::{StatsManager, StatsSummary},
     transcript::{
-        finalize_literal_transcript, finalize_pro_transcript, merge_incremental_transcript,
-        sanitize_user_transcript, ProTranscriptOptions,
+        finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
+        ProTranscriptOptions,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -570,11 +570,6 @@ const RELEASE_WATCHDOG_FAST_MS: u64 = 220;
 const RELEASE_WATCHDOG_FAST_MIN_AUDIO_MS: u64 = 900;
 const SHORT_UTTERANCE_MAX_MS: u64 = 8_000;
 const MEDIUM_UTTERANCE_MAX_MS: u64 = 16_000;
-const INCREMENTAL_DECODE_CADENCE_MS: u64 = 220;
-const INCREMENTAL_MIN_VOICED_MS: u64 = 400;
-const INCREMENTAL_WINDOW_MS: u64 = 1_400;
-const INCREMENTAL_WINDOW_OVERLAP_MS: u64 = 280;
-const FINALIZE_LOOKBACK_MS: u64 = 1_200;
 /// How long capture may sit finished waiting on the speech engine before the
 /// pill explains why. The start-of-dictation GPU warmup normally lands well
 /// inside this, so the notice only fires for a genuinely cold engine.
@@ -583,7 +578,6 @@ const FW_MIN_DECODE_AUDIO_MS_DEFAULT: u64 = 280;
 const FINAL_DECODE_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 const FINAL_DECODE_TIMEOUT_MS_MIN: u64 = 8_000;
 const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 240_000;
-const TRANSCRIPT_OVERLAP_TOKENS: usize = 8;
 const BENCHMARK_RELIABILITY_WINDOW: usize = 40;
 const CORRECTION_SESSION_WINDOW_MS: u64 = 15_000;
 const CORRECTION_MIN_SHARED_RATIO: f32 = 0.72;
@@ -1144,34 +1138,6 @@ fn play_cue_without_blocking(cue: crate::cue::CueSound) {
     tauri::async_runtime::spawn_blocking(move || crate::cue::play(cue));
 }
 
-#[derive(Debug, Clone)]
-struct IncrementalAudioChunk {
-    samples: Vec<f32>,
-    voiced: bool,
-}
-
-#[derive(Debug, Clone)]
-struct DecodeWindow {
-    end_sample: usize,
-    samples: Vec<f32>,
-}
-
-#[derive(Debug)]
-struct DecodeJobResult {
-    window: DecodeWindow,
-    transcript: Option<String>,
-    elapsed_ms: u64,
-}
-
-#[derive(Debug, Default, Clone)]
-struct IncrementalPreviewResult {
-    committed_draft: String,
-    last_committed_sample: usize,
-    hold_to_first_draft_ms: u64,
-    incremental_decode_ms: u64,
-    incremental_windows_decoded: u32,
-}
-
 pub fn release_watchdog_threshold_ms() -> u64 {
     RELEASE_WATCHDOG_MS
 }
@@ -1209,15 +1175,6 @@ fn effective_release_watchdog_threshold_ms(
 
 pub fn release_watchdog_recovered(release_to_transcribing_ms: u64, threshold_ms: u64) -> bool {
     release_to_transcribing_ms > threshold_ms
-}
-
-fn incremental_pre_release_decode_enabled() -> bool {
-    std::env::var("VOICEWAVE_INCREMENTAL_PRE_RELEASE_DECODE_ENABLED")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            normalized == "1" || normalized == "true" || normalized == "on"
-        })
-        .unwrap_or(false)
 }
 
 fn clamp_max_utterance_ms(value: u64) -> u64 {
@@ -3784,9 +3741,6 @@ impl VoiceWaveController {
         {
             return Err(ControllerError::MissingModel(settings.active_model.clone()));
         }
-        let incremental_enabled = mode == DictationMode::Microphone
-            && incremental_pre_release_decode_enabled()
-            && !whisper_pipeline;
         let fw_ready_task = if mode == DictationMode::Microphone && use_faster_whisper {
             let warmup_model_id = settings.active_model.clone();
             Some(tokio::spawn(async move {
@@ -3897,37 +3851,6 @@ impl VoiceWaveController {
             });
         }
 
-        let draft_worker = if incremental_enabled {
-            Some(
-                self.build_inference_worker(&settings.active_model, mode, DecodeMode::Fast, false)
-                    .await?,
-            )
-        } else {
-            None
-        };
-
-        let mut incremental_tx: Option<UnboundedSender<IncrementalAudioChunk>> = None;
-        let mut incremental_task: Option<JoinHandle<IncrementalPreviewResult>> = None;
-        let preview_shared = Arc::new(StdMutex::new(IncrementalPreviewResult::default()));
-        if incremental_enabled {
-            let (tx, rx) = unbounded_channel::<IncrementalAudioChunk>();
-            incremental_tx = Some(tx);
-            let preview_shared_for_task = Arc::clone(&preview_shared);
-            let preview_worker = draft_worker
-                .as_ref()
-                .expect("incremental decode should have worker")
-                .clone();
-            incremental_task = Some(tokio::spawn(run_incremental_preview_decode(
-                rx,
-                preview_worker,
-                cancel_token.clone(),
-                app.clone(),
-                flow_started,
-                self.audio.target_sample_rate,
-                preview_shared_for_task,
-            )));
-        }
-
         let capture_started = Instant::now();
         let segments = match mode {
             DictationMode::Fixture => phase1::build_fixture_segments(settings.vad_threshold),
@@ -3966,7 +3889,6 @@ impl VoiceWaveController {
                     vad_warmup_threshold: Some(clamp_vad_threshold(threshold * 0.6)),
                     vad_warmup_duration: Duration::from_millis(2_000),
                 };
-                let tx_for_capture = incremental_tx.clone();
                 let app_for_capture = app.clone();
                 let mut last_level_emit = Instant::now();
                 let (ready_tx, ready_rx) = oneshot::channel::<()>();
@@ -3985,13 +3907,7 @@ impl VoiceWaveController {
                                 let _ = tx.send(());
                             }
                         },
-                        move |normalized_chunk, voiced_chunk| {
-                            if let Some(sender) = tx_for_capture.as_ref() {
-                                let _ = sender.send(IncrementalAudioChunk {
-                                    samples: normalized_chunk.to_vec(),
-                                    voiced: voiced_chunk,
-                                });
-                            }
+                        move |normalized_chunk, _voiced_chunk| {
                             // 33 ms cadence (~30 fps) so the pill waveform tracks
                             // syllable-level dynamics; 70 ms read as sluggish.
                             if last_level_emit.elapsed() >= Duration::from_millis(33) {
@@ -4029,9 +3945,6 @@ impl VoiceWaveController {
                     Ok(rows) => rows,
                     Err(AudioError::Cancelled) => {
                         eprintln!("voicewave: capture cancelled (session={session_id})");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -4049,9 +3962,6 @@ impl VoiceWaveController {
                     }
                     Err(AudioError::NoSpeechDetected) => {
                         eprintln!("voicewave: capture ended with no speech (session={session_id})");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -4091,21 +4001,14 @@ impl VoiceWaveController {
                     }
                     Err(err) => {
                         eprintln!("voicewave: capture failed (session={session_id}): {err}");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         return Err(ControllerError::Audio(err));
                     }
                 }
             }
         };
-        drop(incremental_tx);
         let capture_ms = capture_started.elapsed().as_millis() as u64;
 
         if cancel_token.is_cancelled() {
-            if let Some(task) = incremental_task.take() {
-                task.abort();
-            }
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
@@ -4117,9 +4020,6 @@ impl VoiceWaveController {
             return Ok(());
         }
         if segments.is_empty() {
-            if let Some(task) = incremental_task.take() {
-                task.abort();
-            }
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
@@ -4140,22 +4040,6 @@ impl VoiceWaveController {
             );
             return Ok(());
         }
-
-        if let Some(task) = incremental_task.take() {
-            let mut task = task;
-            if task.is_finished() {
-                let _ = task.await;
-            } else {
-                let _ = timeout(Duration::from_millis(80), &mut task).await;
-                if !task.is_finished() {
-                    task.abort();
-                }
-            }
-        }
-        let preview = preview_shared
-            .lock()
-            .map(|state| state.clone())
-            .unwrap_or_default();
 
         let audio_quality = analyze_captured_segments(
             &segments,
@@ -4217,14 +4101,6 @@ impl VoiceWaveController {
                 format!("runtime-policy:{}", decode_mode_key(policy_selected_mode))
             }
         }];
-        if mode == DictationMode::Microphone && !whisper_pipeline {
-            // Keep legacy whisper.cpp path conservative: never go below Balanced.
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, DecodeMode::Balanced);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons.push("legacy-whisper-floor:balanced".to_string());
-            }
-        }
         if whisper_pipeline && mode == DictationMode::Microphone {
             let mut decode_floor = match audio_quality.quality {
                 AudioQualityBand::Good => DecodeMode::Fast,
@@ -4376,25 +4252,6 @@ impl VoiceWaveController {
 
         let decode_started = Instant::now();
         let source_samples = merged_samples;
-        let lookback_samples =
-            ms_to_sample_count(FINALIZE_LOOKBACK_MS, self.audio.target_sample_rate);
-        let has_committed_draft = !whisper_pipeline && !preview.committed_draft.trim().is_empty();
-        let mut tail_start = 0usize;
-        if has_committed_draft && preview.last_committed_sample > 0 {
-            tail_start = preview
-                .last_committed_sample
-                .saturating_sub(lookback_samples)
-                .min(source_samples.len());
-        }
-        let mut finalize_samples = if tail_start < source_samples.len() {
-            source_samples[tail_start..].to_vec()
-        } else {
-            Vec::new()
-        };
-        if !whisper_pipeline && finalize_samples.is_empty() {
-            finalize_samples = source_samples.clone();
-            tail_start = 0;
-        }
         if mode == DictationMode::Microphone && whisper_pipeline {
             let finalize_audio_ms =
                 sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
@@ -4413,16 +4270,11 @@ impl VoiceWaveController {
                 return Ok(());
             }
         }
-        let finalize_tail_audio_ms = sample_count_to_ms(
-            source_samples.len().saturating_sub(tail_start),
-            self.audio.target_sample_rate,
-        );
+        // The whole capture is decoded at release.
+        let finalize_tail_audio_ms =
+            sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
         let finalize_started = Instant::now();
-        let finalize_samples_ref: &[f32] = if whisper_pipeline {
-            &source_samples
-        } else {
-            &finalize_samples
-        };
+        let finalize_samples_ref: &[f32] = &source_samples;
         let default_finalize_timeout =
             final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
         // The speech worker may fail on the GPU and retry the same audio on
@@ -4553,20 +4405,7 @@ impl VoiceWaveController {
         }
         let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
         let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
-        let merged_transcript = if has_committed_draft {
-            let merged = merge_incremental_transcript(
-                &preview.committed_draft,
-                &finalize_text,
-                TRANSCRIPT_OVERLAP_TOKENS,
-            );
-            if merged.trim().is_empty() {
-                preview.committed_draft.clone()
-            } else {
-                merged
-            }
-        } else {
-            finalize_text.clone()
-        };
+        let merged_transcript = finalize_text.clone();
         let baseline_transcript = sanitize_user_transcript(&merged_transcript);
         // Plan 010: the persisted polish profile is the single delivery
         // authority for this dictation. Resolve it once against the settings
@@ -5189,10 +5028,10 @@ impl VoiceWaveController {
                 backend_fallback: decode_telemetry.backend_fallback,
                 asr_engine: decode_telemetry.asr_engine.clone(),
                 asr_step_down_reason: decode_telemetry.asr_step_down_reason.clone(),
-                hold_to_first_draft_ms: preview.hold_to_first_draft_ms,
-                incremental_decode_ms: preview.incremental_decode_ms,
+                hold_to_first_draft_ms: 0,
+                incremental_decode_ms: 0,
                 release_finalize_ms,
-                incremental_windows_decoded: preview.incremental_windows_decoded,
+                incremental_windows_decoded: 0,
                 finalize_tail_audio_ms,
                 asr_integrity_percent,
                 asr_raw_word_count,
@@ -5278,10 +5117,10 @@ impl VoiceWaveController {
                     asr_engine: Some(decode_telemetry.asr_engine)
                         .filter(|engine| !engine.is_empty()),
                     asr_step_down_reason: decode_telemetry.asr_step_down_reason,
-                    hold_to_first_draft_ms: preview.hold_to_first_draft_ms,
-                    incremental_decode_ms: preview.incremental_decode_ms,
+                    hold_to_first_draft_ms: 0,
+                    incremental_decode_ms: 0,
                     release_finalize_ms,
-                    incremental_windows_decoded: preview.incremental_windows_decoded,
+                    incremental_windows_decoded: 0,
                     finalize_tail_audio_ms,
                     asr_integrity_percent,
                     asr_raw_word_count,
@@ -5680,188 +5519,6 @@ impl VoiceWaveController {
             "Active model '{model_id}' is not installed as a local model artifact. Install it from Models first or set VOICEWAVE_WHISPER_MODEL_PATH."
         )))
     }
-}
-
-fn spawn_incremental_decode_job(
-    worker: InferenceWorker,
-    cancel_token: CancellationToken,
-    window: DecodeWindow,
-) -> JoinHandle<DecodeJobResult> {
-    tokio::spawn(async move {
-        let started = Instant::now();
-        let transcript = match worker
-            .transcribe_segment(
-                &window.samples,
-                &cancel_token,
-                |_text, _is_final, _elapsed_ms| {},
-            )
-            .await
-        {
-            Ok(output) => output.transcript,
-            Err(InferenceError::Cancelled) => None,
-            Err(err) => {
-                eprintln!("voicewave: incremental draft decode failed: {err}");
-                None
-            }
-        };
-        DecodeJobResult {
-            window,
-            transcript,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        }
-    })
-}
-
-async fn run_incremental_preview_decode(
-    mut rx: UnboundedReceiver<IncrementalAudioChunk>,
-    worker: InferenceWorker,
-    cancel_token: CancellationToken,
-    app: AppHandle,
-    flow_started: Instant,
-    sample_rate: u32,
-    preview_shared: Arc<StdMutex<IncrementalPreviewResult>>,
-) -> IncrementalPreviewResult {
-    let cadence = Duration::from_millis(INCREMENTAL_DECODE_CADENCE_MS);
-    let min_voiced_samples = ms_to_sample_count(INCREMENTAL_MIN_VOICED_MS, sample_rate);
-    let window_samples = ms_to_sample_count(INCREMENTAL_WINDOW_MS, sample_rate).max(1);
-    let overlap_samples = ms_to_sample_count(INCREMENTAL_WINDOW_OVERLAP_MS, sample_rate)
-        .min(window_samples.saturating_sub(1));
-    let step_samples = window_samples.saturating_sub(overlap_samples).max(1);
-
-    let mut captured_audio = Vec::<f32>::new();
-    let mut voiced_samples = 0usize;
-    let mut committed_draft = String::new();
-    let mut last_committed_sample = 0usize;
-    let mut hold_to_first_draft_ms = 0u64;
-    let mut incremental_decode_ms = 0u64;
-    let mut incremental_windows_decoded = 0u32;
-    let mut next_window_target = min_voiced_samples;
-    let mut last_schedule_at: Option<Instant> = None;
-    let mut pending_window: Option<DecodeWindow> = None;
-    let mut inflight: Option<JoinHandle<DecodeJobResult>> = None;
-    let mut channel_closed = false;
-
-    loop {
-        if cancel_token.is_cancelled() {
-            break;
-        }
-
-        if !channel_closed {
-            match timeout(Duration::from_millis(15), rx.recv()).await {
-                Ok(Some(chunk)) => {
-                    if chunk.voiced {
-                        voiced_samples = voiced_samples.saturating_add(chunk.samples.len());
-                    }
-                    captured_audio.extend_from_slice(&chunk.samples);
-                }
-                Ok(None) => {
-                    channel_closed = true;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let can_schedule_now = voiced_samples >= min_voiced_samples
-            && captured_audio.len() >= next_window_target
-            && last_schedule_at
-                .map(|scheduled_at| scheduled_at.elapsed() >= cadence)
-                .unwrap_or(true);
-        if can_schedule_now {
-            let end = captured_audio.len();
-            let start = end.saturating_sub(window_samples);
-            let window = DecodeWindow {
-                end_sample: end,
-                samples: captured_audio[start..end].to_vec(),
-            };
-            next_window_target = end.saturating_add(step_samples);
-            last_schedule_at = Some(Instant::now());
-            if inflight.is_none() {
-                inflight = Some(spawn_incremental_decode_job(
-                    worker.clone(),
-                    cancel_token.clone(),
-                    window,
-                ));
-            } else {
-                pending_window = Some(window);
-            }
-        }
-
-        if inflight.as_ref().is_some_and(|handle| handle.is_finished()) {
-            let handle = inflight
-                .take()
-                .expect("inflight decode handle should exist");
-            match handle.await {
-                Ok(result) => {
-                    incremental_windows_decoded = incremental_windows_decoded.saturating_add(1);
-                    incremental_decode_ms = incremental_decode_ms.saturating_add(result.elapsed_ms);
-                    if let Some(text) = result.transcript {
-                        let sanitized = sanitize_user_transcript(&text);
-                        if !sanitized.is_empty() {
-                            committed_draft = merge_incremental_transcript(
-                                &committed_draft,
-                                &sanitized,
-                                TRANSCRIPT_OVERLAP_TOKENS,
-                            );
-                            last_committed_sample = result.window.end_sample;
-                            if hold_to_first_draft_ms == 0 {
-                                hold_to_first_draft_ms = flow_started.elapsed().as_millis() as u64;
-                            }
-                            let _ = app.emit(
-                                "voicewave://transcript",
-                                TranscriptEvent {
-                                    text: committed_draft.clone(),
-                                    is_final: false,
-                                    elapsed_ms: flow_started.elapsed().as_millis() as u64,
-                                },
-                            );
-                            if let Ok(mut shared) = preview_shared.lock() {
-                                shared.committed_draft = committed_draft.clone();
-                                shared.last_committed_sample = last_committed_sample;
-                                shared.hold_to_first_draft_ms = hold_to_first_draft_ms;
-                                shared.incremental_decode_ms = incremental_decode_ms;
-                                shared.incremental_windows_decoded = incremental_windows_decoded;
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!("voicewave: incremental decode task join failed: {err}");
-                }
-            }
-
-            if let Some(window) = pending_window.take() {
-                inflight = Some(spawn_incremental_decode_job(
-                    worker.clone(),
-                    cancel_token.clone(),
-                    window,
-                ));
-            }
-        }
-
-        if channel_closed && inflight.is_none() && pending_window.is_none() {
-            break;
-        }
-
-        if channel_closed {
-            sleep(Duration::from_millis(6)).await;
-        }
-    }
-
-    let result = IncrementalPreviewResult {
-        committed_draft,
-        last_committed_sample,
-        hold_to_first_draft_ms,
-        incremental_decode_ms,
-        incremental_windows_decoded,
-    };
-    if let Ok(mut shared) = preview_shared.lock() {
-        *shared = result.clone();
-    }
-    result
-}
-
-fn ms_to_sample_count(ms: u64, sample_rate: u32) -> usize {
-    (((ms as f64 / 1000.0) * sample_rate as f64).round() as usize).max(1)
 }
 
 fn sample_count_to_ms(sample_count: usize, sample_rate: u32) -> u64 {
