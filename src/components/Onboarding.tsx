@@ -326,19 +326,18 @@ function MicMeter({
 
 /* ------------------------------------------------------------ onboarding */
 
-/** Shown while the one-time graphics card check runs (driver shader compile,
- * 25-41 s measured). Dictation already works meanwhile, on the processor. */
+/** Models page, while the one-time graphics card check runs (driver shader
+ * compile, 25-50 s on first GPU use). Dictation waits for it rather than
+ * running the model on the processor meanwhile. */
 export function GpuPreparingNote({ className = "" }: { className?: string }) {
   return (
     <div className={`flex items-start gap-3 rounded-2xl border border-edge bg-inset px-4 py-3 ${className}`} role="status">
       <span className="vw-gpu-prep-dot mt-1.5" aria-hidden="true" />
       <div>
         <p className="text-sm font-semibold text-ink-strong">
-          Getting your graphics card ready (one time, up to a minute)
+          Getting your graphics card ready (one time, about a minute)
         </p>
-        <p className="mt-0.5 text-xs text-hint">
-          Dictation already works. It runs on your processor until this finishes, then gets much faster.
-        </p>
+        <p className="mt-0.5 text-xs text-hint">Dictation picks up as soon as it's done.</p>
       </div>
     </div>
   );
@@ -371,6 +370,10 @@ export function Onboarding({
   // attempt settled, and a state guard read through a stale closure made the
   // first Retry click a no-op.
   const downloadInFlightRef = useRef(false);
+  // The ref's twin for rendering: true from download start until the model
+  // is active, so the rehearsal stays held in the gap between the model
+  // landing and its GPU check showing up in the engine status.
+  const [setupChainRunning, setSetupChainRunning] = useState(false);
   const [micHeard, setMicHeard] = useState(false);
   const [micHintVisible, setMicHintVisible] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -419,6 +422,11 @@ export function Onboarding({
   const gpuMachine = speechEngine?.gpuName != null;
   const cpuUnsupported = speechEngine?.cpuSupport === "unsupported";
   const gpuPreparing = speechEngine?.preparing ?? false;
+  // Hold the rehearsal while the model is being made active and through the
+  // one-time graphics card check (25-50 s on first GPU use): a first
+  // dictation would wait on it. Opens on pass or fail; a failed check
+  // dictates on the processor.
+  const rehearsalHeld = modelReady && (setupChainRunning || gpuPreparing);
   const catalogRow = catalog.find((row) => row.modelId === modelChoice);
 
   const motes = useMemo(
@@ -445,6 +453,7 @@ export function Onboarding({
       return;
     }
     downloadInFlightRef.current = true;
+    setSetupChainRunning(true);
     const modelId = modelChoice;
     void (async () => {
       try {
@@ -455,6 +464,7 @@ export function Onboarding({
         // Surfaced through the model status (state === "failed" or "cancelled") with a retry.
       } finally {
         downloadInFlightRef.current = false;
+        setSetupChainRunning(false);
       }
     })();
   }, [installModel, makeModelActive, modelChoice, modelReady]);
@@ -512,9 +522,11 @@ export function Onboarding({
   // Rehearsal success: the dictation pipeline updates snapshot.lastFinal when
   // a real dictation lands. Insertion types into the focused textarea; if it
   // fell back to the clipboard instead, mirror the text so the moment can't
-  // visually fail.
+  // visually fail. The baseline is taken when the rehearsal opens, so a
+  // dictation made while it was still held doesn't count.
   useEffect(() => {
-    if (step !== "speak") {
+    if (step !== "speak" || !modelReady || rehearsalHeld) {
+      rehearsalBaselineRef.current = null;
       return;
     }
     if (rehearsalBaselineRef.current === null) {
@@ -545,7 +557,7 @@ export function Onboarding({
         110
       );
     }
-  }, [burst, snapshot.lastFinal, spokeDone, step]);
+  }, [burst, modelReady, rehearsalHeld, snapshot.lastFinal, spokeDone, step]);
 
   const finishBurstFiredRef = useRef(false);
   useEffect(() => {
@@ -735,7 +747,7 @@ export function Onboarding({
                   Hold the key. Speak. Let go.
                 </h2>
 
-                {modelReady ? (
+                {modelReady && !rehearsalHeld ? (
                   <>
                     <p className="mt-3 flex flex-wrap items-center gap-2 text-[15px] text-faint">
                       <span>Hold</span>
@@ -775,11 +787,11 @@ export function Onboarding({
                     <p className="mt-1 text-xs text-hint">
                       Longer thought? Double-tap {hotkeyLabel} for hands-free, then pause or press it again.
                     </p>
-                    {gpuPreparing && <GpuPreparingNote className="mt-4" />}
                   </>
                 ) : (
-                  // While the model downloads, teach both gestures so the wait
-                  // is useful; the rehearsal replaces this once it lands.
+                  // While the model downloads (and through the graphics card
+                  // check), teach both gestures so the wait is useful; the
+                  // rehearsal replaces this once dictation is ready.
                   <div className="mt-5 flex flex-1 flex-col">
                     <div className="vw-row-list">
                       <div className="flex items-center gap-3 px-4 py-3 text-[15px] text-faint">
@@ -792,15 +804,37 @@ export function Onboarding({
                       </div>
                     </div>
                     <div className="mt-5">
-                      <ModelDownloadProgress
-                        status={status}
-                        onRetry={startDownload}
-                        onCancel={() => void cancelModelInstall(modelChoice)}
-                      />
+                      {rehearsalHeld ? (
+                        <div className="rounded-2xl border border-edge bg-inset px-5 py-5" role="status">
+                          <div className="flex items-center gap-3">
+                            <span className="vw-gpu-prep-dot" aria-hidden="true" />
+                            <p className="text-sm font-semibold text-ink-strong">
+                              {gpuPreparing ? "Getting your graphics card ready" : "Getting dictation ready…"}
+                            </p>
+                          </div>
+                          {gpuPreparing && (
+                            <>
+                              <div className="vw-onb-progress mt-3">
+                                <div className="vw-onb-progress-fill vw-onb-progress-estimate" />
+                              </div>
+                              <p className="mt-2 text-xs text-hint">
+                                One time, about a minute. You can practice here the moment it's done.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <ModelDownloadProgress
+                          status={status}
+                          onRetry={startDownload}
+                          onCancel={() => void cancelModelInstall(modelChoice)}
+                        />
+                      )}
                     </div>
                     <p className="mt-3 text-xs text-hint">
-                      One-time download. You can finish setup now; it keeps going in the background,
-                      and dictation is fully offline once it lands.
+                      {rehearsalHeld
+                        ? "Or finish setup now; it keeps going in the background."
+                        : "One-time download. You can finish setup now; it keeps going in the background, and dictation is fully offline once it lands."}
                     </p>
                   </div>
                 )}
@@ -827,11 +861,13 @@ export function Onboarding({
                   You're set.
                 </h2>
                 <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-faint">
-                  {modelReady
-                    ? "VoiceWave works in every app — try your email or notes next."
-                    : status?.state === "failed" || status?.state === "cancelled"
-                      ? "The speech model download didn't finish. Pick it up on the next screen, then dictation works in every app."
-                      : "The speech model is still downloading. Dictation works in every app the moment it lands."}{" "}
+                  {modelReady && gpuPreparing
+                    ? "Your graphics card is finishing its one-time check. Dictation works in every app the moment it's done."
+                    : modelReady
+                      ? "VoiceWave works in every app — try your email or notes next."
+                      : status?.state === "failed" || status?.state === "cancelled"
+                        ? "The speech model download didn't finish. Pick it up on the next screen, then dictation works in every app."
+                        : "The speech model is still downloading. Dictation works in every app the moment it lands."}{" "}
                   Say “new line” or “bullet point” to add structure as you speak.
                 </p>
                 {quickControlsAvailable ? <button

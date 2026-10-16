@@ -296,11 +296,17 @@ impl InferenceWorker {
         }
     }
 
-    /// Outer timeout for a speech-worker decode: the GPU attempt, its
+    /// Outer timeout for a speech-worker decode: the wait for the one-time
+    /// GPU check (when `waits_for_gpu_check`), the GPU attempt, its
     /// fresh-worker retry, and the CPU rung. `fw_timeout` is the controller's
     /// faster-whisper budget, used when an installed faster-whisper model is
     /// the CPU rung. None for other backends.
-    pub fn asr_worker_timeout(&self, audio_ms: u64, fw_timeout: Duration) -> Option<Duration> {
+    pub fn asr_worker_timeout(
+        &self,
+        audio_ms: u64,
+        fw_timeout: Duration,
+        waits_for_gpu_check: bool,
+    ) -> Option<Duration> {
         let InferenceBackend::AsrWorker {
             fw_fallback_model, ..
         } = &self.backend
@@ -312,11 +318,34 @@ impl InferenceWorker {
         } else {
             asr_worker::rung_budget(asr_worker::Rung::Cpu, audio_ms)
         };
+        let gpu_check = if waits_for_gpu_check {
+            asr_worker::GPU_CHECK_WAIT
+        } else {
+            Duration::ZERO
+        };
         Some(
-            asr_worker::rung_budget(asr_worker::Rung::Gpu, audio_ms)
+            gpu_check
+                + asr_worker::rung_budget(asr_worker::Rung::Gpu, audio_ms)
                 + asr_worker::gpu_retry_budget(audio_ms)
                 + cpu_rung,
         )
+    }
+
+    /// Whether the next decode first waits for the one-time GPU check (a
+    /// whisper.cpp model with no faster-whisper fallback while the check
+    /// runs; see `transcribe_with_asr_worker`), so the controller can extend
+    /// its timeout and say why up front.
+    pub async fn waits_for_gpu_check(&self) -> bool {
+        let InferenceBackend::AsrWorker {
+            model,
+            fw_fallback_model: None,
+            ..
+        } = &self.backend
+        else {
+            return false;
+        };
+        let (_, step_down) = asr_worker::primary_rung(model).await;
+        step_down.is_some_and(|step| step.kind == StepDownKind::Preparing)
     }
 
     pub fn with_script(
@@ -707,7 +736,9 @@ impl WhisperEngine<'_> {
 /// faster-whisper model (faster than whisper.cpp on the CPU for short clips),
 /// else the CPU worker on the same GGML file. Text comes from exactly one
 /// rung. A GPU that still needs its one-time check starts it in the
-/// background.
+/// background and decodes on faster-whisper meanwhile; without a
+/// faster-whisper model the dictation waits for the check instead (bounded),
+/// since the CPU worker would cold-load the same large model next to it.
 async fn transcribe_with_asr_worker(
     samples: &[f32],
     model: &AsrModel,
@@ -716,17 +747,20 @@ async fn transcribe_with_asr_worker(
     fw_fallback_model: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> Result<WhisperDecodeOutput, InferenceError> {
-    let (primary, step_down) = asr_worker::primary_rung(model).await;
+    let (mut primary, mut step_down) = asr_worker::primary_rung(model).await;
     if step_down
         .as_ref()
         .is_some_and(|step| step.kind == StepDownKind::Preparing)
     {
-        asr_worker::spawn_qualification(
-            model.clone(),
-            fw_fallback_model
-                .and_then(faster_whisper_runtime_model_id)
-                .map(str::to_string),
-        );
+        match fw_fallback_model {
+            Some(fw_model) => {
+                asr_worker::spawn_qualification(
+                    model.clone(),
+                    faster_whisper_runtime_model_id(fw_model).map(str::to_string),
+                );
+            }
+            None => (primary, step_down) = asr_worker::wait_for_gpu_check(model, cancel_token).await,
+        }
     }
     let cpu_rung = match fw_fallback_model {
         Some(fw_model) => WhisperEngine::FasterWhisper {

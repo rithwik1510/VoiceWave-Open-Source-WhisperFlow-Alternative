@@ -510,6 +510,14 @@ function deriveModelStatuses(
         resumable: false
       };
   }
+  // A download of a model outside this PC's catalog (the processor model
+  // offered when the GPU is unusable) joins the catalog only once installed;
+  // keep its progress or failure until then.
+  for (const [modelId, prior] of Object.entries(previous)) {
+    if (!(modelId in next) && (prior.state === "downloading" || prior.state === "failed" || prior.state === "cancelled")) {
+      next[modelId] = { ...prior, active: modelId === activeModel };
+    }
+  }
   return next;
 }
 
@@ -711,7 +719,10 @@ export function useVoiceWave() {
     if (!tauriAvailable) {
       return;
     }
-    void refreshSpeechEngine();
+    // In parallel, but awaited at the end: callers like makeModelActive
+    // resolve only once the engine status matches the new active model (the
+    // onboarding rehearsal must not unlock before a GPU check shows up).
+    const engineRefresh = refreshSpeechEngine();
     try {
       const [catalogRows, installedRows, historyRows, queueRows, termRows, snippetRows, benchmark] = await Promise.all([
         listModelCatalog(),
@@ -749,6 +760,7 @@ export function useVoiceWave() {
     } catch (loadErr) {
       setError(loadErr instanceof Error ? loadErr.message : "Failed to load Phase III data.");
     }
+    await engineRefresh;
   }, [refreshSpeechEngine, settings.activeModel, tauriAvailable]);
 
   // The one-time graphics card check takes up to a minute; follow it (and an
@@ -1815,6 +1827,19 @@ export function useVoiceWave() {
     }
   }, [refreshPhase3Data, tauriAvailable]);
 
+  /** Switch to a model, downloading it first if needed (the "use Small
+   * instead" nudges). Activates only once the download lands; a failure or
+   * cancel stays in modelStatuses with a retry. */
+  const installAndActivateModel = useCallback(
+    async (modelId: string) => {
+      const installed = installedModels.some((row) => row.modelId === modelId);
+      if (installed || (await installModel(modelId))) {
+        await makeModelActive(modelId);
+      }
+    },
+    [installModel, installedModels, makeModelActive]
+  );
+
   const runBenchmarkAndRecommend = useCallback(async () => {
     if (!tauriAvailable) {
       const run: BenchmarkRun = {
@@ -2603,6 +2628,7 @@ export function useVoiceWave() {
     pauseModelInstall,
     resumeModelInstall,
     makeModelActive,
+    installAndActivateModel,
     runBenchmarkAndRecommend,
     updateRetentionPolicy,
     searchHistory,

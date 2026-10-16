@@ -400,6 +400,13 @@ export interface ModelCatalogItem {
 
 export type ModelTier = "small" | "largeTurbo";
 
+/** A model the backend offers to download (GPU upgrade, or the processor model). */
+export interface ModelOffer {
+  modelId: string;
+  tier: ModelTier;
+  sizeBytes: number;
+}
+
 /** Plan 019 engine state from `get_speech_engine_status`. */
 export interface SpeechEngineStatus {
   /** "unsupported" = no SSE4.1 (nothing can run); "noAvx2" = no GPU engine
@@ -409,14 +416,19 @@ export interface SpeechEngineStatus {
   gpuName: string | null;
   recommendedModelId: string;
   /** Where the active model runs, as the speech worker reported it; null
-   * while the one-time graphics card check runs. */
+   * while the one-time graphics card check runs or is about to. */
   runningOn: { device: "gpu" | "cpu"; name: string | null } | null;
-  /** The one-time graphics card check (shader compile + test clips) is running. */
+  /** The one-time graphics card check (shader compile + test clips) is
+   * running, or starts any moment (model just activated, app just launched). */
   preparing: boolean;
   qualification: "passed" | "failed" | "retry" | null;
   qualificationDetail: string | null;
-  upgradeOffer: { modelId: string; tier: ModelTier; sizeBytes: number } | null;
+  upgradeOffer: ModelOffer | null;
   pendingUpgrade: string | null;
+  /** The active graphics-card model is stuck on the processor (check failed,
+   * GPU cooling down or gone, acceleration off) with no processor model
+   * installed, so every dictation is slow: the model to switch to. */
+  cpuModelOffer: ModelOffer | null;
 }
 
 export interface InstalledModel {

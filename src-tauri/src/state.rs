@@ -285,7 +285,9 @@ pub fn announce_store_resets(app: &AppHandle) {
 
 /// Copy for the once-per-session GPU step-down pill (plan 019). A Large
 /// Turbo dictation on the processor can take ~10 s, so say why, and point at
-/// Small, which is fast there.
+/// Small, which is fast there. `Preparing` normally arrives here when a
+/// faster-whisper model decoded during the GPU check; without one the
+/// dictation waits for the check and its notice goes out up front.
 fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
     let turbo = model_id.contains("large-v3-turbo");
     match kind {
@@ -4341,18 +4343,37 @@ impl VoiceWaveController {
         let finalize_samples_ref: &[f32] = &source_samples;
         let default_finalize_timeout =
             final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
+        // During the one-time GPU check, a whisper.cpp model with no
+        // faster-whisper fallback waits for the check before decoding.
+        let waits_for_gpu_check = final_worker.waits_for_gpu_check().await;
         // The speech worker may fail on the GPU and retry the same audio on
-        // the CPU rung; the outer timeout covers both attempts.
+        // the CPU rung; the outer timeout covers that wait and both attempts.
         let finalize_timeout = final_worker
             .asr_worker_timeout(
                 sample_count_to_ms(finalize_samples_ref.len(), self.audio.target_sample_rate),
                 default_finalize_timeout,
+                waits_for_gpu_check,
             )
             .unwrap_or(default_finalize_timeout);
+        // That wait can take most of a minute, so say why now rather than
+        // after the result. It uses the session's one GPU notice.
+        let gpu_wait_notice = waits_for_gpu_check
+            && mode == DictationMode::Microphone
+            && !self.gpu_notice_sent.swap(true, Ordering::Relaxed);
+        if gpu_wait_notice {
+            emit_pill_notice(
+                &app,
+                "info",
+                "Getting your graphics card ready",
+                Some("One-time setup, up to a minute. Your text appears when it's done.".to_string()),
+                15_000,
+            );
+        }
         // Long decodes leave the user staring at a spinner with no promise it
-        // is alive; past ~2.5s the pill says so explicitly.
+        // is alive; past ~2.5s the pill says so explicitly (unless the GPU
+        // notice above already explains the wait).
         let decode_watch_done = Arc::new(AtomicBool::new(false));
-        if mode == DictationMode::Microphone {
+        if mode == DictationMode::Microphone && !gpu_wait_notice {
             let done = Arc::clone(&decode_watch_done);
             let watch_app = app.clone();
             let watch_cancel = cancel_token.clone();

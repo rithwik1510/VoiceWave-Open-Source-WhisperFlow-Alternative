@@ -35,6 +35,7 @@ import { firebaseEnabled } from "./lib/firebase";
 import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard } from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
+import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
 import { GpuPreparingNote, Onboarding } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
@@ -53,6 +54,7 @@ import type {
   GpuAccelerationMode,
   MicVolumeGuardMode,
   ModelCatalogItem,
+  ModelStatus,
   PolishOutcome,
   PolishProfile,
   RetentionPolicy,
@@ -464,14 +466,19 @@ function OverlayModal({ title, subtitle, onClose, children, maxWidthClassName = 
 }
 
 /** Models page: where dictation runs, the one-time graphics card check, an
- * accepted upgrade in flight, and a nudge to Small when Large Turbo is stuck
- * on the processor (~10 s per dictation there). */
+ * accepted upgrade in flight, and a nudge to Small when dictation is slow on
+ * the processor. A graphics-card model stuck there (the backend's
+ * `cpuModelOffer`; Large Turbo takes 14-23 s per dictation on the CPU worker)
+ * only needs processor Small installed, which then stands in for it on the
+ * processor; processor Large Turbo (10 s or more) is swapped for Small. */
 function ModelEngineStatus({
   engine,
   activeRow,
   smallRow,
   pendingRow,
   smallInstalled,
+  cpuOfferStatus,
+  onInstallCpuModel,
   onUseSmall
 }: {
   engine: SpeechEngineStatus;
@@ -479,13 +486,24 @@ function ModelEngineStatus({
   smallRow: ModelCatalogItem | null;
   pendingRow: ModelCatalogItem | null;
   smallInstalled: boolean;
+  /** Download status of `engine.cpuModelOffer`'s model. */
+  cpuOfferStatus: ModelStatus | undefined;
+  onInstallCpuModel: (modelId: string) => void;
   onUseSmall: (modelId: string) => void;
 }) {
   if (engine.preparing) {
     return <GpuPreparingNote className="mt-4" />;
   }
   const onCpu = engine.runningOn?.device === "cpu";
-  const turboOnCpu = onCpu && activeRow?.tier === "largeTurbo" && smallRow !== null;
+  const cpuOffer = engine.cpuModelOffer;
+  // Graphics-card models go through cpuOffer instead: without it, an
+  // installed processor model already stands in for them on the CPU.
+  const turboOnCpu =
+    cpuOffer === null &&
+    onCpu &&
+    activeRow?.tier === "largeTurbo" &&
+    activeRow.format === "faster-whisper" &&
+    smallRow !== null;
   return (
     <div className="mt-4 space-y-1.5 text-sm">
       {engine.runningOn && (
@@ -509,10 +527,29 @@ function ModelEngineStatus({
           Switching to {pendingRow.displayName} once it's downloaded and checked. Dictation keeps working meanwhile.
         </p>
       )}
+      {cpuOffer && (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <p className="text-xs text-faint">
+            {activeRow?.tier === "largeTurbo"
+              ? "Large Turbo takes about 15–25 seconds per dictation on the processor."
+              : "The graphics card version of Small is slower on the processor than it needs to be."}{" "}
+            Small for processors is much faster.
+          </p>
+          {cpuOfferStatus?.state === "downloading" ? (
+            <span className="text-xs tabular-nums text-accent-text">
+              Downloading Small… {cpuOfferStatus.progress}%
+            </span>
+          ) : (
+            <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => onInstallCpuModel(cpuOffer.modelId)}>
+              Get Small ({formatBytes(cpuOffer.sizeBytes)})
+            </button>
+          )}
+        </div>
+      )}
       {turboOnCpu && smallRow && (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <p className="text-xs text-faint">
-            Large Turbo takes around 10 seconds per dictation on the processor. Small is much faster here.
+            Large Turbo takes 10 seconds or more per dictation on the processor. Small is much faster here.
           </p>
           <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => onUseSmall(smallRow.modelId)}>
             {smallInstalled ? "Switch to Small" : `Get Small (${formatBytes(smallRow.sizeBytes)})`}
@@ -574,6 +611,8 @@ function App() {
   const [snippetSyncError, setSnippetSyncError] = useState<string | null>(null);
   // The user's explicit pick in the model gate; null follows the per-PC default.
   const [setupModelChoice, setSetupModelChoice] = useState<string | null>(null);
+  // Home "dictation is slow on the processor" notice, dismissed until restart.
+  const [cpuNoticeDismissed, setCpuNoticeDismissed] = useState(false);
   // Models page: the row whose Remove is waiting for a second click.
   const [confirmRemoveModelId, setConfirmRemoveModelId] = useState<string | null>(null);
   const {
@@ -595,6 +634,7 @@ function App() {
     historyPolicy,
     inputDevices,
     installModel,
+    installAndActivateModel,
     installedModels,
     makeModelActive,
     modelCatalog,
@@ -753,6 +793,12 @@ function App() {
   const upgradeOffer = speechEngine?.upgradeOffer ?? null;
   const showUpgradeNotice =
     tauriAvailable && !showOnboarding && !showModelSetupGate && !showAnalyticsConsent && upgradeOffer !== null;
+  // Home view: a graphics-card model stuck on the processor, with the
+  // processor model to install (non-modal, dismissible per session).
+  const cpuModelOffer =
+    tauriAvailable && !showOnboarding && !showModelSetupGate && !cpuNoticeDismissed
+      ? (speechEngine?.cpuModelOffer ?? null)
+      : null;
   // The gate shows, in order: a download already running (picked in
   // onboarding before "Skip setup", or started here), the user's pick, a
   // download that failed or was cancelled (so Resume is one click), then the
@@ -1538,6 +1584,17 @@ function App() {
                   enable real microphone dictation and model downloads.
                 </div>
               )}
+              {cpuModelOffer && (
+                <CpuModelNotice
+                  offer={cpuModelOffer}
+                  activeTier={modelCatalog.find((row) => row.modelId === settings.activeModel)?.tier ?? null}
+                  gpuOff={settings.gpuAcceleration === "off"}
+                  status={modelStatuses[cpuModelOffer.modelId]}
+                  onDownload={() => void installModel(cpuModelOffer.modelId)}
+                  onCancel={() => void cancelModelInstall(cpuModelOffer.modelId)}
+                  onDismiss={() => setCpuNoticeDismissed(true)}
+                />
+              )}
               <Dashboard
                 theme={theme}
                 status={status}
@@ -1668,9 +1725,9 @@ function App() {
                     smallRow={setupCatalog.find((row) => row.tier === "small") ?? null}
                     pendingRow={modelCatalog.find((row) => row.modelId === speechEngine.pendingUpgrade) ?? null}
                     smallInstalled={setupCatalog.some((row) => row.tier === "small" && installedModelSet.has(row.modelId))}
-                    onUseSmall={(modelId) =>
-                      void (installedModelSet.has(modelId) ? makeModelActive(modelId) : installModel(modelId))
-                    }
+                    cpuOfferStatus={speechEngine.cpuModelOffer ? modelStatuses[speechEngine.cpuModelOffer.modelId] : undefined}
+                    onInstallCpuModel={(modelId) => void installModel(modelId)}
+                    onUseSmall={(modelId) => void installAndActivateModel(modelId)}
                   />
                 )}
 

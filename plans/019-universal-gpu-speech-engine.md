@@ -294,13 +294,16 @@ is covered by the same deadline. Every phase has one:
 | Spawn to ready | 10 s |
 | `list_devices` | 5 s |
 | `load` (+ warm-up) | 30 s GPU (120 s on first use: driver shader compile, see Phase 0 results), 60 s CPU |
-| `transcribe` | 4 s + 0.4× audio length GPU (warm decodes run ~0.07×, so a hang shows in seconds); 30 s + 3× audio length CPU (CPU rung loads with max(cores − 2, 2) threads) |
+| `transcribe` | GPU: 15 s + 1× audio length for the first 5 dictation decodes after a model load (on a fresh driver shader cache each new audio length compiles shaders first: a 5 s dictation took over 6 s, a 10.8 s one 7.7 s, on the RTX 3060), then 4 s + 0.4× audio length (warm decodes run ~0.07×, so a hang shows in seconds). Qualification clips: 30 s each (a timeout there caches a fail). CPU: 30 s + 3× audio length (CPU rung loads with max(cores − 2, 2) threads) |
 | Request write | inside the request's deadline |
 
 On any missed deadline: kill the worker, **reap it** (wait for exit) before
 starting another, and retry the dictation on the next rung with the same
 retained audio. Text is inserted once, from whichever rung finishes. The outer
-finalize timeout (`state.rs:4419`) is raised to cover GPU attempt + CPU retry.
+finalize timeout (`state.rs:4419`) is raised to cover GPU attempt + CPU retry,
+plus the wait for the one-time GPU check when the dictation waits for it
+(see Qualification). The first-decodes counter lives on the loaded worker, so
+a respawn or model reload starts it over.
 
 ### Engine selection
 
@@ -351,6 +354,19 @@ their real model, its warm-up doubles as the qualification test:
    faster than faster-whisper CPU on the same two clips.
 4. On pass, the same worker stays running as the live dictation worker.
 
+Dictation while the check runs (first GPU use: 25–50 s of shader compile):
+
+- **A faster-whisper model is installed** (upgraders): it decodes meanwhile,
+  and the step-down notice comes after the result.
+- **No faster-whisper model** (new installs): the dictation waits for the
+  check, up to its own worst case (spawn + 120 s load + two tries per clip +
+  reap, ~4 min; usually 25–50 s) and never past a cancel, then decodes on the
+  GPU if it passed, else on the CPU worker. The CPU worker cold-loading Large
+  Turbo next to the check took 31.6 s for a 2.6 s utterance and stretched the
+  check's GPU load from ~27 s to ~50 s. The "Getting your graphics card
+  ready" notice goes out when the wait starts (it replaces "Still
+  transcribing…" for that dictation).
+
 This is a **qualification**, not a search for the fastest configuration:
 hardware rules decide eligibility, the test confirms the GPU path works and
 meets the bar.
@@ -378,7 +394,7 @@ at once.
 
 | Event | Class | Action |
 |---|---|---|
-| Worker exits or misses a deadline during a dictation | backend | Retry that dictation once on a fresh GPU worker (12 s load deadline), then on the CPU rung |
+| Worker exits or misses a deadline during a dictation | backend | Retry that dictation once on a fresh GPU worker (12 s load deadline; its decodes get the cold deadline), then on the CPU rung |
 | Worker reports out-of-memory | resource | CPU rung for this dictation; retry GPU on the next dictation; never counts toward disabling GPU |
 | Model unreadable or corrupt | artifact | Offer re-download; not a GPU failure |
 | Malformed response, id mismatch | protocol | Kill, reap, respawn; counts as a worker bug in diagnostics |

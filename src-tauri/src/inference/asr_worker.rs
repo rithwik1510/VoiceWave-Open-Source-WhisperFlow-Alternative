@@ -70,6 +70,11 @@ const GPU_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// fault: a warm (shader-cached) load takes 2-8 s, and a driver that is still
 /// stuck should cost the user little before the CPU rung takes over.
 pub(crate) const GPU_RETRY_LOAD_DEADLINE: Duration = Duration::from_secs(12);
+/// Dictation decodes after a GPU model load that get the cold deadline (see
+/// `transcribe_deadline`). On a fresh driver shader cache the first decode of
+/// each new audio length compiles shaders; after a handful every length runs
+/// in 0.3-0.5 s on an RTX 3060.
+const GPU_COLD_DECODES: u32 = 5;
 
 // Qualification (plan 019): pass bars for a discrete GPU, warm decodes.
 const QUALIFY_SHORT_MAX_MS: u64 = 1_000;
@@ -94,9 +99,34 @@ const QUALIFY_CONFIG_VERSION: u32 = 1;
 /// `Retry` results in a row for one key before it is recorded as `Failed`,
 /// so a borderline GPU stops rerunning the full check at every launch.
 const QUALIFY_MAX_RETRIES: usize = 3;
+/// Each qualification decode. The clips run on a just-loaded worker, so they
+/// are cold decodes (a 10.8 s decode took 7.7 s on a fresh shader cache);
+/// a timeout here caches a GPU fail, so this matches the cold dictation
+/// deadline for the 10.8 s clip (~26 s), rounded up to one constant.
+const QUALIFY_DECODE_DEADLINE: Duration = Duration::from_secs(30);
+/// Longest a dictation waits for the one-time GPU check when the only other
+/// choice is the CPU worker (see `wait_for_gpu_check`): the check's own worst
+/// case, i.e. spawn, first-use load, two tries at each clip, and a reap.
+/// It usually finishes in 25-50 s.
+pub(crate) const GPU_CHECK_WAIT: Duration = Duration::from_secs(
+    SPAWN_READY_DEADLINE.as_secs()
+        + LOAD_GPU_FIRST_USE_DEADLINE.as_secs()
+        + 2 * QUALIFY_CLIPS.len() as u64 * QUALIFY_DECODE_DEADLINE.as_secs()
+        + REAP_WAIT.as_secs(),
+);
+/// How often that wait checks whether the GPU check is done.
+const GPU_CHECK_POLL: Duration = Duration::from_millis(250);
 
-fn transcribe_deadline(rung: Rung, audio_ms: u64) -> Duration {
+/// `cold` = one of the first `GPU_COLD_DECODES` decodes since the GPU
+/// worker's model load (ignored on the CPU).
+fn transcribe_deadline(rung: Rung, audio_ms: u64, cold: bool) -> Duration {
     match rung {
+        // The driver may compile shaders for this audio length first: a 5 s
+        // dictation took over 6 s, a 10.8 s one 7.7 s, on an RTX 3060 with a
+        // fresh shader cache. 15 s + 1x audio leaves ~3x headroom for slower
+        // GPUs; a miss here is a strike toward the GPU cooldown, so being
+        // generous for a few decodes is cheaper than a false fault.
+        Rung::Gpu if cold => Duration::from_millis(15_000 + audio_ms),
         // Warm decodes run ~0.07x real time (0.25x right after the GPU
         // idles down), so this catches a hung GPU in seconds, not minutes.
         Rung::Gpu => Duration::from_millis(4_000 + audio_ms * 2 / 5),
@@ -112,22 +142,23 @@ fn load_deadline(rung: Rung) -> Duration {
 }
 
 /// Worst case for one decode on `rung`: spawn (or waiting for a load already
-/// in flight), load, primary + confidence-retry decodes, reaps. Only a
-/// backstop for the controller's outer timeout; the per-phase deadlines above
-/// always fire first.
+/// in flight), load, primary + confidence-retry decodes (both cold, the worst
+/// case), reaps. Only a backstop for the controller's outer timeout; the
+/// per-phase deadlines above always fire first.
 pub(crate) fn rung_budget(rung: Rung, audio_ms: u64) -> Duration {
     let setup = match rung {
         Rung::Gpu => LIST_DEVICES_DEADLINE + SPAWN_READY_DEADLINE + LOAD_GPU_DEADLINE,
         Rung::Cpu => SPAWN_READY_DEADLINE + LOAD_CPU_DEADLINE,
     };
-    setup + transcribe_deadline(rung, audio_ms) * 2 + REAP_WAIT * 2
+    setup + transcribe_deadline(rung, audio_ms, true) * 2 + REAP_WAIT * 2
 }
 
-/// Worst case for the fresh GPU worker retried after a GPU fault.
+/// Worst case for the fresh GPU worker retried after a GPU fault. Its decodes
+/// are cold: a new process compiles its own pipelines.
 pub(crate) fn gpu_retry_budget(audio_ms: u64) -> Duration {
     SPAWN_READY_DEADLINE
         + GPU_RETRY_LOAD_DEADLINE
-        + transcribe_deadline(Rung::Gpu, audio_ms) * 2
+        + transcribe_deadline(Rung::Gpu, audio_ms, true) * 2
         + REAP_WAIT * 2
 }
 
@@ -321,6 +352,8 @@ type StderrTail = Arc<Mutex<VecDeque<String>>>;
 
 struct Loaded {
     model_path: PathBuf,
+    /// Dictation decodes since this load (picks the cold GPU deadline).
+    decodes: u32,
 }
 
 struct WorkerProcess {
@@ -995,6 +1028,7 @@ fn ensure_loaded(
         let reply = worker.request(body, deadline, None)?;
         worker.loaded = Some(Loaded {
             model_path: model_path.to_path_buf(),
+            decodes: 0,
         });
         Ok(reply)
     })?;
@@ -1079,7 +1113,14 @@ fn transcribe_blocking(
                 body["initialPrompt"] = json!(prompt);
             }
             let reply = with_worker(&mut guard, |worker| {
-                worker.request(body, transcribe_deadline(rung, job.audio_ms), Some(cancel))
+                // Only dictation decodes count: the qualification's two clip
+                // lengths leave the user's own lengths still to compile.
+                let decode_number = worker.loaded.as_mut().map_or(1, |loaded| {
+                    loaded.decodes += 1;
+                    loaded.decodes
+                });
+                let cold = decode_number <= GPU_COLD_DECODES;
+                worker.request(body, transcribe_deadline(rung, job.audio_ms, cold), Some(cancel))
             })?;
             note_report(model_path, &reply);
             if rung == Rung::Gpu {
@@ -1138,12 +1179,6 @@ pub(crate) struct QualifyClip {
     name: &'static str,
     reference: String,
     samples: Vec<f32>,
-}
-
-impl QualifyClip {
-    fn audio_ms(&self) -> u64 {
-        self.samples.len() as u64 * 1000 / 16_000
-    }
 }
 
 pub(crate) fn load_qualify_clips() -> Result<Vec<QualifyClip>, String> {
@@ -1299,7 +1334,7 @@ fn qualify_gpu_blocking(model: &AsrModel, clips: &[QualifyClip]) -> (Verdict, Qu
                 "language": "en",
             });
             let reply = match with_worker(&mut guard, |worker| {
-                worker.request(body, transcribe_deadline(Rung::Gpu, clip.audio_ms()), Some(&never_cancel))
+                worker.request(body, QUALIFY_DECODE_DEADLINE, Some(&never_cancel))
             }) {
                 Ok(reply) => reply,
                 Err(fault) => return (fault_verdict(fault, false), timings),
@@ -1512,10 +1547,13 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
 }
 
 /// Run qualification in the background (dictation path).
-pub(crate) fn spawn_qualification(model: AsrModel, fw_baseline: Option<String>) {
+pub(crate) fn spawn_qualification(
+    model: AsrModel,
+    fw_baseline: Option<String>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let _ = qualify(model, fw_baseline).await;
-    });
+    })
 }
 
 /// Engine state for the UI ("Running on …", "Getting your graphics card
@@ -1580,6 +1618,45 @@ pub(crate) async fn primary_rung(model: &AsrModel) -> (Rung, Option<StepDown>) {
     tokio::task::spawn_blocking(move || primary_rung_blocking(&model))
         .await
         .unwrap_or((Rung::Cpu, None))
+}
+
+/// For a dictation whose only CPU rung is the CPU worker: wait for the
+/// one-time GPU check on `model` instead of cold-loading the model on the
+/// processor next to it (31 s for Large Turbo, and it slowed the check's GPU
+/// load from ~27 s to ~50 s). Starts the check when none is running (a model
+/// switch can leave another model's check in flight, or none at all). Returns
+/// the re-evaluated primary rung once the check is done (on pass the GPU
+/// worker stays loaded), after `GPU_CHECK_WAIT`, or on cancel.
+pub(crate) async fn wait_for_gpu_check(
+    model: &AsrModel,
+    cancel: &CancellationToken,
+) -> (Rung, Option<StepDown>) {
+    let started = Instant::now();
+    let mut check: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        let (rung, step_down) = primary_rung(model).await;
+        let preparing = step_down
+            .as_ref()
+            .is_some_and(|step| step.kind == StepDownKind::Preparing);
+        if cancel.is_cancelled() {
+            return (rung, step_down);
+        }
+        if !preparing || started.elapsed() >= GPU_CHECK_WAIT {
+            eprintln!(
+                "voicewave: dictation waited {} ms for the GPU check; decoding on the {} worker",
+                started.elapsed().as_millis(),
+                rung.dir_name()
+            );
+            return (rung, step_down);
+        }
+        // One spawn at a time: a check spends a moment before it marks
+        // itself as running, and a duplicate would only return early.
+        let idle = lock(&SESSION).qualifying.is_none();
+        if idle && check.as_ref().map_or(true, tokio::task::JoinHandle::is_finished) {
+            check = Some(spawn_qualification(model.clone(), None));
+        }
+        let _ = tokio::time::timeout(GPU_CHECK_POLL, cancel.cancelled()).await;
+    }
 }
 
 /// One decode on `rung`. `overrides` carries the shared pipeline's beam size
