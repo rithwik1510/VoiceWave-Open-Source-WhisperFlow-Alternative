@@ -53,7 +53,7 @@
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.6",
     "@vitejs/plugin-react": "^4.6.0",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.12",
     "autoprefixer": "^10.4.21",
     "jsdom": "^26.0.0",
     "postcss": "^8.5.10",
@@ -61,10 +61,10 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.2",
     "vite": "^6.4.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "@grpc/grpc-js": "1.9.16",
+    "@grpc/grpc-js": "1.13.7",
     "protobufjs": "7.6.5",
     "ws": "8.21.0",
     "websocket-driver": "0.7.5"
