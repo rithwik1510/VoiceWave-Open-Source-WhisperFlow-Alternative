@@ -1416,7 +1416,24 @@ impl VoiceWaveController {
         let permission_manager = PermissionManager::new(&audio);
         let history_manager = HistoryManager::new()?;
         let billing_manager = BillingManager::new()?;
-        let model_manager = crate::model_manager::ModelManager::new()?;
+        let mut model_manager = crate::model_manager::ModelManager::new()?;
+        // Older builds' startup prewarm downloaded the active model without
+        // registering it. Dictation now requires a registered model, so adopt
+        // any complete cache instead of sending upgraders back through setup.
+        for item in model_manager.list_catalog() {
+            if model_manager.get_installed(&item.model_id).is_some() {
+                continue;
+            }
+            let Some(runtime_model) = faster_whisper_runtime_model_id(&item.model_id) else {
+                continue;
+            };
+            let cache_dir = faster_whisper_cache_hint(runtime_model);
+            if cache_dir.exists() {
+                // Incomplete caches fail verification and stay unregistered.
+                let _ = model_manager
+                    .install_faster_whisper_model(&item.model_id, &cache_dir.to_string_lossy());
+            }
+        }
         let dictionary_manager = DictionaryManager::new()?;
         let snippet_manager = SnippetManager::new()?;
         let diagnostics_manager = DiagnosticsManager::new()?;

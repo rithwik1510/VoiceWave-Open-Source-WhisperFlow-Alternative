@@ -300,9 +300,10 @@ impl ModelManager {
                 expected_path: cache_path.to_string_lossy().to_string(),
             });
         }
-        // The caller only gets here after the worker loaded the model, which
-        // proves model.bin/config parse. This catches the files a successful
-        // load does NOT prove are on disk (e.g. a missing tokenizer.json makes
+        // Callers get here after the worker loaded the model (proving
+        // model.bin/config parse) or when adopting an existing cache at
+        // startup. This catches the files a successful load does NOT prove
+        // are on disk (e.g. a missing tokenizer.json makes
         // faster-whisper silently fetch one online, which then fails offline).
         verify_faster_whisper_snapshot(&cache_path).map_err(|reason| {
             ModelError::IncompleteModel {
