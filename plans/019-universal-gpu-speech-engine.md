@@ -2,6 +2,11 @@
 
 ## Status
 
+**Phases 0–3 implemented (2026-10-16); Phase 4 (real-app walkthrough and
+hardware validation) pending.** Commits: 3b85897, ecce249, c35bbed (Phase 0);
+0c949c7, e95a538, b97d1c9, 1464434 (Phase 1); 76f6bba, 1805214, 0e855a6
+(Phase 2); 4a37d5e (Phase 3).
+
 **v3 approved by the owner (2026-10-16); implementation started** on branch
 `fix/first-run-setup-paths`. Owner answered all open questions with the
 recommended option (yes to 1, 2, 4, 5). No Intel or AMD-discrete test hardware
