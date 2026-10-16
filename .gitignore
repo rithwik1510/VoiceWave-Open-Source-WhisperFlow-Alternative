@@ -84,3 +84,11 @@ scripts/llm-polish/wheelhouse-cuda/
 # pi-subagents mission state
 .pi-subagents/
 nul
+
+# whisper.cpp speech workers (plan 019): built by
+# scripts/asr-worker/build-asr-worker.ps1, never committed. The .gitkeep
+# placeholders ARE tracked because tauri-build validates bundle.resources
+# paths at compile time (same reason as the faster-whisper python dir).
+src-tauri/windows/asr-worker/bin/*/*
+!src-tauri/windows/asr-worker/bin/*/.gitkeep
+src-tauri/windows/asr-worker/build*/
