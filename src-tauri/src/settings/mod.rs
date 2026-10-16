@@ -31,6 +31,17 @@ pub enum ThemePreference {
     System,
 }
 
+/// Settings -> Dictation -> GPU acceleration (plan 019). `Off` keeps
+/// whisper.cpp dictation on the CPU rung; machines without a qualifying GPU
+/// are unaffected either way.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuAcceleration {
+    #[default]
+    Auto,
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum FormatProfile {
@@ -225,6 +236,9 @@ pub struct VoiceWaveSettings {
     /// load/update; persisted only so the frontend payload carries it.
     #[serde(default)]
     pub polish_profile_customized: bool,
+    /// GPU acceleration for dictation; Auto by default.
+    #[serde(default)]
+    pub gpu_acceleration: GpuAcceleration,
 }
 
 impl VoiceWaveSettings {
@@ -266,6 +280,7 @@ impl Default for VoiceWaveSettings {
             theme: ThemePreference::System,
             polish_profile: Some(PolishProfile::Standard),
             polish_profile_customized: false,
+            gpu_acceleration: GpuAcceleration::Auto,
         }
     }
 }

@@ -170,6 +170,9 @@ struct DiagnosticsBundle {
     exported_at_utc_ms: u64,
     redaction_summary: String,
     settings_snapshot: DiagnosticsSettingsSnapshot,
+    /// Plan 019 engine selection: CPU support, chosen GPU identity,
+    /// qualification results with timings, per-driver disables.
+    speech_engine: serde_json::Value,
     aggregate: DiagnosticsAggregate,
     recent_records: Vec<LatencyMetricRecord>,
 }
@@ -340,6 +343,7 @@ impl DiagnosticsManager {
         app_version: &str,
         settings: &VoiceWaveSettings,
         watchdog_recovery_count: u64,
+        speech_engine: serde_json::Value,
     ) -> Result<DiagnosticsExportResult, DiagnosticsError> {
         if !opt_in {
             return Err(DiagnosticsError::OptInRequired);
@@ -366,6 +370,7 @@ impl DiagnosticsManager {
                 release_tail_ms: settings.release_tail_ms,
                 prefer_clipboard_fallback: settings.prefer_clipboard_fallback,
             },
+            speech_engine,
             aggregate: aggregate_metrics(&self.store.records, watchdog_recovery_count),
             recent_records: self
                 .store
@@ -781,7 +786,13 @@ mod tests {
         let mut manager = test_manager("opt-in");
 
         let err = manager
-            .export_bundle(false, "0.1.0", &VoiceWaveSettings::default(), 0)
+            .export_bundle(
+                false,
+                "0.1.0",
+                &VoiceWaveSettings::default(),
+                0,
+                serde_json::Value::Null,
+            )
             .expect_err("export should require opt in");
         assert!(matches!(err, DiagnosticsError::OptInRequired));
     }

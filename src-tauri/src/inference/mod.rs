@@ -2,18 +2,24 @@ mod asr_worker;
 mod audio_pipeline;
 mod faster_whisper;
 pub mod gpu_runtime;
+pub mod gpu_select;
 pub mod llm_polish;
 mod policy;
 pub mod polish_gate;
 
 pub use asr_worker::{
-    kill_asr_workers, prewarm_asr_worker, release_idle_asr_workers, ErrorClass as AsrErrorClass,
+    engine_view as asr_engine_view, kill_asr_workers, prewarm_asr_worker, qualify as qualify_gpu,
+    release_idle_asr_workers, set_gpu_acceleration, AsrEngineView, AsrModel,
+    ErrorClass as AsrErrorClass, Rung as AsrRung, RunningOn, StepDownKind,
 };
 pub use faster_whisper::{
-    cache_hint_for_model as faster_whisper_cache_hint,
-    ensure_faster_whisper_ready,
-    gpu_acceleration_available, kill_worker_processes as kill_faster_whisper_workers,
+    cache_hint_for_model as faster_whisper_cache_hint, ensure_faster_whisper_ready,
+    kill_worker_processes as kill_faster_whisper_workers,
 };
+
+/// Serializes the memory-heavy one-off loads (GPU qualification, polish
+/// prewarm) so two large models never load at the same time.
+pub(crate) static HEAVY_LOAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub use policy::RuntimeDecodePolicy;
 
 use crate::settings::DecodeMode;
@@ -42,8 +48,11 @@ pub struct DecodeTelemetry {
     /// Engine that produced the text: "faster-whisper", "whisper.cpp-vulkan"
     /// or "whisper.cpp-cpu". Empty for fixture decodes.
     pub asr_engine: String,
-    /// Why this dictation left the GPU rung, when it did.
+    /// Why this dictation did not decode on the GPU (error class + detail),
+    /// when it should have. Trimmed for diagnostics.
     pub asr_step_down_reason: Option<String>,
+    /// Kind of that step-down; drives the once-per-session pill notice.
+    pub asr_step_down_kind: Option<StepDownKind>,
     pub fw_segment_count: Option<u32>,
     pub fw_avg_logprob: Option<f32>,
     pub fw_no_speech_prob: Option<f32>,
@@ -196,11 +205,12 @@ enum InferenceBackend {
     },
     /// whisper.cpp GGML model in the speech worker processes (plan 019).
     AsrWorker {
-        model_path: PathBuf,
+        model: AsrModel,
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
-        /// Installed faster-whisper counterpart: the CPU rung when the GPU
-        /// attempt fails. Without one the CPU worker decodes the same file.
+        /// Installed faster-whisper model: the CPU rung when the GPU path is
+        /// unavailable or fails. Without one the CPU worker decodes the same
+        /// GGML file.
         fw_fallback_model: Option<String>,
     },
     Scripted,
@@ -264,13 +274,12 @@ impl InferenceWorker {
     }
 
     pub fn new_asr_worker(
-        active_model: impl Into<String>,
-        model_path: impl Into<PathBuf>,
+        model: AsrModel,
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
         fw_fallback_model: Option<String>,
     ) -> Self {
-        let active_model = active_model.into();
+        let active_model = model.id.clone();
         let partial_delay_ms = scripted_partial_delay_ms(&active_model, decode_mode);
         Self {
             active_model,
@@ -278,7 +287,7 @@ impl InferenceWorker {
             partial_delay_ms,
             decode_mode,
             backend: InferenceBackend::AsrWorker {
-                model_path: model_path.into(),
+                model,
                 decode_mode,
                 terminology_hint: terminology_hint
                     .map(|hint| hint.trim().to_string())
@@ -290,7 +299,8 @@ impl InferenceWorker {
 
     /// Outer timeout for a speech-worker decode: the GPU attempt plus the CPU
     /// rung. `fw_timeout` is the controller's faster-whisper budget, used when
-    /// the faster-whisper counterpart is the CPU rung. None for other backends.
+    /// an installed faster-whisper model is the CPU rung. None for other
+    /// backends.
     pub fn asr_worker_timeout(&self, audio_ms: u64, fw_timeout: Duration) -> Option<Duration> {
         let InferenceBackend::AsrWorker {
             fw_fallback_model, ..
@@ -379,15 +389,14 @@ impl InferenceWorker {
                 }
             }
             InferenceBackend::AsrWorker {
-                model_path,
+                model,
                 decode_mode,
                 terminology_hint,
                 fw_fallback_model,
             } => {
                 let decode = transcribe_with_asr_worker(
                     samples,
-                    &self.active_model,
-                    model_path,
+                    model,
                     *decode_mode,
                     terminology_hint.as_deref(),
                     fw_fallback_model.as_deref(),
@@ -682,27 +691,52 @@ impl WhisperEngine<'_> {
     }
 }
 
-/// whisper.cpp decode with the plan 019 rungs: the primary worker (GPU when
-/// one was selected), and on failure the same retained audio once more on
-/// the CPU rung (faster-whisper counterpart if installed, else the CPU
-/// worker). Text comes from exactly one rung.
+/// whisper.cpp decode with the plan 019 rungs. The GPU worker when the
+/// GPU path is qualified and on; otherwise, and once more with the same
+/// retained audio when the GPU attempt fails, the CPU rung: an installed
+/// faster-whisper model (faster than whisper.cpp on the CPU for short clips),
+/// else the CPU worker on the same GGML file. Text comes from exactly one
+/// rung. A GPU that still needs its one-time check starts it in the
+/// background.
 async fn transcribe_with_asr_worker(
     samples: &[f32],
-    model_id: &str,
-    model_path: &Path,
+    model: &AsrModel,
     decode_mode: DecodeMode,
     terminology_hint: Option<&str>,
     fw_fallback_model: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> Result<WhisperDecodeOutput, InferenceError> {
-    let (primary, lock_reason) = asr_worker::primary_rung().await;
-    let primary_engine = WhisperEngine::AsrWorker {
-        rung: primary,
-        model_path,
+    let (primary, step_down) = asr_worker::primary_rung(model).await;
+    if step_down
+        .as_ref()
+        .is_some_and(|step| step.kind == StepDownKind::Preparing)
+    {
+        asr_worker::spawn_qualification(
+            model.clone(),
+            fw_fallback_model
+                .and_then(faster_whisper_runtime_model_id)
+                .map(str::to_string),
+        );
+    }
+    let cpu_rung = match fw_fallback_model {
+        Some(fw_model) => WhisperEngine::FasterWhisper {
+            runtime_model: runtime_model_or_err(fw_model)?,
+        },
+        None => WhisperEngine::AsrWorker {
+            rung: asr_worker::Rung::Cpu,
+            model_path: &model.path,
+        },
+    };
+    let primary_engine = match primary {
+        asr_worker::Rung::Gpu => WhisperEngine::AsrWorker {
+            rung: asr_worker::Rung::Gpu,
+            model_path: &model.path,
+        },
+        asr_worker::Rung::Cpu => cpu_rung,
     };
     let err = match transcribe_with_whisper_pipeline(
         samples,
-        model_id,
+        &model.id,
         primary_engine,
         decode_mode,
         terminology_hint,
@@ -711,7 +745,11 @@ async fn transcribe_with_asr_worker(
     .await
     {
         Ok(mut decode) => {
-            decode.telemetry.asr_step_down_reason = lock_reason;
+            if let Some(step) = step_down {
+                decode.telemetry.backend_requested = asr_worker::Rung::Gpu.backend().to_string();
+                decode.telemetry.asr_step_down_reason = Some(step.reason);
+                decode.telemetry.asr_step_down_kind = Some(step.kind);
+            }
             return Ok(decode);
         }
         Err(InferenceError::Cancelled) => return Err(InferenceError::Cancelled),
@@ -720,8 +758,8 @@ async fn transcribe_with_asr_worker(
     if cancel_token.is_cancelled() {
         return Err(InferenceError::Cancelled);
     }
-    // A damaged model file fails the CPU worker the same way; only the
-    // faster-whisper counterpart (different file) can still help.
+    // A damaged model file fails the CPU worker the same way; only a
+    // faster-whisper model (different file) can still help.
     let artifact = matches!(
         err,
         InferenceError::AsrWorker {
@@ -729,42 +767,34 @@ async fn transcribe_with_asr_worker(
             ..
         }
     );
-    let fallback = match fw_fallback_model {
-        Some(fw_model) => WhisperEngine::FasterWhisper {
-            runtime_model: runtime_model_or_err(fw_model)?,
-        },
-        None if primary == asr_worker::Rung::Gpu && !artifact => WhisperEngine::AsrWorker {
-            rung: asr_worker::Rung::Cpu,
-            model_path,
-        },
-        None if artifact => {
-            return Err(InferenceError::DecodeFailed {
-                model_id: model_id.to_string(),
-                reason: format!(
-                    "the speech model file is damaged; re-download it from Models ({err})"
-                ),
-            })
-        }
-        None => return Err(err),
-    };
-    let reason = err.to_string();
+    if artifact && (fw_fallback_model.is_none() || primary == asr_worker::Rung::Cpu) {
+        return Err(InferenceError::DecodeFailed {
+            model_id: model.id.clone(),
+            reason: format!("the speech model file is damaged; re-download it from Models ({err})"),
+        });
+    }
+    if primary == asr_worker::Rung::Cpu {
+        return Err(err);
+    }
+    let reason = asr_worker::trim_reason(&err.to_string());
     eprintln!(
         "voicewave: {} decode failed, retrying on {}: {reason}",
         primary.engine(),
-        fallback.label()
+        cpu_rung.label()
     );
     let mut decode = transcribe_with_whisper_pipeline(
         samples,
-        model_id,
-        fallback,
+        &model.id,
+        cpu_rung,
         decode_mode,
         terminology_hint,
         cancel_token,
     )
     .await?;
     decode.telemetry.backend_requested = primary.backend().to_string();
-    decode.telemetry.backend_fallback = primary == asr_worker::Rung::Gpu;
+    decode.telemetry.backend_fallback = true;
     decode.telemetry.asr_step_down_reason = Some(reason);
+    decode.telemetry.asr_step_down_kind = Some(StepDownKind::Fault);
     Ok(decode)
 }
 
@@ -915,6 +945,7 @@ async fn transcribe_with_whisper_pipeline(
             backend_fallback: baseline_run.final_decode.backend_fallback,
             asr_engine: engine.label().to_string(),
             asr_step_down_reason: None,
+            asr_step_down_kind: None,
             fw_segment_count: Some(baseline_run.final_decode.segment_count),
             fw_avg_logprob: Some(baseline_run.final_decode.avg_logprob),
             fw_no_speech_prob: Some(baseline_run.final_decode.no_speech_prob),

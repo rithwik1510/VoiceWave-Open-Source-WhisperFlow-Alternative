@@ -1,4 +1,5 @@
 use crate::atomic_file;
+use crate::inference::gpu_select::{model_tier, HardwareProfile, ModelTier};
 use base64::Engine;
 use directories::ProjectDirs;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -62,12 +63,19 @@ pub struct ModelCatalogItem {
     pub download_url: String,
     pub signature: String,
     /// The model VoiceWave recommends for THIS machine's hardware (exactly one
-    /// catalog row is true). See `recommended_model_id`.
+    /// catalog row is true). See `HardwareProfile::recommended_model_id`.
     #[serde(default)]
     pub recommended: bool,
     /// One honest sentence on how the model will perform on this machine.
     #[serde(default)]
     pub hardware_note: String,
+    /// "Small" or "Large Turbo", whatever the family.
+    pub tier: ModelTier,
+    /// One of the two rows offered on this PC (the GGML family on GPU-path
+    /// machines, faster-whisper elsewhere). False for an installed model of
+    /// the other family, listed only so it can be used or removed.
+    #[serde(default)]
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -549,11 +557,31 @@ impl ModelManager {
         Ok(manager)
     }
 
-    pub fn list_catalog(&self) -> Vec<ModelCatalogItem> {
-        let gpu_accelerated = crate::inference::gpu_acceleration_available();
+    /// What this PC is offered (plan 019): always two rows, "Small" and
+    /// "Large Turbo", from the machine's model family, plus any installed
+    /// model of the other family (an upgrader's faster-whisper fallback, or
+    /// a GGML model after the GPU went away) so it stays usable and
+    /// removable.
+    pub fn list_catalog(&self, hardware: &HardwareProfile) -> Vec<ModelCatalogItem> {
+        let primary = [
+            hardware.model_id(ModelTier::Small),
+            hardware.model_id(ModelTier::LargeTurbo),
+        ];
         self.catalog
             .iter()
-            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
+            .filter(|manifest| {
+                primary.contains(&manifest.model_id.as_str())
+                    || self.installed.contains_key(&manifest.model_id)
+            })
+            .filter_map(|manifest| manifest_to_catalog_item(manifest, Some(hardware)))
+            .collect()
+    }
+
+    /// Every catalog model id, both families.
+    pub fn catalog_model_ids(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|manifest| manifest.model_id.clone())
             .collect()
     }
 
@@ -625,12 +653,53 @@ impl ModelManager {
         Ok(installed)
     }
 
+    /// Any catalog model, either family, without machine-specific copy.
     pub fn get_catalog_item(&self, model_id: &str) -> Option<ModelCatalogItem> {
-        let gpu_accelerated = crate::inference::gpu_acceleration_available();
         self.catalog
             .iter()
             .find(|item| item.model_id == model_id)
-            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
+            .and_then(|manifest| manifest_to_catalog_item(manifest, None))
+    }
+
+    /// Delete an installed model's files and unregister it. Only paths inside
+    /// VoiceWave's own data directory are ever deleted.
+    pub fn remove_model_files(&mut self, model_id: &str) -> Result<(), ModelError> {
+        let Some(installed) = self.installed.get(model_id).cloned() else {
+            return Ok(());
+        };
+        let path = PathBuf::from(&installed.file_path);
+        // A faster-whisper model lives in a Hugging Face cache repo directory
+        // ("models--org--name"); older installs registered that directory,
+        // newer ones its snapshot. Remove the whole repo either way.
+        let target = if is_virtual_model_format(&installed.format) {
+            path.ancestors()
+                .find(|dir| {
+                    dir.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("models--"))
+                })
+                .map(Path::to_path_buf)
+        } else {
+            Some(path)
+        };
+        let data_root = self
+            .model_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.model_dir.clone());
+        if let Some(target) = target.filter(|target| target.starts_with(&data_root)) {
+            let removed = if target.is_dir() {
+                fs::remove_dir_all(&target)
+            } else {
+                fs::remove_file(&target)
+            };
+            match removed {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(ModelError::Write(err)),
+            }
+        }
+        self.remove_installed(model_id)
     }
 
     pub fn get_installed(&self, model_id: &str) -> Option<InstalledModel> {
@@ -1571,52 +1640,66 @@ fn verify_faster_whisper_snapshot(repo_dir: &Path) -> Result<PathBuf, String> {
     Ok(snapshot)
 }
 
-/// The catalog model that suits a machine. The bundled speech runtime decodes
-/// on CPU unless GPU acceleration is available (optional GPU runtime or a
-/// CUDA toolkit, plus an NVIDIA GPU), and on CPU large-v3-turbo is several
-/// times slower than small.en at every clip length: whisper pads each clip to
-/// a 30 s window, so short dictations pay turbo's full encoder cost. Measured
-/// with the shipped worker settings on a Ryzen 7 5800H (8 cores, 12 threads):
-/// small.en 1.7 s / 3.0 s vs turbo 7.4-9.5 s / 8.6 s for 4.8 s / 25 s clips.
-pub fn recommended_model_id(gpu_accelerated: bool) -> &'static str {
-    if gpu_accelerated {
-        "fw-large-v3-turbo"
-    } else {
-        "fw-small.en"
-    }
-}
-
-/// Display name and one-line performance note for a catalog model on this
-/// machine. Turbo is never pitched as a good pick on a CPU-only machine.
-fn model_hardware_fit(model_id: &str, gpu_accelerated: bool) -> (String, String) {
-    let (name, note) = match (model_id, gpu_accelerated) {
-        ("fw-small.en", false) => (
-            "small.en · recommended for this PC",
+/// Display name and one-line performance note for a catalog row on this
+/// machine (`hardware` = None: no machine-specific copy). Turbo is never
+/// pitched as a good pick without a graphics card: on the CPU whisper pads
+/// every clip to a 30 s window, so short dictations pay turbo's full encoder
+/// cost (Ryzen 7 5800H: small.en ~2 s vs turbo 7-9 s per dictation).
+fn model_fit(model_id: &str, hardware: Option<&HardwareProfile>) -> Option<(String, String)> {
+    let tier = model_tier(model_id)?;
+    let ggml = model_id.starts_with("wcpp-");
+    let name = match tier {
+        ModelTier::Small => "Small",
+        ModelTier::LargeTurbo => "Large Turbo",
+    };
+    let Some(hardware) = hardware else {
+        return Some((name.to_string(), String::new()));
+    };
+    let recommended = hardware.recommended == tier;
+    let (suffix, note) = match (hardware.gpu_path(), ggml, tier) {
+        // GPU-path machine, its own rows.
+        (true, true, ModelTier::Small) if recommended => ("", "Fast on your graphics card."),
+        (true, true, ModelTier::Small) => (
+            "",
+            "Fast on your graphics card, at a third of the download.",
+        ),
+        (true, true, ModelTier::LargeTurbo) if recommended => {
+            ("", "Best accuracy, and fast on your graphics card.")
+        }
+        (true, true, ModelTier::LargeTurbo) => (
+            "",
+            "Best accuracy, but may be slow with this PC's graphics memory.",
+        ),
+        // GPU-path machine, an installed faster-whisper model.
+        (true, false, _) => (
+            " (processor version)",
+            "Kept as the backup if your graphics card has a problem. Remove it to free up space.",
+        ),
+        // CPU machine, its own rows.
+        (false, false, ModelTier::Small) => (
+            "",
             "Fast on any modern laptop: about 2 seconds per dictation.",
         ),
-        ("fw-small.en", true) => (
-            "small.en · smaller download",
-            "Fast and accurate, at a third of the download size.",
+        (false, false, ModelTier::LargeTurbo) => (
+            "",
+            "Best accuracy, but expect 7+ seconds per dictation without a graphics card.",
         ),
-        ("fw-large-v3-turbo", false) => (
-            "large-v3-turbo · slower on this PC",
-            "No GPU acceleration here: expect 7+ seconds per dictation, even on fast laptops.",
+        // CPU machine, an installed GGML model (the GPU went away).
+        (false, true, _) => (
+            " (graphics card version)",
+            "Made for a graphics card this PC is not using right now; slower on the processor.",
         ),
-        ("fw-large-v3-turbo", true) => (
-            "large-v3-turbo · recommended for this PC",
-            "Best accuracy, and fast on your NVIDIA GPU.",
-        ),
-        _ => return (model_id.to_string(), String::new()),
     };
-    (name.to_string(), note.to_string())
+    Some((format!("{name}{suffix}"), note.to_string()))
 }
 
 fn manifest_to_catalog_item(
     manifest: &SignedModelManifest,
-    gpu_accelerated: bool,
-) -> ModelCatalogItem {
-    let (display_name, hardware_note) = model_hardware_fit(&manifest.model_id, gpu_accelerated);
-    ModelCatalogItem {
+    hardware: Option<&HardwareProfile>,
+) -> Option<ModelCatalogItem> {
+    let tier = model_tier(&manifest.model_id)?;
+    let (display_name, hardware_note) = model_fit(&manifest.model_id, hardware)?;
+    Some(ModelCatalogItem {
         model_id: manifest.model_id.clone(),
         display_name,
         version: manifest.version.clone(),
@@ -1626,9 +1709,12 @@ fn manifest_to_catalog_item(
         license: manifest.license.clone(),
         download_url: manifest.download_url.clone(),
         signature: manifest.signature.clone(),
-        recommended: manifest.model_id == recommended_model_id(gpu_accelerated),
+        recommended: hardware
+            .is_some_and(|hardware| manifest.model_id == hardware.recommended_model_id()),
         hardware_note,
-    }
+        tier,
+        primary: hardware.is_some_and(|hardware| hardware.model_id(tier) == manifest.model_id),
+    })
 }
 
 fn manifest_signature_payload(manifest: &SignedModelManifest) -> String {
@@ -1779,12 +1865,9 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
         manifests.push(manifest);
     }
 
-    // Plan 019 (universal GPU speech engine): whisper.cpp GGML models for the
-    // separate speech worker. Hidden until the worker transport and engine
-    // selection ship (plan 019 Phase 1/2), because onboarding, the model gate
-    // and the Models page list every catalog row. VOICEWAVE_GGML_MODELS=1
-    // lists them for development.
-    if ggml_models_enabled() {
+    // Plan 019: whisper.cpp GGML models for the speech workers. Both families
+    // are always in the catalog; `list_catalog` shows each machine its own.
+    {
         let ggml_rows = [
             (
                 "wcpp-small.en",
@@ -1818,12 +1901,6 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
     }
 
     manifests
-}
-
-fn ggml_models_enabled() -> bool {
-    env::var("VOICEWAVE_GGML_MODELS")
-        .map(|value| value == "1")
-        .unwrap_or(false)
 }
 
 fn model_artifact_size_for(model_id: &str) -> u64 {
@@ -1939,8 +2016,13 @@ mod tests {
         let ids: Vec<&str> = catalog.iter().map(|m| m.model_id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["fw-small.en", "fw-large-v3-turbo"],
-            "fw-large-v3 is retired; wcpp-* stay hidden unless VOICEWAVE_GGML_MODELS=1 (plan 019)"
+            vec![
+                "fw-small.en",
+                "fw-large-v3-turbo",
+                "wcpp-small.en",
+                "wcpp-large-v3-turbo"
+            ],
+            "fw-large-v3 is retired; both families stay in the catalog (plan 019)"
         );
         for manifest in &catalog {
             assert!(

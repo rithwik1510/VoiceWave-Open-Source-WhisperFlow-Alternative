@@ -1,0 +1,16 @@
+Speech clips used by VoiceWave's one-time graphics card check (plan 019
+qualification). 16 kHz mono 16-bit PCM, unmodified.
+
+  short.wav  LibriSpeech test-clean 6930-76324-0019 (2.6 s)
+             "NOW LET'S DUST THE FURNITURE AND PICTURES"
+  long.wav   LibriSpeech test-clean 6930-75918-0018 (10.8 s)
+             "THE NIGHT WAS CLEAR STARLIT AND SPLENDID THE TEMPEST HAD PASSED AWAY
+              AND THE SWEET INFLUENCES OF THE EVENING HAD RESTORED LIFE PEACE AND
+              SECURITY EVERYWHERE"
+
+Source: LibriSpeech ASR corpus, https://www.openslr.org/12
+V. Panayotov, G. Chen, D. Povey and S. Khudanpur, "LibriSpeech: an ASR corpus
+based on public domain audio books", ICASSP 2015.
+License: Creative Commons Attribution 4.0 International (CC BY 4.0),
+https://creativecommons.org/licenses/by/4.0/
+The underlying recordings are public-domain LibriVox audiobooks.

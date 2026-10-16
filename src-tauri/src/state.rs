@@ -29,12 +29,14 @@ use crate::{
     },
     inference::{
         cancel_faster_whisper_download, download_faster_whisper_model, ensure_faster_whisper_ready,
+        gpu_select::hardware_profile_async,
         faster_whisper_cache_hint, faster_whisper_counterpart, faster_whisper_runtime_model_id,
         is_faster_whisper_model, is_whisper_cpp_model, note_audio_pipeline_decode_hard_failure,
         note_audio_pipeline_decode_success, polish_gate::gate_polish_candidate,
         prefetch_faster_whisper_model, prewarm_asr_worker, release_idle_asr_workers,
-        uses_whisper_pipeline, warmup_faster_whisper_model, warmup_plan_for_model, InferenceError,
-        InferenceWorker, RuntimeDecodePolicy, WarmupPlan,
+        set_gpu_acceleration, uses_whisper_pipeline, warmup_faster_whisper_model,
+        warmup_plan_for_model, AsrModel, InferenceError, InferenceWorker, RuntimeDecodePolicy,
+        StepDownKind, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
@@ -49,7 +51,8 @@ use crate::{
     settings::{
         apply_profile_defaults, normalize_hotkey_bindings, normalize_pro_settings, resolve_profile,
         AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
-        DomainPackId, FormatProfile, InsertPath, PolishProfile, SettingsError, SettingsStore,
+        DomainPackId, FormatProfile, GpuAcceleration, InsertPath, PolishProfile, SettingsError,
+        SettingsStore,
         VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
     },
     snippet::{
@@ -280,8 +283,31 @@ pub fn announce_store_resets(app: &AppHandle) {
     });
 }
 
+/// Copy for the once-per-session GPU step-down pill (plan 019). A Large
+/// Turbo dictation on the processor can take ~10 s, so say why, and point at
+/// Small, which is fast there.
+fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
+    let turbo = model_id.contains("large-v3-turbo");
+    match kind {
+        StepDownKind::Preparing => (
+            "Getting your graphics card ready",
+            "One-time setup, up to a minute. Until then dictation runs on your processor."
+                .to_string(),
+        ),
+        StepDownKind::Unavailable | StepDownKind::Fault => (
+            "Ran on your processor this time",
+            if turbo {
+                "Your graphics card wasn't available, so this took longer. Small is much faster on the processor; switch in Models."
+            } else {
+                "Your graphics card wasn't available, so this one took a little longer."
+            }
+            .to_string(),
+        ),
+    }
+}
+
 /// Cooldown between repeats of the same recurring pill warning (mic guard,
-/// CPU fallback, poor audio) so a persistent condition doesn't nag on every
+/// poor audio) so a persistent condition doesn't nag on every
 /// single dictation.
 const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
 
@@ -1312,11 +1338,12 @@ pub struct VoiceWaveController {
     // Arc + std::sync::Mutex (not tokio) so the fire-and-forget guard task can
     // own a clone without borrowing the controller.
     mic_guard_last_warned_at: Arc<StdMutex<Option<Instant>>>,
-    backend_notice_last_at: Arc<StdMutex<Option<Instant>>>,
     poor_audio_notice_last_at: Arc<StdMutex<Option<Instant>>>,
     // Bluetooth hands-free profiles are a device property, not a transient
     // condition — one heads-up per app session is enough.
     mic_profile_notice_sent: AtomicBool,
+    // At most one GPU step-down pill per app session (plan 019).
+    gpu_notice_sent: AtomicBool,
 }
 
 impl VoiceWaveController {
@@ -1379,20 +1406,21 @@ impl VoiceWaveController {
         // Older builds' startup prewarm downloaded the active model without
         // registering it. Dictation now requires a registered model, so adopt
         // any complete cache instead of sending upgraders back through setup.
-        for item in model_manager.list_catalog() {
-            if model_manager.get_installed(&item.model_id).is_some() {
+        for model_id in model_manager.catalog_model_ids() {
+            if model_manager.get_installed(&model_id).is_some() {
                 continue;
             }
-            let Some(runtime_model) = faster_whisper_runtime_model_id(&item.model_id) else {
+            let Some(runtime_model) = faster_whisper_runtime_model_id(&model_id) else {
                 continue;
             };
             let cache_dir = faster_whisper_cache_hint(runtime_model);
             if cache_dir.exists() {
                 // Incomplete caches fail verification and stay unregistered.
                 let _ = model_manager
-                    .install_faster_whisper_model(&item.model_id, &cache_dir.to_string_lossy());
+                    .install_faster_whisper_model(&model_id, &cache_dir.to_string_lossy());
             }
         }
+        set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
         let dictionary_manager = DictionaryManager::new()?;
         let snippet_manager = SnippetManager::new()?;
         let diagnostics_manager = DiagnosticsManager::new()?;
@@ -1445,9 +1473,9 @@ impl VoiceWaveController {
             decode_policy: Mutex::new(RuntimeDecodePolicy::default()),
             correction_session: Mutex::new(None),
             mic_guard_last_warned_at: Arc::new(StdMutex::new(None)),
-            backend_notice_last_at: Arc::new(StdMutex::new(None)),
             poor_audio_notice_last_at: Arc::new(StdMutex::new(None)),
             mic_profile_notice_sent: AtomicBool::new(false),
+            gpu_notice_sent: AtomicBool::new(false),
         })
     }
 
@@ -1483,6 +1511,8 @@ impl VoiceWaveController {
             toggle: settings.toggle_hotkey.clone(),
             push_to_talk: settings.push_to_talk_hotkey.clone(),
         })?;
+        drop(hotkey_manager);
+        set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
 
         if is_faster_whisper_model(&settings.active_model) {
             release_idle_asr_workers();
@@ -1497,21 +1527,48 @@ impl VoiceWaveController {
     }
 
     /// Spawn the speech worker and load an installed whisper.cpp model in the
-    /// background, so the next dictation decodes warm. Fire-and-forget.
+    /// background (or run its one-time GPU qualification), so the next
+    /// dictation decodes warm. Fire-and-forget.
     async fn spawn_asr_worker_prewarm(&self, model_id: &str) {
-        let model_path = {
-            let manager = self.model_manager.lock().await;
-            manager
-                .get_installed(model_id)
-                .map(|row| PathBuf::from(&row.file_path))
+        let Some(model) = self.installed_asr_model(model_id).await else {
+            return;
         };
-        if let Some(path) = model_path {
-            tauri::async_runtime::spawn(async move {
-                if let Err(err) = prewarm_asr_worker(path).await {
-                    eprintln!("voicewave: speech worker prewarm failed: {err}");
-                }
-            });
-        }
+        let baseline = self.fw_baseline(model_id).await;
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = prewarm_asr_worker(model, baseline).await {
+                eprintln!("voicewave: speech worker prewarm failed: {err}");
+            }
+        });
+    }
+
+    /// An installed whisper.cpp model as the speech workers see it.
+    async fn installed_asr_model(&self, model_id: &str) -> Option<AsrModel> {
+        let manager = self.model_manager.lock().await;
+        manager.get_installed(model_id).map(|row| AsrModel {
+            id: row.model_id,
+            path: PathBuf::from(row.file_path),
+            sha256: row.sha256,
+        })
+    }
+
+    /// The installed faster-whisper model a whisper.cpp model uses as its CPU
+    /// rung (faster than whisper.cpp on the CPU for short clips): its
+    /// same-size counterpart, else any installed one, Small first.
+    async fn installed_fw_fallback(&self, model_id: &str) -> Option<String> {
+        let manager = self.model_manager.lock().await;
+        faster_whisper_counterpart(model_id)
+            .into_iter()
+            .chain(["fw-small.en", "fw-large-v3-turbo"])
+            .find(|fw_model| manager.get_installed(fw_model).is_some())
+            .map(str::to_string)
+    }
+
+    /// Runtime id of that fallback: qualification must beat it.
+    async fn fw_baseline(&self, model_id: &str) -> Option<String> {
+        self.installed_fw_fallback(model_id)
+            .await
+            .and_then(|fw_model| faster_whisper_runtime_model_id(&fw_model))
+            .map(str::to_string)
     }
 
     /// Pre-load the active model into its runtime cache at app startup so the
@@ -1551,16 +1608,11 @@ impl VoiceWaveController {
                 }
             }
             WarmupPlan::WhisperCpp => {
-                let model_path = {
-                    let manager = self.model_manager.lock().await;
-                    manager
-                        .get_installed(&active_model)
-                        .map(|row| PathBuf::from(&row.file_path))
-                };
                 // Awaited, so polish prewarm (run after this) never loads a
                 // second large model at the same time.
-                if let Some(path) = model_path {
-                    match prewarm_asr_worker(path).await {
+                if let Some(model) = self.installed_asr_model(&active_model).await {
+                    let baseline = self.fw_baseline(&active_model).await;
+                    match prewarm_asr_worker(model, baseline).await {
                         Ok(()) => eprintln!("voicewave: cold-start warmup complete for {active_model}"),
                         Err(err) => eprintln!(
                             "voicewave: cold-start speech worker warmup failed for {active_model}: {err}"
@@ -1595,6 +1647,8 @@ impl VoiceWaveController {
         if !crate::inference::llm_polish::is_polish_model_present() {
             return;
         }
+        // Never alongside a GPU qualification: two large model loads at once.
+        let _heavy = crate::inference::HEAVY_LOAD.lock().await;
 
         let profile_name = profile.as_str();
         match crate::inference::llm_polish::polish_text_for_profile(
@@ -2183,11 +2237,16 @@ impl VoiceWaveController {
     ) -> Result<DiagnosticsExportResult, ControllerError> {
         let settings = self.settings.lock().await.clone();
         let watchdog_recovery_count = self.watchdog_recovery_count.load(Ordering::Relaxed);
+        let speech_engine =
+            tokio::task::spawn_blocking(crate::inference::gpu_select::diagnostics_snapshot)
+                .await
+                .unwrap_or_default();
         let result = self.diagnostics_manager.lock().await.export_bundle(
             settings.diagnostics_opt_in,
             env!("CARGO_PKG_VERSION"),
             &settings,
             watchdog_recovery_count,
+            speech_engine,
         )?;
         Ok(result)
     }
@@ -2596,7 +2655,8 @@ impl VoiceWaveController {
     }
 
     pub async fn list_model_catalog(&self) -> Vec<ModelCatalogItem> {
-        self.model_manager.lock().await.list_catalog()
+        let hardware = hardware_profile_async().await;
+        self.model_manager.lock().await.list_catalog(&hardware)
     }
 
     pub async fn list_installed_models(&self) -> Vec<InstalledModel> {
@@ -4379,16 +4439,11 @@ impl VoiceWaveController {
             note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
         }
         if mode == DictationMode::Microphone {
-            if decode_telemetry.backend_fallback
-                && take_notice_cooldown(&self.backend_notice_last_at)
-            {
-                emit_pill_notice(
-                    &app,
-                    "warning",
-                    "Ran on CPU this time",
-                    Some("GPU wasn't available, so this dictation was slower.".to_string()),
-                    5_500,
-                );
+            if let Some(kind) = decode_telemetry.asr_step_down_kind.filter(|_| {
+                !self.gpu_notice_sent.swap(true, Ordering::Relaxed)
+            }) {
+                let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
+                emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
             } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
             {
                 emit_pill_notice(
@@ -5468,28 +5523,21 @@ impl VoiceWaveController {
                         hint,
                     ))
                 } else {
-                    let model_path = self.resolve_active_model_path(model_id).await?;
-                    // The installed faster-whisper counterpart is the CPU rung
-                    // (faster than whisper.cpp on CPU for short clips).
-                    let fw_fallback = match faster_whisper_counterpart(model_id) {
-                        Some(fw_model)
-                            if self
-                                .model_manager
-                                .lock()
-                                .await
-                                .get_installed(fw_model)
-                                .is_some() =>
-                        {
-                            Some(fw_model.to_string())
-                        }
-                        _ => None,
-                    };
+                    let path = self.resolve_active_model_path(model_id).await?;
+                    let sha256 = self
+                        .installed_asr_model(model_id)
+                        .await
+                        .map(|model| model.sha256)
+                        .unwrap_or_default();
                     Ok(InferenceWorker::new_asr_worker(
-                        model_id.to_string(),
-                        model_path,
+                        AsrModel {
+                            id: model_id.to_string(),
+                            path,
+                            sha256,
+                        },
                         decode_mode,
                         hint,
-                        fw_fallback,
+                        self.installed_fw_fallback(model_id).await,
                     ))
                 }
             }
@@ -5542,6 +5590,9 @@ fn percentile_index(len: usize, percentile: f32) -> usize {
     let idx = ((len as f32 - 1.0) * percentile.clamp(0.0, 1.0)).round() as usize;
     idx.min(len - 1)
 }
+
+mod gpu_engine;
+pub use gpu_engine::SpeechEngineStatus;
 
 #[cfg(test)]
 mod tests {

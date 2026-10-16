@@ -116,6 +116,15 @@ static POLISH_WORKER: OnceLock<Mutex<Option<PolishWorkerProcess>>> = OnceLock::n
 /// SEPARATE from `WORKER_REQUEST_GATE`. Serializes polish requests only.
 static POLISH_GATE: Mutex<()> = Mutex::new(());
 
+/// The polish runtime's llama wheel is built for AVX2 (plan 019 "CPU
+/// eligibility"), so AI polish is off on older processors.
+pub fn polish_supported() -> bool {
+    super::gpu_select::cpu_support() == super::gpu_select::CpuSupport::Full
+}
+
+pub const POLISH_UNSUPPORTED_MESSAGE: &str =
+    "AI polish needs a processor with AVX2 support, which this PC doesn't have.";
+
 /// Best-effort polish of a raw transcript with the default (Standard)
 /// profile prompt. See [`polish_text_for_profile`].
 pub async fn polish_text(raw: String) -> Result<Option<String>, InferenceError> {
@@ -132,6 +141,9 @@ pub async fn polish_text_for_profile(
     raw: String,
     profile: String,
 ) -> Result<Option<String>, InferenceError> {
+    if !polish_supported() {
+        return Ok(None);
+    }
     let result = tokio::task::spawn_blocking(move || polish_text_blocking(raw, profile))
         .await
         .map_err(|err| InferenceError::RuntimeJoin(format!("polish worker join failure: {err}")))?;

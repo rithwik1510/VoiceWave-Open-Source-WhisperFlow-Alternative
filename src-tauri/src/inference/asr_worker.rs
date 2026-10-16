@@ -1,5 +1,6 @@
-//! whisper.cpp speech workers (plan 019): process transport, deadlines, and
-//! the GPU/CPU rung bookkeeping behind `InferenceBackend::AsrWorker`.
+//! whisper.cpp speech workers (plan 019): process transport, deadlines, the
+//! GPU/CPU rung bookkeeping behind `InferenceBackend::AsrWorker`, and the
+//! GPU qualification (the worker's first start with the user's real model).
 //!
 //! Two executables are built from `src-tauri/windows/asr-worker/main.cpp`
 //! (the JSON-lines protocol is documented in its header):
@@ -13,27 +14,31 @@
 //! starts; the next use respawns it.
 
 use super::faster_whisper::{
-    encode_pcm16_base64, kill_process_by_pid, FasterWhisperDecodeOutput,
-    FasterWhisperRequestOverrides,
+    encode_pcm16_base64, kill_process_by_pid, transcribe_samples_with_overrides,
+    FasterWhisperDecodeOutput, FasterWhisperRequestOverrides,
+};
+use super::gpu_select::{
+    self, cpu_support, hardware_profile, CpuSupport, GpuDevice, QualOutcome, QualificationRecord,
 };
 use super::InferenceError;
 use crate::settings::DecodeMode;
-use directories::ProjectDirs;
 use flate2::{write::ZlibEncoder, Compression};
+use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, RecvTimeoutError},
-    Arc, Mutex, MutexGuard, TryLockError,
+    Arc, Mutex, MutexGuard, OnceLock, TryLockError,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "windows")]
@@ -43,9 +48,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SPAWN_READY_DEADLINE: Duration = Duration::from_secs(10);
 const LIST_DEVICES_DEADLINE: Duration = Duration::from_secs(5);
 const LOAD_GPU_DEADLINE: Duration = Duration::from_secs(30);
-/// First GPU load on a machine (and after a driver or worker update) waits
-/// for the driver to compile ggml's shaders: 25-41 s measured on an RTX 3060.
-/// Missing this deadline is "retry later", never a GPU failure.
+/// GPU loads off the dictation path (qualification, prewarm). The first load
+/// on a machine, and after a driver or worker update, waits for the driver to
+/// compile ggml's shaders: 25-41 s measured on an RTX 3060. Missing it is
+/// "retry later", never a GPU failure.
 const LOAD_GPU_FIRST_USE_DEADLINE: Duration = Duration::from_secs(120);
 const LOAD_CPU_DEADLINE: Duration = Duration::from_secs(20);
 /// Upper bound on waiting for a killed worker to actually exit.
@@ -53,9 +59,31 @@ const REAP_WAIT: Duration = Duration::from_secs(5);
 /// How often a waiting request checks the user's cancel token.
 const POLL_SLICE: Duration = Duration::from_millis(50);
 const STDERR_TAIL_LINES: usize = 40;
+/// Longest failure reason kept for logs and diagnostics.
+const MAX_REASON_CHARS: usize = 320;
 /// Backend failures in one session after which the GPU is off until restart.
 const SESSION_GPU_FAILURE_LIMIT: u32 = 2;
-const GPU_READY_MARKER: &str = "asr-gpu-ready.txt";
+
+// Qualification (plan 019): pass bars for a discrete GPU, warm decodes.
+const QUALIFY_SHORT_MAX_MS: u64 = 1_000;
+const QUALIFY_LONG_MAX_MS: u64 = 1_500;
+/// Word error rate above which a clip's transcript counts as wrong. A broken
+/// GPU path produces empty, repeated or garbage text, far past this.
+const QUALIFY_MAX_WER: f32 = 0.2;
+const QUALIFY_BEAM: u32 = 5;
+/// Bundled clips (LibriSpeech test-clean, CC BY 4.0; see
+/// windows/asr-worker/qualify/ATTRIBUTION.txt) and their reference text.
+const QUALIFY_CLIPS: [(&str, &str); 2] = [
+    ("short.wav", "now let's dust the furniture and pictures"),
+    (
+        "long.wav",
+        "the night was clear starlit and splendid the tempest had passed away and the sweet \
+         influences of the evening had restored life peace and security everywhere",
+    ),
+];
+/// Bump when the clips, bars or decode settings above change: part of the
+/// qualification cache key.
+const QUALIFY_CONFIG_VERSION: u32 = 1;
 
 fn transcribe_deadline(rung: Rung, audio_ms: u64) -> Duration {
     match rung {
@@ -64,18 +92,17 @@ fn transcribe_deadline(rung: Rung, audio_ms: u64) -> Duration {
     }
 }
 
-fn load_deadline(rung: Rung, first_gpu_use: bool) -> Duration {
-    match (rung, first_gpu_use) {
-        (Rung::Gpu, true) => LOAD_GPU_FIRST_USE_DEADLINE,
-        (Rung::Gpu, false) => LOAD_GPU_DEADLINE,
-        (Rung::Cpu, _) => LOAD_CPU_DEADLINE,
+fn load_deadline(rung: Rung) -> Duration {
+    match rung {
+        Rung::Gpu => LOAD_GPU_DEADLINE,
+        Rung::Cpu => LOAD_CPU_DEADLINE,
     }
 }
 
-/// Worst case for one decode on `rung`: device pick, spawn (or waiting for a
-/// load already in flight), load, primary + confidence-retry decodes, reaps.
-/// Only a backstop for the controller's outer timeout; the per-phase
-/// deadlines above always fire first.
+/// Worst case for one decode on `rung`: spawn (or waiting for a load already
+/// in flight), load, primary + confidence-retry decodes, reaps. Only a
+/// backstop for the controller's outer timeout; the per-phase deadlines above
+/// always fire first.
 pub(crate) fn rung_budget(rung: Rung, audio_ms: u64) -> Duration {
     let setup = match rung {
         Rung::Gpu => LIST_DEVICES_DEADLINE + SPAWN_READY_DEADLINE + LOAD_GPU_DEADLINE,
@@ -85,7 +112,8 @@ pub(crate) fn rung_budget(rung: Rung, audio_ms: u64) -> Duration {
 }
 
 /// Which worker a decode runs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Rung {
     Gpu,
     Cpu,
@@ -118,6 +146,42 @@ impl Rung {
         match self {
             Rung::Gpu => "vulkan",
             Rung::Cpu => "cpu",
+        }
+    }
+}
+
+/// A GGML model as the workers see it. `sha256` (pinned and verified at
+/// download) is part of the qualification cache key.
+#[derive(Debug, Clone)]
+pub struct AsrModel {
+    pub id: String,
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+/// Why a dictation did not decode on the GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepDownKind {
+    /// The one-time GPU check (driver shader compile + test clips) is running.
+    Preparing,
+    /// GPU off for now: failed or slow qualification, per-driver disable,
+    /// repeated failures this session.
+    Unavailable,
+    /// The GPU attempt of this dictation failed; the CPU rung retried it.
+    Fault,
+}
+
+#[derive(Debug, Clone)]
+pub struct StepDown {
+    pub kind: StepDownKind,
+    pub reason: String,
+}
+
+impl StepDown {
+    fn new(kind: StepDownKind, reason: impl AsRef<str>) -> Self {
+        Self {
+            kind,
+            reason: trim_reason(reason.as_ref()),
         }
     }
 }
@@ -162,7 +226,7 @@ impl fmt::Display for ErrorClass {
 /// `InferenceError` at the module boundary.
 enum Fault {
     Cancelled,
-    /// The GPU worker is still preparing (first-use load in flight). The
+    /// The worker is busy loading (prewarm or qualification in flight). The
     /// dictation steps down; not a failure.
     NotReady(String),
     Worker {
@@ -190,9 +254,23 @@ impl From<Fault> for InferenceError {
                 model_id: "speech-worker".to_string(),
                 reason,
             },
-            Fault::Worker { class, reason, .. } => InferenceError::AsrWorker { class, reason },
+            Fault::Worker { class, reason, .. } => InferenceError::AsrWorker {
+                class,
+                reason: trim_reason(&reason),
+            },
         }
     }
+}
+
+/// Keep failure text (which can carry a worker's stderr) log-sized.
+pub(crate) fn trim_reason(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.chars().count() <= MAX_REASON_CHARS {
+        return reason.to_string();
+    }
+    let mut trimmed: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
+    trimmed.push('…');
+    trimmed
 }
 
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
@@ -245,6 +323,8 @@ impl WorkerProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// The last few stderr lines, each cut short: enough to classify a crash
+    /// without dragging a log into the step-down reason.
     fn stderr_text(&self) -> String {
         let Ok(tail) = self.stderr_tail.lock() else {
             return String::new();
@@ -252,7 +332,7 @@ impl WorkerProcess {
         let skip = tail.len().saturating_sub(3);
         tail.iter()
             .skip(skip)
-            .map(String::as_str)
+            .map(|line| line.chars().take(120).collect::<String>())
             .collect::<Vec<_>>()
             .join(" | ")
     }
@@ -371,36 +451,39 @@ impl WorkerProcess {
     }
 }
 
+/// What the worker reported running the last load or decode.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningOn {
+    pub device: Rung,
+    /// GPU name for `Gpu`; `None` for the processor.
+    pub name: Option<String>,
+}
+
 static GPU_SLOT: Mutex<Option<WorkerProcess>> = Mutex::new(None);
 static CPU_SLOT: Mutex<Option<WorkerProcess>> = Mutex::new(None);
 /// Pids of every live worker, so app exit can reach a worker whose slot is
 /// held by an in-flight request.
 static LIVE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Settings → Dictation → GPU acceleration (Auto = true, Off = false).
+static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
 static SESSION: Mutex<Session> = Mutex::new(Session {
-    placement: None,
     gpu_failures: 0,
+    qualifying: None,
+    retry_next_session: Vec::new(),
+    last_report: None,
 });
 
 struct Session {
-    /// Decided once per app session from the vk worker's device list.
-    placement: Option<Placement>,
     /// Backend failures of the GPU rung this session.
     gpu_failures: u32,
-}
-
-#[derive(Debug, Clone)]
-enum Placement {
-    Gpu(GpuDevice),
-    Cpu,
-}
-
-#[derive(Debug, Clone)]
-struct GpuDevice {
-    name: String,
-    discrete: bool,
-    luid: Option<String>,
-    ggml_index: u64,
-    driver_version: u64,
+    /// Cache key of the qualification running now.
+    qualifying: Option<String>,
+    /// Keys whose qualification was correct-but-slow or hit a transient
+    /// error: CPU for the rest of this session, retried on the next launch.
+    retry_next_session: Vec<(String, String)>,
+    /// Model path + what the worker reported for its last load or decode.
+    last_report: Option<(PathBuf, RunningOn)>,
 }
 
 fn slot(rung: Rung) -> &'static Mutex<Option<WorkerProcess>> {
@@ -464,15 +547,28 @@ fn ensure_spawned(guard: &mut Option<WorkerProcess>, rung: Rung) -> Result<(), F
     Ok(())
 }
 
+fn worker_command(exe: &Path) -> Command {
+    let mut command = Command::new(exe);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 fn spawn(rung: Rung) -> Result<WorkerProcess, Fault> {
+    // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
+    // it would crash on.
+    if cpu_support() != CpuSupport::Full {
+        return Err(Fault::worker(
+            ErrorClass::Backend,
+            "this processor lacks AVX2, which this speech model needs; choose a model in Models",
+        ));
+    }
     let exe = resolve_worker_exe(rung)?;
-    let mut command = Command::new(&exe);
+    let mut command = worker_command(&exe);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command.spawn().map_err(|err| {
         Fault::worker(
             ErrorClass::Backend,
@@ -532,189 +628,200 @@ fn spawn(rung: Rung) -> Result<WorkerProcess, Fault> {
     Ok(worker)
 }
 
-fn resolve_worker_exe(rung: Rung) -> Result<PathBuf, Fault> {
-    let relative = Path::new("asr-worker")
-        .join(rung.dir_name())
-        .join(rung.exe_name());
+/// A worker resource (`asr-worker/<relative>`): the bundled copy, or the dev
+/// tree (`windows/asr-worker/<dev_relative>`).
+fn resolve_resource(relative: &Path, dev_relative: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
     {
-        candidates.push(exe_dir.join(&relative));
-        candidates.push(exe_dir.join("resources").join(&relative));
+        candidates.push(exe_dir.join("asr-worker").join(relative));
+        candidates.push(exe_dir.join("resources").join("asr-worker").join(relative));
     }
-    // Dev builds: the output of scripts/asr-worker/build-asr-worker.ps1.
     candidates.push(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("windows")
             .join("asr-worker")
-            .join("bin")
-            .join(rung.dir_name())
-            .join(rung.exe_name()),
+            .join(dev_relative),
     );
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .ok_or_else(|| {
-            Fault::worker(
-                ErrorClass::Backend,
-                format!("{} is missing from this install", rung.exe_name()),
-            )
-        })
+    candidates.into_iter().find(|path| path.exists())
 }
 
-/// Where the next dictation decodes first, plus a step-down reason when the
-/// session is locked to CPU. Phase 2 plugs CPU eligibility, qualification
-/// and the persistent per-driver disable in here.
-fn primary_rung_blocking() -> (Rung, Option<String>) {
-    let mut session = lock(&SESSION);
-    if session.gpu_failures >= SESSION_GPU_FAILURE_LIMIT {
+fn resolve_worker_exe(rung: Rung) -> Result<PathBuf, Fault> {
+    let relative = Path::new(rung.dir_name()).join(rung.exe_name());
+    // Dev builds: the output of scripts/asr-worker/build-asr-worker.ps1.
+    resolve_resource(&relative, &Path::new("bin").join(&relative)).ok_or_else(|| {
+        Fault::worker(
+            ErrorClass::Backend,
+            format!("{} is missing from this install", rung.exe_name()),
+        )
+    })
+}
+
+/// `voicewave-asr-vk.exe --list-devices`: the GPUs Vulkan reports, without a
+/// model (~0.3 s). Killed and reaped after the 5 s deadline.
+pub(crate) fn list_devices() -> Result<Vec<Value>, String> {
+    let exe = resolve_worker_exe(Rung::Gpu).map_err(|fault| InferenceError::from(fault).to_string())?;
+    let mut child = worker_command(&exe)
+        .arg("--list-devices")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to start {}: {err}", exe.display()))?;
+    let mut stdout = child.stdout.take().ok_or("list-devices stdout unavailable")?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        let _ = tx.send(text);
+    });
+    let output = rx.recv_timeout(LIST_DEVICES_DEADLINE);
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = output.map_err(|_| "list-devices missed its 5 s deadline".to_string())?;
+    let reply: Value = serde_json::from_str(text.trim())
+        .map_err(|_| format!("unparseable device list: {}", trim_reason(&text)))?;
+    if reply.get("ok") != Some(&Value::Bool(true)) {
+        return Err(format!("device list failed: {}", trim_reason(&text)));
+    }
+    Ok(reply["devices"].as_array().cloned().unwrap_or_default())
+}
+
+/// Worker build fingerprint for the qualification cache and the per-driver
+/// disable: a hash of the Vulkan worker EXE (an app update that ships the
+/// same worker keeps its cached results). Hashed once per session.
+pub(crate) fn worker_fingerprint() -> String {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT
+        .get_or_init(|| {
+            let Ok(exe) = resolve_worker_exe(Rung::Gpu) else {
+                return "missing".to_string();
+            };
+            let Ok(mut file) = std::fs::File::open(&exe) else {
+                return "unreadable".to_string();
+            };
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0_u8; 1 << 20];
+            loop {
+                match file.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => hasher.update(&buffer[..read]),
+                    Err(_) => return "unreadable".to_string(),
+                }
+            }
+            hasher
+                .finalize()
+                .iter()
+                .take(8)
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+        .clone()
+}
+
+/// Settings → Dictation → GPU acceleration. Off drops the GPU worker (and
+/// the VRAM its model holds) when it is idle.
+pub fn set_gpu_acceleration(enabled: bool) {
+    let was_enabled = GPU_ENABLED.swap(enabled, Ordering::Relaxed);
+    if was_enabled && !enabled {
+        if let Ok(mut guard) = GPU_SLOT.try_lock() {
+            *guard = None;
+        }
+    }
+}
+
+fn qualification_key(device: &GpuDevice, model: &AsrModel) -> String {
+    format!(
+        "{}|driver {}|{} {}|worker {}|q{QUALIFY_CONFIG_VERSION} beam{QUALIFY_BEAM} fa{}",
+        device.identity(),
+        device.driver_version,
+        model.id,
+        model.sha256,
+        worker_fingerprint(),
+        u8::from(device.discrete)
+    )
+}
+
+enum GpuReadiness {
+    Ready,
+    /// Not qualified yet (or qualifying now).
+    Preparing,
+    Unavailable(String),
+}
+
+fn gpu_readiness(key: &str) -> GpuReadiness {
+    {
+        let session = lock(&SESSION);
+        if session.qualifying.as_deref() == Some(key) {
+            return GpuReadiness::Preparing;
+        }
+        if let Some((_, reason)) = session
+            .retry_next_session
+            .iter()
+            .find(|(retry_key, _)| retry_key == key)
+        {
+            return GpuReadiness::Unavailable(format!("gpu-retry-next-session: {reason}"));
+        }
+    }
+    match gpu_select::cached_qualification(key) {
+        Some(QualOutcome::Passed) => GpuReadiness::Ready,
+        Some(_) => GpuReadiness::Unavailable(
+            "gpu-qualification-failed: this graphics card failed the one-time check".to_string(),
+        ),
+        None => GpuReadiness::Preparing,
+    }
+}
+
+/// Where the next dictation decodes first, plus why it is not the GPU when
+/// it is not and the user didn't choose that (GPU acceleration Off and
+/// machines without a qualifying GPU carry no step-down).
+fn primary_rung_blocking(model: &AsrModel) -> (Rung, Option<StepDown>) {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return (Rung::Cpu, None);
+    }
+    let Some(device) = hardware_profile().gpu else {
+        return (Rung::Cpu, None);
+    };
+    if lock(&SESSION).gpu_failures >= SESSION_GPU_FAILURE_LIMIT {
         return (
             Rung::Cpu,
-            Some("session-cpu-lock: repeated GPU failures this session".to_string()),
+            Some(StepDown::new(
+                StepDownKind::Unavailable,
+                "session-cpu-lock: repeated GPU failures this session",
+            )),
         );
     }
-    let placement = session.placement.get_or_insert_with(choose_placement);
-    match placement {
-        Placement::Gpu(_) => (Rung::Gpu, None),
-        Placement::Cpu => (Rung::Cpu, None),
+    if gpu_select::driver_disabled(&device) {
+        return (
+            Rung::Cpu,
+            Some(StepDown::new(
+                StepDownKind::Unavailable,
+                "driver-disabled: GPU failures in two sessions on this driver",
+            )),
+        );
     }
-}
-
-/// Phase 1 device rule: the first discrete GPU ggml can use, else CPU.
-/// `VOICEWAVE_ASR_DEVICE=cpu|gpu` overrides for testing (`gpu` also accepts
-/// an integrated GPU).
-fn choose_placement() -> Placement {
-    let preference = std::env::var("VOICEWAVE_ASR_DEVICE")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if preference == "cpu" {
-        return Placement::Cpu;
-    }
-    let any_gpu = preference == "gpu";
-    let mut guard = lock(&GPU_SLOT);
-    let listed = ensure_spawned(&mut guard, Rung::Gpu).and_then(|_| {
-        with_worker(&mut guard, |worker| {
-            worker.request(
-                json!({"command": "list_devices"}),
-                LIST_DEVICES_DEADLINE,
-                None,
-            )
-        })
-    });
-    let reply = match listed {
-        Ok(reply) => reply,
-        Err(fault) => {
-            *guard = None;
-            eprintln!(
-                "voicewave: speech worker device list unavailable, using CPU: {}",
-                InferenceError::from(fault)
-            );
-            return Placement::Cpu;
-        }
-    };
-    let devices = reply
-        .get("devices")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let pick = |want: &str| {
-        devices.iter().find_map(|device| {
-            let ggml_index = device.get("ggmlIndex").and_then(Value::as_u64)?;
-            (device.get("type").and_then(Value::as_str) == Some(want)).then(|| GpuDevice {
-                name: device["name"].as_str().unwrap_or("GPU").to_string(),
-                discrete: want == "discrete",
-                luid: device
-                    .get("luid")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                ggml_index,
-                driver_version: device
-                    .get("driverVersion")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            })
-        })
-    };
-    let chosen = pick("discrete").or_else(|| any_gpu.then(|| pick("integrated")).flatten());
-    match chosen {
-        Some(device) => {
-            eprintln!(
-                "voicewave: speech worker using GPU '{}' (luid {:?}, ggml {})",
-                device.name, device.luid, device.ggml_index
-            );
-            Placement::Gpu(device)
-        }
-        None => {
-            // Nothing to decode on: don't keep the vk worker around.
-            *guard = None;
-            eprintln!("voicewave: no usable discrete GPU; speech worker runs on CPU");
-            Placement::Cpu
+    match gpu_readiness(&qualification_key(&device, model)) {
+        GpuReadiness::Ready => (Rung::Gpu, None),
+        GpuReadiness::Preparing => (
+            Rung::Cpu,
+            Some(StepDown::new(
+                StepDownKind::Preparing,
+                "gpu-preparing: one-time graphics card check",
+            )),
+        ),
+        GpuReadiness::Unavailable(reason) => {
+            (Rung::Cpu, Some(StepDown::new(StepDownKind::Unavailable, reason)))
         }
     }
-}
-
-fn gpu_device() -> Option<GpuDevice> {
-    match &lock(&SESSION).placement {
-        Some(Placement::Gpu(device)) => Some(device.clone()),
-        _ => None,
-    }
-}
-
-/// Identity of the driver shader cache a GPU load would hit: worker build,
-/// device, driver version. Phase 2's qualification cache replaces this.
-fn gpu_cache_key(device: &GpuDevice) -> Option<String> {
-    let exe = resolve_worker_exe(Rung::Gpu).ok()?;
-    let meta = std::fs::metadata(exe).ok()?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|age| age.as_secs())
-        .unwrap_or(0);
-    Some(format!(
-        "{}:{modified}:{}:{}",
-        meta.len(),
-        device.luid.as_deref().unwrap_or("-"),
-        device.driver_version
-    ))
-}
-
-fn gpu_ready_marker_path() -> Option<PathBuf> {
-    ProjectDirs::from("com", "voicewave", "localcore")
-        .map(|dirs| dirs.data_dir().join(GPU_READY_MARKER))
-}
-
-/// Whether a GPU load has succeeded before with this worker, device and
-/// driver, i.e. the driver's shader cache is warm.
-fn gpu_shaders_warm() -> bool {
-    let Some(key) = gpu_device().as_ref().and_then(gpu_cache_key) else {
-        return false;
-    };
-    gpu_ready_marker_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_some_and(|stored| stored.trim() == key)
-}
-
-fn mark_gpu_shaders_warm() {
-    let (Some(key), Some(path)) = (
-        gpu_device().as_ref().and_then(gpu_cache_key),
-        gpu_ready_marker_path(),
-    ) else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, key);
 }
 
 /// Session bookkeeping for a failed GPU operation (plan 019 failure table).
-/// Only backend faults count; a first-use load that merely ran out of time
-/// (driver still compiling shaders) is retried later. Phase 2 also records
-/// backend failures per driver across sessions here.
-fn note_gpu_fault(fault: &Fault, first_use_load: bool) {
+/// Only backend faults count; a load off the dictation path that merely ran
+/// out of time (driver compiling shaders) is retried later. Counted faults
+/// also feed the per-driver disable.
+fn note_gpu_fault(fault: &Fault, background_load: bool) {
     let Fault::Worker {
         class,
         reason,
@@ -724,18 +831,40 @@ fn note_gpu_fault(fault: &Fault, first_use_load: bool) {
         return;
     };
     if *class == ErrorClass::Protocol {
-        eprintln!("voicewave: speech worker protocol error (worker bug): {reason}");
+        eprintln!("voicewave: speech worker protocol error (worker bug): {}", trim_reason(reason));
     }
-    if *class != ErrorClass::Backend || (first_use_load && *timed_out) {
+    if *class != ErrorClass::Backend || (background_load && *timed_out) {
         return;
     }
-    let mut session = lock(&SESSION);
-    session.gpu_failures += 1;
-    if session.gpu_failures == SESSION_GPU_FAILURE_LIMIT {
-        eprintln!(
-            "voicewave: GPU speech worker failed twice; using CPU for the rest of this session"
-        );
+    {
+        let mut session = lock(&SESSION);
+        session.gpu_failures += 1;
+        if session.gpu_failures == SESSION_GPU_FAILURE_LIMIT {
+            eprintln!(
+                "voicewave: GPU speech worker failed twice; using CPU for the rest of this session"
+            );
+        }
     }
+    if let Some(device) = hardware_profile().gpu {
+        if gpu_select::record_backend_failure(&device) {
+            eprintln!(
+                "voicewave: GPU failed in two sessions on driver {}; disabled for 7 days or until an update",
+                device.driver_version
+            );
+        }
+    }
+}
+
+fn note_report(model_path: &Path, reply: &Value) {
+    let device = if reply["backendUsed"].as_str() == Some("vulkan") {
+        Rung::Gpu
+    } else {
+        Rung::Cpu
+    };
+    let name = (device == Rung::Gpu)
+        .then(|| reply["deviceName"].as_str().map(str::to_string))
+        .flatten();
+    lock(&SESSION).last_report = Some((model_path.to_path_buf(), RunningOn { device, name }));
 }
 
 /// Make sure the slot's worker is alive with `model_path` loaded. Returns
@@ -761,52 +890,66 @@ fn ensure_loaded(
         "warmup": true,
     });
     if rung == Rung::Gpu {
-        let device =
-            gpu_device().ok_or_else(|| Fault::worker(ErrorClass::Backend, "no GPU selected"))?;
+        let device = hardware_profile()
+            .gpu
+            .ok_or_else(|| Fault::worker(ErrorClass::Backend, "no GPU selected"))?;
         body["device"] = json!("gpu");
         body["ggmlIndex"] = json!(device.ggml_index);
         if let Some(luid) = &device.luid {
             body["luid"] = json!(luid);
         }
+        // Flash attention on for discrete GPUs, off for integrated.
         body["flashAttention"] = json!(device.discrete);
     }
     let started = Instant::now();
-    with_worker(guard, |worker| {
+    let reply = with_worker(guard, |worker| {
         worker.loaded = None;
-        worker.request(body, deadline, None)?;
+        let reply = worker.request(body, deadline, None)?;
         worker.loaded = Some(Loaded {
             model_path: model_path.to_path_buf(),
         });
-        Ok(())
+        Ok(reply)
     })?;
-    if rung == Rung::Gpu {
-        mark_gpu_shaders_warm();
-    }
+    note_report(model_path, &reply);
     Ok((started.elapsed().as_millis() as u64, false))
 }
 
-/// Load the active model into the worker the next dictation will use. No-op
-/// when that worker is busy (a load or decode is already running).
-fn prewarm_blocking(model_path: &Path) -> Result<(), Fault> {
-    let (rung, _) = primary_rung_blocking();
+/// What a prewarm found to do.
+enum Prewarm {
+    Done,
+    /// The GPU path is not qualified for this model yet: run qualification.
+    Qualify,
+}
+
+/// Load the model into the worker the next dictation will use. No-op when
+/// that worker is busy (a load or decode is already running).
+fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
+    let (rung, step_down) = primary_rung_blocking(model);
+    if step_down.is_some_and(|step| step.kind == StepDownKind::Preparing) {
+        return Ok(Prewarm::Qualify);
+    }
     let Some(mut guard) = lock_slot(rung, Duration::ZERO) else {
-        return Ok(());
+        return Ok(Prewarm::Done);
     };
-    let first_use = rung == Rung::Gpu && !gpu_shaders_warm();
+    let deadline = match rung {
+        // Off the dictation path, and the driver's shader cache may have
+        // been reset since qualification.
+        Rung::Gpu => LOAD_GPU_FIRST_USE_DEADLINE,
+        Rung::Cpu => LOAD_CPU_DEADLINE,
+    };
     let started = Instant::now();
-    let result = ensure_loaded(&mut guard, rung, model_path, load_deadline(rung, first_use));
+    let result = ensure_loaded(&mut guard, rung, &model.path, deadline);
     match &result {
         Ok((_, false)) => eprintln!(
-            "voicewave: {} speech worker ready in {} ms{}",
+            "voicewave: {} speech worker ready in {} ms",
             rung.dir_name(),
-            started.elapsed().as_millis(),
-            if first_use { " (first GPU use)" } else { "" }
+            started.elapsed().as_millis()
         ),
         Ok((_, true)) => {}
-        Err(fault) if rung == Rung::Gpu => note_gpu_fault(fault, first_use),
+        Err(fault) if rung == Rung::Gpu => note_gpu_fault(fault, true),
         Err(_) => {}
     }
-    result.map(|_| ())
+    result.map(|_| Prewarm::Done)
 }
 
 struct TranscribeJob {
@@ -822,16 +965,9 @@ fn transcribe_blocking(
     job: TranscribeJob,
     cancel: &CancellationToken,
 ) -> Result<FasterWhisperDecodeOutput, Fault> {
-    let warm = rung == Rung::Cpu || gpu_shaders_warm();
     // A busy slot means a load is in flight (startup or dictation-start
-    // prewarm). Wait for it when it can finish within a normal load; a
-    // first-use shader compile can take a minute, so don't wait for that.
-    let wait = if warm {
-        SPAWN_READY_DEADLINE + load_deadline(rung, false)
-    } else {
-        Duration::ZERO
-    };
-    let Some(mut guard) = lock_slot(rung, wait) else {
+    // prewarm). Wait for it when it can finish within a normal load.
+    let Some(mut guard) = lock_slot(rung, SPAWN_READY_DEADLINE + load_deadline(rung)) else {
         return Err(Fault::NotReady(format!(
             "{} speech worker is still loading the model",
             rung.dir_name()
@@ -840,24 +976,8 @@ fn transcribe_blocking(
     if cancel.is_cancelled() {
         return Err(Fault::Cancelled);
     }
-    let loaded = guard
-        .as_ref()
-        .and_then(|worker| worker.loaded.as_ref())
-        .is_some_and(|loaded| loaded.model_path == model_path);
-    if !warm && !loaded {
-        // First GPU use: compile shaders in the background and let this
-        // dictation take the CPU rung.
-        drop(guard);
-        let path = model_path.to_path_buf();
-        std::thread::spawn(move || {
-            let _ = prewarm_blocking(&path);
-        });
-        return Err(Fault::NotReady(
-            "GPU is getting ready (first use)".to_string(),
-        ));
-    }
 
-    let result = ensure_loaded(&mut guard, rung, model_path, load_deadline(rung, false)).and_then(
+    let result = ensure_loaded(&mut guard, rung, model_path, load_deadline(rung)).and_then(
         |(model_init_ms, cache_hit)| {
             let mut body = json!({
                 "command": "transcribe",
@@ -872,6 +992,7 @@ fn transcribe_blocking(
             let reply = with_worker(&mut guard, |worker| {
                 worker.request(body, transcribe_deadline(rung, job.audio_ms), Some(cancel))
             })?;
+            note_report(model_path, &reply);
             let text = reply["text"]
                 .as_str()
                 .unwrap_or_default()
@@ -919,14 +1040,427 @@ fn compression_ratio(text: &str) -> f32 {
     }
 }
 
+// --------------------------------------------------------- qualification ---
+
+pub(crate) struct QualifyClip {
+    name: &'static str,
+    reference: String,
+    samples: Vec<f32>,
+}
+
+impl QualifyClip {
+    fn audio_ms(&self) -> u64 {
+        self.samples.len() as u64 * 1000 / 16_000
+    }
+}
+
+pub(crate) fn load_qualify_clips() -> Result<Vec<QualifyClip>, String> {
+    QUALIFY_CLIPS
+        .iter()
+        .map(|(name, reference)| {
+            let relative = Path::new("qualify").join(name);
+            let path = resolve_resource(&relative, &relative)
+                .ok_or_else(|| format!("qualification clip {name} is missing from this install"))?;
+            Ok(QualifyClip {
+                name,
+                reference: (*reference).to_string(),
+                samples: read_wav_16k_mono(&path)?,
+            })
+        })
+        .collect()
+}
+
+/// 16 kHz mono 16-bit PCM WAV → samples in [-1, 1].
+fn read_wav_16k_mono(path: &Path) -> Result<Vec<f32>, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let bad = || format!("{} is not 16 kHz mono 16-bit PCM", path.display());
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(bad());
+    }
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let mut at = 12;
+    let mut format_ok = false;
+    while at + 8 <= bytes.len() {
+        let size = u32_at(at + 4) as usize;
+        let body = at + 8;
+        let end = body.saturating_add(size).min(bytes.len());
+        match &bytes[at..at + 4] {
+            b"fmt " if size >= 16 => {
+                format_ok = u16_at(body) == 1
+                    && u16_at(body + 2) == 1
+                    && u32_at(body + 4) == 16_000
+                    && u16_at(body + 14) == 16;
+            }
+            b"data" if format_ok => {
+                return Ok(bytes[body..end]
+                    .chunks_exact(2)
+                    .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0)
+                    .collect());
+            }
+            _ => {}
+        }
+        at = body + size + (size & 1);
+    }
+    Err(bad())
+}
+
+fn normalize_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Word error rate of `hypothesis` against `reference` (word-level edit
+/// distance / reference length), after lowercasing and dropping punctuation.
+fn word_error_rate(reference: &str, hypothesis: &str) -> f32 {
+    let reference = normalize_words(reference);
+    let hypothesis = normalize_words(hypothesis);
+    if reference.is_empty() {
+        return if hypothesis.is_empty() { 0.0 } else { 1.0 };
+    }
+    let mut previous: Vec<usize> = (0..=hypothesis.len()).collect();
+    for (i, ref_word) in reference.iter().enumerate() {
+        let mut current = vec![i + 1; hypothesis.len() + 1];
+        for (j, hyp_word) in hypothesis.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ref_word != hyp_word);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        previous = current;
+    }
+    previous[hypothesis.len()] as f32 / reference.len() as f32
+}
+
+enum Verdict {
+    Passed,
+    Failed(String),
+    Retry(String),
+}
+
+#[derive(Default)]
+struct QualifyTimings {
+    load_ms: u64,
+    short_ms: Option<u64>,
+    long_ms: Option<u64>,
+}
+
+/// Map a worker fault during qualification to its outcome (plan 019
+/// outcomes table).
+fn fault_verdict(fault: Fault, during_load: bool) -> Verdict {
+    match fault {
+        Fault::Worker {
+            class: ErrorClass::Backend,
+            timed_out: true,
+            reason,
+        } if during_load => Verdict::Retry(format!("load ran past 120 s (driver still preparing): {reason}")),
+        Fault::Worker {
+            class: ErrorClass::Backend,
+            reason,
+            ..
+        } => Verdict::Failed(reason),
+        Fault::Worker { class, reason, .. } => Verdict::Retry(format!("{class}: {reason}")),
+        Fault::Cancelled | Fault::NotReady(_) => Verdict::Retry("interrupted".to_string()),
+    }
+}
+
+/// Load `model` on the GPU (warm-up included), then decode each clip and
+/// hold the result to the pass rules. Leaves the worker loaded.
+fn qualify_gpu_blocking(model: &AsrModel, clips: &[QualifyClip]) -> (Verdict, QualifyTimings) {
+    let mut timings = QualifyTimings::default();
+    let mut guard = lock(&GPU_SLOT);
+    // Start clean so the load (and any shader compile) is measured honestly.
+    *guard = None;
+    let started = Instant::now();
+    if let Err(fault) = ensure_loaded(&mut guard, Rung::Gpu, &model.path, LOAD_GPU_FIRST_USE_DEADLINE) {
+        return (fault_verdict(fault, true), timings);
+    }
+    timings.load_ms = started.elapsed().as_millis() as u64;
+    let never_cancel = CancellationToken::new();
+    for (index, clip) in clips.iter().enumerate() {
+        let limit = if index == 0 {
+            QUALIFY_SHORT_MAX_MS
+        } else {
+            QUALIFY_LONG_MAX_MS
+        };
+        let mut best_ms = u64::MAX;
+        // A second try for a slow first decode (GPU clocking up).
+        for _attempt in 0..2 {
+            let body = json!({
+                "command": "transcribe",
+                "audioPcm16B64": encode_pcm16_base64(&clip.samples),
+                "sampleRateHz": 16_000,
+                "beamSize": QUALIFY_BEAM,
+                "language": "en",
+            });
+            let reply = match with_worker(&mut guard, |worker| {
+                worker.request(body, transcribe_deadline(Rung::Gpu, clip.audio_ms()), Some(&never_cancel))
+            }) {
+                Ok(reply) => reply,
+                Err(fault) => return (fault_verdict(fault, false), timings),
+            };
+            let backend = reply["backendUsed"].as_str().unwrap_or("unknown");
+            if backend != "vulkan" {
+                return (
+                    Verdict::Failed(format!("GPU not actually used ({backend} ran {})", clip.name)),
+                    timings,
+                );
+            }
+            let text = reply["text"].as_str().unwrap_or_default();
+            let wer = word_error_rate(&clip.reference, text);
+            if wer > QUALIFY_MAX_WER {
+                return (
+                    Verdict::Failed(format!(
+                        "wrong transcript for {} (WER {:.0}%): \"{}\"",
+                        clip.name,
+                        wer * 100.0,
+                        text.chars().take(80).collect::<String>()
+                    )),
+                    timings,
+                );
+            }
+            best_ms = best_ms.min(reply["decodeComputeMs"].as_u64().unwrap_or(u64::MAX));
+            if best_ms < limit {
+                break;
+            }
+        }
+        if index == 0 {
+            timings.short_ms = Some(best_ms);
+        } else {
+            timings.long_ms = Some(best_ms);
+        }
+        if best_ms >= limit {
+            return (
+                Verdict::Retry(format!(
+                    "correct but slow: {} took {best_ms} ms (bar {limit} ms)",
+                    clip.name
+                )),
+                timings,
+            );
+        }
+    }
+    (Verdict::Passed, timings)
+}
+
+/// faster-whisper on the CPU for the same clips: upgraders keep it as their
+/// CPU rung, so the GPU path must beat it.
+async fn faster_whisper_baseline(runtime_model: &str, clips: &[QualifyClip]) -> Option<Vec<u64>> {
+    let cancel = CancellationToken::new();
+    let mut times = Vec::new();
+    for clip in clips {
+        let overrides = FasterWhisperRequestOverrides {
+            beam_size: Some(QUALIFY_BEAM),
+            ..Default::default()
+        };
+        match transcribe_samples_with_overrides(
+            &clip.samples,
+            runtime_model,
+            DecodeMode::Balanced,
+            overrides,
+            &cancel,
+        )
+        .await
+        {
+            Ok(output) => times.push(output.decode_compute_ms),
+            Err(err) => {
+                eprintln!("voicewave: qualification skipped the faster-whisper comparison: {err}");
+                return None;
+            }
+        }
+    }
+    Some(times)
+}
+
+fn now_utc_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|age| age.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Qualification: the worker's first start with the user's real model on
+/// the chosen GPU (plan 019). Warm-up, then two bundled test clips; passes
+/// when the GPU backend actually ran, both transcripts are right, the warm
+/// decodes beat the bars, and (with `fw_baseline`, the installed
+/// faster-whisper model's runtime id) faster-whisper on the CPU is slower.
+/// Pass and fail are cached by key; slow, out-of-memory and cold-cache
+/// timeouts mean "CPU this session, retry next session". On pass the worker
+/// stays loaded as the live dictation worker. Serialized with polish prewarm
+/// by the caller-shared `HEAVY_LOAD` lock. Returns `None` when there is
+/// nothing to qualify or another qualification is already running.
+pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<QualOutcome> {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let device = gpu_select::hardware_profile_async().await.gpu?;
+    let key = {
+        let device = device.clone();
+        let model = model.clone();
+        tokio::task::spawn_blocking(move || qualification_key(&device, &model))
+            .await
+            .ok()?
+    };
+    if let Some(cached) = gpu_select::cached_qualification(&key) {
+        return Some(cached);
+    }
+    {
+        let mut session = lock(&SESSION);
+        if session.qualifying.is_some() {
+            return None;
+        }
+        if let Some((_, _)) = session.retry_next_session.iter().find(|(k, _)| *k == key) {
+            return Some(QualOutcome::Retry);
+        }
+        session.qualifying = Some(key.clone());
+    }
+    let _heavy = super::HEAVY_LOAD.lock().await;
+    eprintln!(
+        "voicewave: qualifying '{}' on '{}' (first GPU use can take up to a minute)",
+        model.id, device.name
+    );
+
+    let clips = load_qualify_clips();
+    let (mut verdict, timings, clips) = match clips {
+        Ok(clips) => {
+            let model = model.clone();
+            match tokio::task::spawn_blocking(move || {
+                let (verdict, timings) = qualify_gpu_blocking(&model, &clips);
+                (verdict, timings, clips)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => (
+                    Verdict::Retry(format!("qualification task failed: {err}")),
+                    QualifyTimings::default(),
+                    Vec::new(),
+                ),
+            }
+        }
+        Err(err) => (Verdict::Retry(err), QualifyTimings::default(), Vec::new()),
+    };
+
+    let mut cpu_times = None;
+    if let (Verdict::Passed, Some(runtime_model)) = (&verdict, fw_baseline.as_deref()) {
+        cpu_times = faster_whisper_baseline(runtime_model, &clips).await;
+        if let (Some(cpu), Some(short), Some(long)) = (&cpu_times, timings.short_ms, timings.long_ms) {
+            if short >= cpu[0] || long >= cpu[1] {
+                verdict = Verdict::Retry(format!(
+                    "not faster than faster-whisper on the processor ({short}/{long} ms vs {}/{} ms)",
+                    cpu[0], cpu[1]
+                ));
+            }
+        }
+    }
+
+    let (outcome, detail) = match verdict {
+        Verdict::Passed => (QualOutcome::Passed, "passed".to_string()),
+        Verdict::Failed(reason) => (QualOutcome::Failed, trim_reason(&reason)),
+        Verdict::Retry(reason) => (QualOutcome::Retry, trim_reason(&reason)),
+    };
+    eprintln!(
+        "voicewave: qualification {outcome:?} for '{}' on '{}' (load {} ms, clips {:?}/{:?} ms): {detail}",
+        model.id, device.name, timings.load_ms, timings.short_ms, timings.long_ms
+    );
+    gpu_select::record_qualification(QualificationRecord {
+        key: key.clone(),
+        outcome,
+        model_id: model.id.clone(),
+        device_name: device.name.clone(),
+        at_utc_ms: now_utc_ms(),
+        detail: detail.clone(),
+        load_ms: timings.load_ms,
+        short_clip_ms: timings.short_ms,
+        long_clip_ms: timings.long_ms,
+        cpu_short_clip_ms: cpu_times.as_ref().map(|times| times[0]),
+        cpu_long_clip_ms: cpu_times.as_ref().map(|times| times[1]),
+    });
+    if outcome != QualOutcome::Passed {
+        // Free the VRAM; this session decodes on the CPU rung.
+        if let Ok(mut guard) = GPU_SLOT.try_lock() {
+            *guard = None;
+        }
+    }
+    let mut session = lock(&SESSION);
+    session.qualifying = None;
+    if outcome == QualOutcome::Retry {
+        session.retry_next_session.push((key, detail));
+    }
+    Some(outcome)
+}
+
+/// Run qualification in the background (dictation path).
+pub(crate) fn spawn_qualification(model: AsrModel, fw_baseline: Option<String>) {
+    tokio::spawn(async move {
+        let _ = qualify(model, fw_baseline).await;
+    });
+}
+
+/// Engine state for the UI ("Running on …", "Getting your graphics card
+/// ready") for an active whisper.cpp model.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrEngineView {
+    pub running_on: Option<RunningOn>,
+    /// The one-time GPU check for this model is running.
+    pub preparing: bool,
+    pub qualification: Option<QualOutcome>,
+    /// Detail of the latest qualification (diagnostics, settings tooltip).
+    pub qualification_detail: Option<String>,
+}
+
+pub fn engine_view(model: &AsrModel) -> AsrEngineView {
+    let device = hardware_profile().gpu;
+    let key = device
+        .as_ref()
+        .map(|device| qualification_key(device, model));
+    let latest = key.as_deref().and_then(gpu_select::latest_qualification);
+    let preparing = {
+        let session = lock(&SESSION);
+        key.is_some() && session.qualifying == key
+    };
+    let (rung, _) = primary_rung_blocking(model);
+    let report = lock(&SESSION)
+        .last_report
+        .clone()
+        .filter(|(path, _)| *path == model.path)
+        .map(|(_, running)| running);
+    // The worker's own report wins once it decoded this model on the rung
+    // the next dictation will use; before that, predict from the rung.
+    let running_on = match (rung, report) {
+        _ if preparing => None,
+        (rung, Some(report)) if report.device == rung => Some(report),
+        (Rung::Gpu, _) => Some(RunningOn {
+            device: Rung::Gpu,
+            name: device.map(|device| device.name),
+        }),
+        (Rung::Cpu, _) => Some(RunningOn {
+            device: Rung::Cpu,
+            name: None,
+        }),
+    };
+    AsrEngineView {
+        running_on,
+        preparing,
+        qualification: latest.as_ref().map(|record| record.outcome),
+        qualification_detail: latest.map(|record| record.detail),
+    }
+}
+
 fn join_error(err: tokio::task::JoinError) -> InferenceError {
     InferenceError::RuntimeJoin(format!("speech worker task failed: {err}"))
 }
 
-/// Primary rung for the next decode (may spawn the vk worker once per
-/// session to list devices).
-pub(crate) async fn primary_rung() -> (Rung, Option<String>) {
-    tokio::task::spawn_blocking(primary_rung_blocking)
+/// Primary rung for the next decode, and why it is not the GPU (see
+/// `primary_rung_blocking`).
+pub(crate) async fn primary_rung(model: &AsrModel) -> (Rung, Option<StepDown>) {
+    let model = model.clone();
+    tokio::task::spawn_blocking(move || primary_rung_blocking(&model))
         .await
         .unwrap_or((Rung::Cpu, None))
 }
@@ -970,12 +1504,30 @@ pub(crate) async fn transcribe(
 }
 
 /// Spawn and load the worker the next dictation will use, so it starts warm.
-/// Serialized by the caller against polish prewarm; returns once loaded.
-pub async fn prewarm_asr_worker(model_path: PathBuf) -> Result<(), InferenceError> {
-    tokio::task::spawn_blocking(move || prewarm_blocking(&model_path))
+/// When the GPU path is not qualified for this model yet, this runs the
+/// qualification instead (it leaves the worker loaded on pass). Serialized by
+/// the caller against polish prewarm; returns once done.
+pub async fn prewarm_asr_worker(
+    model: AsrModel,
+    fw_baseline: Option<String>,
+) -> Result<(), InferenceError> {
+    let prewarm_model = model.clone();
+    let next = tokio::task::spawn_blocking(move || prewarm_blocking(&prewarm_model))
         .await
         .map_err(join_error)?
-        .map_err(InferenceError::from)
+        .map_err(InferenceError::from)?;
+    if let Prewarm::Qualify = next {
+        if qualify(model.clone(), fw_baseline).await == Some(QualOutcome::Passed) {
+            return Ok(());
+        }
+        // Not qualified this session: warm the CPU rung instead (a no-op
+        // when another qualification is still running).
+        tokio::task::spawn_blocking(move || prewarm_blocking(&model))
+            .await
+            .map_err(join_error)?
+            .map_err(InferenceError::from)?;
+    }
+    Ok(())
 }
 
 /// Drop workers that are idle (e.g. after switching to a faster-whisper

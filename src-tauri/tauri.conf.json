@@ -48,7 +48,8 @@
       "windows/faster-whisper/python": "faster-whisper/python",
       "windows/llm-polish/polish_worker.py": "llm-polish/polish_worker.py",
       "windows/asr-worker/bin/vk": "asr-worker/vk",
-      "windows/asr-worker/bin/cpu": "asr-worker/cpu"
+      "windows/asr-worker/bin/cpu": "asr-worker/cpu",
+      "windows/asr-worker/qualify": "asr-worker/qualify"
     },
     "windows": {
       "nsis": {
