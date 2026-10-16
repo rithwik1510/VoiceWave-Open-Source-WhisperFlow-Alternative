@@ -1349,7 +1349,9 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
     if let (Verdict::Passed, Some(runtime_model)) = (&verdict, fw_baseline.as_deref()) {
         cpu_times = faster_whisper_baseline(runtime_model, &clips).await;
         if let (Some(cpu), Some(short), Some(long)) = (&cpu_times, timings.short_ms, timings.long_ms) {
-            if short >= cpu[0] || long >= cpu[1] {
+            // Compare totals, not each clip: a near-tie on one clip (seen on
+            // the long clip with fast CPUs) must not flip the verdict.
+            if short + long >= cpu[0] + cpu[1] {
                 verdict = Verdict::Retry(format!(
                     "not faster than faster-whisper on the processor ({short}/{long} ms vs {}/{} ms)",
                     cpu[0], cpu[1]
