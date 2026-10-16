@@ -288,7 +288,7 @@ is covered by the same deadline. Every phase has one:
 |---|---|
 | Spawn to ready | 10 s |
 | `list_devices` | 5 s |
-| `load` (+ warm-up) | 30 s GPU, 20 s CPU |
+| `load` (+ warm-up) | 30 s GPU (120 s on first use: driver shader compile, see Phase 0 results), 20 s CPU |
 | `transcribe` | 10 s + 1× audio length GPU; 15 s + 2× audio length CPU |
 | Request write | inside the request's deadline |
 
@@ -478,6 +478,48 @@ Each phase ends with a gate. Nothing ships to users until Phase 4 passes.
 - (d) Worker benchmark matches the spike within 10%; idle, battery and
   residency (VRAM held) numbers recorded; quality within criterion 3.
 - (e) Installer size increase measured.
+
+### Phase 0 results (2026-10-16)
+
+Done in commits `3b85897` (worker), `ecce249` (CI + bundling), `c35bbed`
+(bench harness). Protocol as implemented: see the header of
+`src-tauri/windows/asr-worker/main.cpp`.
+
+- Gate (b) pass: both EXEs import only `kernel32`/`advapi32`; `vulkan-1.dll`
+  is **delay-loaded** in the vk worker (a hard import would show a Windows
+  "DLL not found" dialog that `SetErrorMode` cannot suppress).
+- Gate (c) pass: `--list-devices` (0.2–0.4 s, no model) reports both GPUs with
+  type and LUIDs that match DXGI; RTX selected by LUID; backend detection from
+  whisper's own log lines; a GPU load that lands on CPU returns a `backend`
+  error instead of running silently on CPU. Device mapping pins ggml's list via
+  `GGML_VK_VISIBLE_DEVICES` (the Radeon driver reports no PCI id).
+- Gate (d) GPU pass: RTX Small 118/187/356/874 ms, RTX Turbo 176/228/340/912 ms,
+  iGPU Small 1292/1958/2369/6075 ms (2/5/10/30 s). Quality on 200 clips:
+  Small 4.40% (RTX worker) vs 4.35% (faster-whisper CPU); Turbo 2.58% vs
+  2.76% (faster-whisper CUDA). VRAM held with Turbo resident: 1,902 MB.
+  After 60 s idle the RTX Turbo 10 s clip took 600–730 ms (vs ~400 ms warm);
+  2 s clips unaffected.
+- Gate (d) CPU worker: 15–30% slower than the spike because `GGML_OPENMP=OFF`.
+  **Decision: keep OpenMP off.** The CPU worker is only the fallback for GPU
+  users without a faster-whisper model; it is not worth an extra runtime DLL.
+  Revisit if whisper.cpp ever becomes the CPU engine.
+- Gate (e): vk worker 43.8 MB, cpu worker 2.2 MB (~6 MB compressed).
+- Gate (a): no clean VM; CI covers a GPU-less runner, the `dumpbin` check, and
+  a real CPU decode with `ggml-tiny.en`. Unverified: machines without the VC++
+  redistributable (covered only by `dumpbin`) and without `vulkan-1.dll`.
+
+**New facts that change Phases 1–2:**
+
+- **First GPU use on a machine takes 25–41 s** while the NVIDIA driver compiles
+  shaders (cache keyed by EXE name; ggml has no pipeline cache; driver updates
+  likely reset it). First-time qualification therefore gets a **120 s load
+  deadline**, a cold-cache timeout is "retry", never "fail", and the UI says
+  "Getting your graphics card ready (one time, up to a minute)".
+- Warm-up only partly absorbs the iGPU's slow first decode (relevant to
+  Phase 5).
+- Cancel can take ~3 s on CPU (encoder is not interruptible).
+- Backend detection parses whisper log text; re-verify whenever the pinned
+  whisper.cpp version changes.
 
 ### Phase 1: worker integration
 
