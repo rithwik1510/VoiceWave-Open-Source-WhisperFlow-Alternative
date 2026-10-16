@@ -2656,7 +2656,11 @@ impl VoiceWaveController {
 
     pub async fn list_model_catalog(&self) -> Vec<ModelCatalogItem> {
         let hardware = hardware_profile_async().await;
-        self.model_manager.lock().await.list_catalog(&hardware)
+        let active_model = self.settings.lock().await.active_model.clone();
+        self.model_manager
+            .lock()
+            .await
+            .list_catalog(&hardware, &active_model)
     }
 
     pub async fn list_installed_models(&self) -> Vec<InstalledModel> {

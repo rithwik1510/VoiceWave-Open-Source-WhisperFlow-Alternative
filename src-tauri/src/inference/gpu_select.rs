@@ -162,8 +162,10 @@ pub struct HardwareProfile {
 impl HardwareProfile {
     /// GPU-path machines see whisper.cpp (GGML) models, everyone else the
     /// faster-whisper ones; users always see just "Small" and "Large Turbo".
+    /// A GPU that failed its check or is disabled for its driver stays in
+    /// `gpu` (the UI names it) but is off the GPU path.
     pub fn gpu_path(&self) -> bool {
-        self.gpu.is_some()
+        self.gpu.as_ref().is_some_and(|device| !gpu_ruled_out(device))
     }
 
     pub fn model_id(&self, tier: ModelTier) -> &'static str {
@@ -176,7 +178,13 @@ impl HardwareProfile {
     }
 
     pub fn recommended_model_id(&self) -> &'static str {
-        self.model_id(self.recommended)
+        // Large Turbo is only ever recommended on the GPU path.
+        let tier = if self.gpu_path() {
+            self.recommended
+        } else {
+            ModelTier::Small
+        };
+        self.model_id(tier)
     }
 }
 
@@ -424,7 +432,8 @@ pub enum QualOutcome {
     /// Wrong transcript, GPU not actually used, crash: cached for the key.
     Failed,
     /// Correct but slow, out of memory, cold-cache timeout: CPU this
-    /// session, retried next session. Recorded for diagnostics only.
+    /// session, retried next session. Never a cache hit, but the third in a
+    /// row for a key is recorded as `Failed` instead.
     Retry,
 }
 
@@ -556,6 +565,59 @@ pub fn cached_qualification(key: &str) -> Option<QualOutcome> {
             .find(|record| record.key == key && record.outcome != QualOutcome::Retry)
             .map(|record| record.outcome)
     })
+}
+
+/// Detail prefix of `Retry` records the check could not finish (GPU memory
+/// busy, interrupted); they say nothing about the GPU, so the retry cap
+/// skips them.
+pub const INCONCLUSIVE_PREFIX: &str = "inconclusive (GPU busy or check interrupted): ";
+
+/// Counted `Retry` records for `key` since its last pass or fail.
+pub fn consecutive_retries(key: &str) -> usize {
+    read_store(|store| {
+        store
+            .qualifications
+            .iter()
+            .rev()
+            .filter(|record| record.key == key)
+            .take_while(|record| record.outcome == QualOutcome::Retry)
+            .filter(|record| !record.detail.starts_with(INCONCLUSIVE_PREFIX))
+            .count()
+    })
+}
+
+/// The GPU path is off for this device: its driver is disabled, or a
+/// qualification failed on this device, driver and worker build and none
+/// passed there. Any model counts: a broken Vulkan path fails Small and
+/// Large Turbo alike, while a pass proves the path works (a model-specific
+/// fail is then handled per key at decode time). A driver or worker update
+/// opens the path again, like the driver disable. Matches the
+/// `identity|driver N|...|worker F|...` layout of
+/// `asr_worker::qualification_key`.
+fn gpu_ruled_out(device: &GpuDevice) -> bool {
+    if driver_disabled(device) {
+        return true;
+    }
+    let prefix = format!("{}|driver {}|", device.identity(), device.driver_version);
+    let records: Vec<(String, QualOutcome)> = read_store(|store| {
+        store
+            .qualifications
+            .iter()
+            .filter(|record| record.outcome != QualOutcome::Retry && record.key.starts_with(&prefix))
+            .map(|record| (record.key.clone(), record.outcome))
+            .collect()
+    });
+    // Skip hashing the worker EXE on the common no-record path.
+    if records.is_empty() {
+        return false;
+    }
+    let worker = format!("|worker {}|", asr_worker::worker_fingerprint());
+    let outcomes: Vec<QualOutcome> = records
+        .into_iter()
+        .filter(|(key, _)| key.contains(&worker))
+        .map(|(_, outcome)| outcome)
+        .collect();
+    outcomes.contains(&QualOutcome::Failed) && !outcomes.contains(&QualOutcome::Passed)
 }
 
 pub fn latest_qualification(key: &str) -> Option<QualificationRecord> {

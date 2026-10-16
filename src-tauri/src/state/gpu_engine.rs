@@ -138,7 +138,8 @@ impl VoiceWaveController {
     /// then switch the active model in one settings write. Until then (and
     /// if it fails) faster-whisper keeps dictating. Called after the download
     /// and at startup, so a restart between download and switch resumes it.
-    /// A slow or transient result keeps the upgrade pending for next launch.
+    /// A slow or transient result keeps the upgrade pending for next launch;
+    /// the third in a row comes back as a fail and ends it.
     pub async fn finish_gpu_upgrade(&self, app: AppHandle) -> Result<(), ControllerError> {
         let Some(model_id) = pending_upgrade() else {
             return Ok(());
@@ -153,8 +154,10 @@ impl VoiceWaveController {
         let baseline = self.fw_baseline(&model_id).await;
         match qualify_gpu(model, baseline).await {
             Some(QualOutcome::Passed) => {
-                clear_pending_upgrade();
+                // Switch first: if saving settings fails, the upgrade stays
+                // pending and is retried at the next launch.
                 self.set_active_model(app, model_id.clone()).await?;
+                clear_pending_upgrade();
                 eprintln!("voicewave: GPU upgrade complete, now dictating with {model_id}");
             }
             Some(QualOutcome::Failed) => {
@@ -182,6 +185,11 @@ impl VoiceWaveController {
         let mut manager = self.model_manager.lock().await;
         manager.remove_model_files(&model_id)?;
         self.model_statuses.lock().await.remove(&model_id);
+        // Removing the accepted upgrade's model cancels the upgrade, which
+        // would otherwise wait for it forever.
+        if pending_upgrade().as_deref() == Some(model_id.as_str()) {
+            clear_pending_upgrade();
+        }
         // A removed faster-whisper fallback is simply no longer the CPU rung:
         // the next dictation re-reads what is installed.
         if let Some(status) = manager.get_download_status(&model_id, Some(active_model.as_str())) {

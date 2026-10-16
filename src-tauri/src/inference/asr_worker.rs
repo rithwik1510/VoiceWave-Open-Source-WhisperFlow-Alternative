@@ -53,7 +53,8 @@ const LOAD_GPU_DEADLINE: Duration = Duration::from_secs(30);
 /// compile ggml's shaders: 25-41 s measured on an RTX 3060. Missing it is
 /// "retry later", never a GPU failure.
 const LOAD_GPU_FIRST_USE_DEADLINE: Duration = Duration::from_secs(120);
-const LOAD_CPU_DEADLINE: Duration = Duration::from_secs(20);
+/// Generous for slow laptops loading Large Turbo from a cold disk.
+const LOAD_CPU_DEADLINE: Duration = Duration::from_secs(60);
 /// Upper bound on waiting for a killed worker to actually exit.
 const REAP_WAIT: Duration = Duration::from_secs(5);
 /// How often a waiting request checks the user's cancel token.
@@ -84,11 +85,14 @@ const QUALIFY_CLIPS: [(&str, &str); 2] = [
 /// Bump when the clips, bars or decode settings above change: part of the
 /// qualification cache key.
 const QUALIFY_CONFIG_VERSION: u32 = 1;
+/// `Retry` results in a row for one key before it is recorded as `Failed`,
+/// so a borderline GPU stops rerunning the full check at every launch.
+const QUALIFY_MAX_RETRIES: usize = 3;
 
 fn transcribe_deadline(rung: Rung, audio_ms: u64) -> Duration {
     match rung {
         Rung::Gpu => Duration::from_millis(10_000 + audio_ms),
-        Rung::Cpu => Duration::from_millis(15_000 + audio_ms.saturating_mul(2)),
+        Rung::Cpu => Duration::from_millis(30_000 + audio_ms.saturating_mul(3)),
     }
 }
 
@@ -262,15 +266,39 @@ impl From<Fault> for InferenceError {
     }
 }
 
-/// Keep failure text (which can carry a worker's stderr) log-sized.
+/// Keep failure text (which can carry a worker's stderr) log-sized, with the
+/// user's profile folder (it carries their name, e.g. in a model path)
+/// replaced: this text lands in gpu-engine.json and the diagnostics export.
 pub(crate) fn trim_reason(reason: &str) -> String {
-    let reason = reason.trim();
+    let reason = redact_profile_dir(reason.trim());
     if reason.chars().count() <= MAX_REASON_CHARS {
-        return reason.to_string();
+        return reason;
     }
     let mut trimmed: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
     trimmed.push('…');
     trimmed
+}
+
+/// `C:\Users\<name>` → `%USERPROFILE%`, ignoring ASCII case like Windows.
+fn redact_profile_dir(text: &str) -> String {
+    let needle = std::env::var("USERPROFILE")
+        .unwrap_or_default()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    if needle.len() <= 3 {
+        return text.to_string();
+    }
+    // ASCII lowercasing keeps byte offsets, so they index `text` too.
+    let haystack = text.to_ascii_lowercase();
+    let mut redacted = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(found) = haystack[at..].find(&needle) {
+        redacted.push_str(&text[at..at + found]);
+        redacted.push_str("%USERPROFILE%");
+        at += found + needle.len();
+    }
+    redacted.push_str(&text[at..]);
+    redacted
 }
 
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
@@ -312,6 +340,9 @@ impl Drop for WorkerProcess {
                 _ => break,
             }
         }
+        // Forget the pid even if the exit is unconfirmed: the termination is
+        // already queued (a worker wedged in a driver call dies when the call
+        // returns), and a remembered pid could be reused by another process.
         if let Ok(mut pids) = LIVE_PIDS.lock() {
             pids.retain(|value| *value != pid);
         }
@@ -551,6 +582,10 @@ fn worker_command(exe: &Path) -> Command {
     let mut command = Command::new(exe);
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
+    // Implicit Vulkan layers (RTSS, OBS, Steam and Epic overlays) hook every
+    // Vulkan app and can crash ggml-vulkan. Loaders from 1.3.234 skip them
+    // all with this filter; older loaders ignore the variable harmlessly.
+    command.env("VK_LOADER_LAYERS_DISABLE", "~implicit~");
     command
 }
 
@@ -732,6 +767,8 @@ pub fn set_gpu_acceleration(enabled: bool) {
     }
 }
 
+/// `gpu_select::gpu_ruled_out` matches on this layout's device, driver and
+/// worker parts; keep them in sync.
 fn qualification_key(device: &GpuDevice, model: &AsrModel) -> String {
     format!(
         "{}|driver {}|{} {}|worker {}|q{QUALIFY_CONFIG_VERSION} beam{QUALIFY_BEAM} fa{}",
@@ -779,6 +816,8 @@ fn gpu_readiness(key: &str) -> GpuReadiness {
 /// machines without a qualifying GPU carry no step-down).
 fn primary_rung_blocking(model: &AsrModel) -> (Rung, Option<StepDown>) {
     if !GPU_ENABLED.load(Ordering::Relaxed) {
+        // A GPU worker that was busy when GPU acceleration went Off.
+        release_idle_rung(Rung::Gpu);
         return (Rung::Cpu, None);
     }
     let Some(device) = hardware_profile().gpu else {
@@ -900,6 +939,11 @@ fn ensure_loaded(
         }
         // Flash attention on for discrete GPUs, off for integrated.
         body["flashAttention"] = json!(device.discrete);
+    } else {
+        // The CPU does all the work here: every hardware thread but two,
+        // left for the app and the rest of the PC.
+        let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
+        body["threads"] = json!(threads.saturating_sub(2).max(2));
     }
     let started = Instant::now();
     let reply = with_worker(guard, |worker| {
@@ -1141,6 +1185,9 @@ enum Verdict {
     Passed,
     Failed(String),
     Retry(String),
+    /// The check could not run fully (GPU memory busy, interrupted): retry
+    /// next session, never counted toward `QUALIFY_MAX_RETRIES`.
+    Inconclusive(String),
 }
 
 #[derive(Default)]
@@ -1164,8 +1211,13 @@ fn fault_verdict(fault: Fault, during_load: bool) -> Verdict {
             reason,
             ..
         } => Verdict::Failed(reason),
+        Fault::Worker {
+            class: ErrorClass::Resource,
+            reason,
+            ..
+        } => Verdict::Inconclusive(reason),
         Fault::Worker { class, reason, .. } => Verdict::Retry(format!("{class}: {reason}")),
-        Fault::Cancelled | Fault::NotReady(_) => Verdict::Retry("interrupted".to_string()),
+        Fault::Cancelled | Fault::NotReady(_) => Verdict::Inconclusive("interrupted".to_string()),
     }
 }
 
@@ -1289,7 +1341,8 @@ fn now_utc_ms() -> u64 {
 /// decodes beat the bars, and (with `fw_baseline`, the installed
 /// faster-whisper model's runtime id) faster-whisper on the CPU is slower.
 /// Pass and fail are cached by key; slow, out-of-memory and cold-cache
-/// timeouts mean "CPU this session, retry next session". On pass the worker
+/// timeouts mean "CPU this session, retry next session", and the third such
+/// result in a row is cached as a fail. On pass the worker
 /// stays loaded as the live dictation worker. Serialized with polish prewarm
 /// by the caller-shared `HEAVY_LOAD` lock. Returns `None` when there is
 /// nothing to qualify or another qualification is already running.
@@ -1342,7 +1395,7 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
                 ),
             }
         }
-        Err(err) => (Verdict::Retry(err), QualifyTimings::default(), Vec::new()),
+        Err(err) => (Verdict::Inconclusive(err), QualifyTimings::default(), Vec::new()),
     };
 
     let mut cpu_times = None;
@@ -1363,7 +1416,21 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
     let (outcome, detail) = match verdict {
         Verdict::Passed => (QualOutcome::Passed, "passed".to_string()),
         Verdict::Failed(reason) => (QualOutcome::Failed, trim_reason(&reason)),
+        Verdict::Retry(reason)
+            if gpu_select::consecutive_retries(&key) + 1 >= QUALIFY_MAX_RETRIES =>
+        {
+            (
+                QualOutcome::Failed,
+                trim_reason(&format!(
+                    "no pass in {QUALIFY_MAX_RETRIES} checks in a row; last: {reason}"
+                )),
+            )
+        }
         Verdict::Retry(reason) => (QualOutcome::Retry, trim_reason(&reason)),
+        Verdict::Inconclusive(reason) => (
+            QualOutcome::Retry,
+            trim_reason(&format!("{}{reason}", gpu_select::INCONCLUSIVE_PREFIX)),
+        ),
     };
     eprintln!(
         "voicewave: qualification {outcome:?} for '{}' on '{}' (load {} ms, clips {:?}/{:?} ms): {detail}",
@@ -1532,13 +1599,19 @@ pub async fn prewarm_asr_worker(
     Ok(())
 }
 
+/// Drop `rung`'s worker if it is idle, freeing the VRAM/RAM its model holds.
+/// A worker mid-load or mid-decode is left alone.
+pub(crate) fn release_idle_rung(rung: Rung) {
+    if let Ok(mut guard) = slot(rung).try_lock() {
+        *guard = None;
+    }
+}
+
 /// Drop workers that are idle (e.g. after switching to a faster-whisper
-/// model), freeing the VRAM/RAM their model holds.
+/// model).
 pub fn release_idle_asr_workers() {
     for rung in [Rung::Gpu, Rung::Cpu] {
-        if let Ok(mut guard) = slot(rung).try_lock() {
-            *guard = None;
-        }
+        release_idle_rung(rung);
     }
 }
 

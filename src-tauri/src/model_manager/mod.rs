@@ -561,8 +561,12 @@ impl ModelManager {
     /// "Large Turbo", from the machine's model family, plus any installed
     /// model of the other family (an upgrader's faster-whisper fallback, or
     /// a GGML model after the GPU went away) so it stays usable and
-    /// removable.
-    pub fn list_catalog(&self, hardware: &HardwareProfile) -> Vec<ModelCatalogItem> {
+    /// removable. `active_model` picks the copy for the row in use.
+    pub fn list_catalog(
+        &self,
+        hardware: &HardwareProfile,
+        active_model: &str,
+    ) -> Vec<ModelCatalogItem> {
         let primary = [
             hardware.model_id(ModelTier::Small),
             hardware.model_id(ModelTier::LargeTurbo),
@@ -573,7 +577,10 @@ impl ModelManager {
                 primary.contains(&manifest.model_id.as_str())
                     || self.installed.contains_key(&manifest.model_id)
             })
-            .filter_map(|manifest| manifest_to_catalog_item(manifest, Some(hardware)))
+            .filter_map(|manifest| {
+                let active = manifest.model_id == active_model;
+                manifest_to_catalog_item(manifest, Some(hardware), active)
+            })
             .collect()
     }
 
@@ -658,7 +665,7 @@ impl ModelManager {
         self.catalog
             .iter()
             .find(|item| item.model_id == model_id)
-            .and_then(|manifest| manifest_to_catalog_item(manifest, None))
+            .and_then(|manifest| manifest_to_catalog_item(manifest, None, false))
     }
 
     /// Delete an installed model's files and unregister it. Only paths inside
@@ -1645,7 +1652,12 @@ fn verify_faster_whisper_snapshot(repo_dir: &Path) -> Result<PathBuf, String> {
 /// pitched as a good pick without a graphics card: on the CPU whisper pads
 /// every clip to a 30 s window, so short dictations pay turbo's full encoder
 /// cost (Ryzen 7 5800H: small.en ~2 s vs turbo 7-9 s per dictation).
-fn model_fit(model_id: &str, hardware: Option<&HardwareProfile>) -> Option<(String, String)> {
+/// `active`: the row is the model dictation uses now.
+fn model_fit(
+    model_id: &str,
+    hardware: Option<&HardwareProfile>,
+    active: bool,
+) -> Option<(String, String)> {
     let tier = model_tier(model_id)?;
     let ggml = model_id.starts_with("wcpp-");
     let name = match tier {
@@ -1670,7 +1682,9 @@ fn model_fit(model_id: &str, hardware: Option<&HardwareProfile>) -> Option<(Stri
             "",
             "Best accuracy, but may be slow with this PC's graphics memory.",
         ),
-        // GPU-path machine, an installed faster-whisper model.
+        // GPU-path machine, an installed faster-whisper model: the one in
+        // use (an upgrader before the switch), or kept as the fallback.
+        (true, false, _) if active => (" (processor version)", "Runs on your processor."),
         (true, false, _) => (
             " (processor version)",
             "Kept as the backup if your graphics card has a problem. Remove it to free up space.",
@@ -1696,9 +1710,10 @@ fn model_fit(model_id: &str, hardware: Option<&HardwareProfile>) -> Option<(Stri
 fn manifest_to_catalog_item(
     manifest: &SignedModelManifest,
     hardware: Option<&HardwareProfile>,
+    active: bool,
 ) -> Option<ModelCatalogItem> {
     let tier = model_tier(&manifest.model_id)?;
-    let (display_name, hardware_note) = model_fit(&manifest.model_id, hardware)?;
+    let (display_name, hardware_note) = model_fit(&manifest.model_id, hardware, active)?;
     Some(ModelCatalogItem {
         model_id: manifest.model_id.clone(),
         display_name,

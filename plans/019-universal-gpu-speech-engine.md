@@ -293,8 +293,8 @@ is covered by the same deadline. Every phase has one:
 |---|---|
 | Spawn to ready | 10 s |
 | `list_devices` | 5 s |
-| `load` (+ warm-up) | 30 s GPU (120 s on first use: driver shader compile, see Phase 0 results), 20 s CPU |
-| `transcribe` | 10 s + 1× audio length GPU; 15 s + 2× audio length CPU |
+| `load` (+ warm-up) | 30 s GPU (120 s on first use: driver shader compile, see Phase 0 results), 60 s CPU |
+| `transcribe` | 10 s + 1× audio length GPU; 30 s + 3× audio length CPU (CPU rung loads with max(cores − 2, 2) threads) |
 | Request write | inside the request's deadline |
 
 On any missed deadline: kill the worker, **reap it** (wait for exit) before
@@ -360,9 +360,9 @@ Outcomes:
 | Result | Action |
 |---|---|
 | Pass | GPU path on; cached |
-| Wrong transcript, GPU not actually used, crash | Fail; cached for this cache key; user goes to their CPU rung |
-| Correct but slow (e.g. on battery, GPU power-gated) | Not cached as a fail; CPU rung this session, retry next session |
-| `resource` error (GPU memory taken by another app) | Not a fail; CPU rung this session, retry next session |
+| Wrong transcript, GPU not actually used, crash | Fail; cached for this cache key; user goes to their CPU rung. A Fail on this device + driver + worker build with no Pass there (or a driver disable) takes the machine off the GPU path: the catalog offers the faster-whisper models again until a driver or worker update |
+| Correct but slow (e.g. on battery, GPU power-gated) | Not cached as a fail; CPU rung this session, retry next session. The 3rd counted retry in a row is cached as Failed |
+| `resource` error (GPU memory taken by another app), interrupted check | Inconclusive: never a fail and never counted; CPU rung this session, retry next session |
 
 If a Large Turbo user ends up on CPU, a notice offers switching to Small.
 

@@ -744,6 +744,21 @@ async fn transcribe_with_asr_worker(
     .await
     {
         Ok(mut decode) => {
+            // The rung that just proved itself is the one dictation uses, so
+            // the other one's idle worker (a CPU worker loaded during the GPU
+            // check, or a GPU worker after a session CPU lock) stops holding
+            // its model. Not while the GPU check runs: it owns the GPU slot
+            // and may finish with a passed worker that should stay loaded.
+            let idle_rung = match (primary, step_down.as_ref().map(|step| step.kind)) {
+                (asr_worker::Rung::Gpu, _) => Some(asr_worker::Rung::Cpu),
+                (asr_worker::Rung::Cpu, Some(StepDownKind::Unavailable)) => {
+                    Some(asr_worker::Rung::Gpu)
+                }
+                _ => None,
+            };
+            if let Some(rung) = idle_rung {
+                tokio::task::spawn_blocking(move || asr_worker::release_idle_rung(rung));
+            }
             if let Some(step) = step_down {
                 decode.telemetry.backend_requested = asr_worker::Rung::Gpu.backend().to_string();
                 decode.telemetry.asr_step_down_reason = Some(step.reason);
