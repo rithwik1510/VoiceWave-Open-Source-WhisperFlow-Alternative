@@ -132,11 +132,14 @@ const DEFAULT_RELEASE_TAIL_MS = 350;
 const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
-const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo"] as const;
+// Both model families are valid (plan 019): faster-whisper (fw-*) and
+// whisper.cpp GGML (wcpp-*). The backend lists wcpp-* in the catalog only when
+// VOICEWAVE_GGML_MODELS=1, so users still see two models.
+const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo", "wcpp-small.en", "wcpp-large-v3-turbo"] as const;
 // Retired catalog models migrate to the closest surviving option (mirrors
 // normalize_active_model_id in src-tauri/src/settings/mod.rs).
-const RETIRED_LARGE_MODEL_IDS = ["fw-large-v3", "wcpp-large-v3-turbo"] as const;
-const LEGACY_MODEL_IDS = ["tiny.en", "base.en", "small.en", "medium.en", "wcpp-small.en"] as const;
+const RETIRED_LARGE_MODEL_IDS = ["fw-large-v3"] as const;
+const LEGACY_MODEL_IDS = ["tiny.en", "base.en", "small.en", "medium.en"] as const;
 
 function isSupportedModelId(modelId: string): boolean {
   return SUPPORTED_MODEL_IDS.includes(modelId as (typeof SUPPORTED_MODEL_IDS)[number]);

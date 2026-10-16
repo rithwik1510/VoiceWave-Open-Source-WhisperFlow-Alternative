@@ -334,12 +334,15 @@ fn normalize_active_model_id(active_model: &str) -> String {
     match active_model.trim() {
         // Every installable catalog model must be listed here, otherwise the
         // user's selection is silently reset to fw-small.en on settings load.
-        "fw-small.en" | "fw-large-v3-turbo" => active_model.trim().to_string(),
-        // Retired catalog entries migrate to the closest surviving model.
-        "fw-large-v3" | "wcpp-large-v3-turbo" => "fw-large-v3-turbo".to_string(),
-        "tiny.en" | "base.en" | "small.en" | "medium.en" | "wcpp-small.en" => {
-            "fw-small.en".to_string()
+        // Both families are valid (plan 019): faster-whisper (fw-*) and
+        // whisper.cpp GGML (wcpp-*). An active model is never rewritten to
+        // the other family.
+        "fw-small.en" | "fw-large-v3-turbo" | "wcpp-small.en" | "wcpp-large-v3-turbo" => {
+            active_model.trim().to_string()
         }
+        // Retired catalog entries migrate to the closest surviving model.
+        "fw-large-v3" => "fw-large-v3-turbo".to_string(),
+        "tiny.en" | "base.en" | "small.en" | "medium.en" => "fw-small.en".to_string(),
         _ => "fw-small.en".to_string(),
     }
 }
@@ -484,8 +487,9 @@ mod tests {
     fn load_migrates_retired_models_to_surviving_catalog() {
         for (raw_model, expected) in [
             ("fw-large-v3", "fw-large-v3-turbo"),
-            ("wcpp-large-v3-turbo", "fw-large-v3-turbo"),
-            ("wcpp-small.en", "fw-small.en"),
+            // wcpp-* are valid again (plan 019) and are kept as-is.
+            ("wcpp-large-v3-turbo", "wcpp-large-v3-turbo"),
+            ("wcpp-small.en", "wcpp-small.en"),
         ] {
             let path = temp_settings_path();
             let store = SettingsStore::from_path(path.clone());
