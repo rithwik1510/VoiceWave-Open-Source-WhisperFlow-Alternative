@@ -339,28 +339,33 @@ struct WorkerProcess {
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
         let pid = self.child.id();
-        let _ = self.child.kill();
-        let deadline = Instant::now() + REAP_WAIT;
-        loop {
-            match self.child.try_wait() {
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Ok(None) => {
-                    eprintln!(
-                        "voicewave: asr worker pid {pid} still running {} ms after kill",
-                        REAP_WAIT.as_millis()
-                    );
-                    break;
-                }
-                _ => break,
-            }
-        }
+        kill_and_reap(&mut self.child);
         // Forget the pid even if the exit is unconfirmed: the termination is
         // already queued (a worker wedged in a driver call dies when the call
         // returns), and a remembered pid could be reused by another process.
         if let Ok(mut pids) = LIVE_PIDS.lock() {
             pids.retain(|value| *value != pid);
+        }
+    }
+}
+
+/// Kill a worker and wait up to `REAP_WAIT` for it to exit. Never blocks
+/// longer: a process wedged in a driver call dies when the call returns.
+fn kill_and_reap(child: &mut Child) {
+    let pid = child.id();
+    let _ = child.kill();
+    let deadline = Instant::now() + REAP_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                eprintln!(
+                    "voicewave: asr worker pid {pid} still running {} ms after kill",
+                    REAP_WAIT.as_millis()
+                );
+                return;
+            }
+            _ => return,
         }
     }
 }
@@ -736,8 +741,9 @@ pub(crate) fn list_devices() -> Result<Vec<Value>, String> {
         let _ = tx.send(text);
     });
     let output = rx.recv_timeout(LIST_DEVICES_DEADLINE);
-    let _ = child.kill();
-    let _ = child.wait();
+    // Bounded: a driver hung in vkCreateInstance must not hold the hardware
+    // profile lock (and with it the model list) forever.
+    kill_and_reap(&mut child);
     let text = output.map_err(|_| "list-devices missed its 5 s deadline".to_string())?;
     let reply: Value = serde_json::from_str(text.trim())
         .map_err(|_| format!("unparseable device list: {}", trim_reason(&text)))?;
