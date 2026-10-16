@@ -122,6 +122,41 @@ jobs:
             throw "AI-polish worker script missing at src-tauri/windows/llm-polish/polish_worker.py"
           }
 
+      # whisper.cpp speech workers (plan 019): built with MSVC, independent of
+      # the app's GNU Rust toolchain, and bundled as resources
+      # (asr-worker/vk, asr-worker/cpu). Only this build machine needs the
+      # Vulkan SDK; users need nothing beyond their GPU driver.
+      - name: Install Vulkan SDK (pinned, cached)
+        # v1.7.0, pinned by commit SHA.
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533
+        with:
+          vulkan_version: 1.4.341.1
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: Build speech workers (MSVC)
+        shell: pwsh
+        run: ./scripts/asr-worker/build-asr-worker.ps1 -BuildRoot "$env:RUNNER_TEMP\asr-worker-build"
+
+      - name: Verify speech worker dependencies (dumpbin)
+        shell: pwsh
+        # Fails if the CPU worker imports vulkan-1.dll, the Vulkan worker
+        # imports it at load time instead of delay-loading it, or either one
+        # imports a VC++ runtime DLL (they must run without the redistributable).
+        run: ./scripts/asr-worker/check-asr-worker-deps.ps1
+
+      - name: Smoke test speech workers (no GPU on the runner)
+        shell: pwsh
+        run: |
+          # Pinned tiny model, only to prove the CPU worker loads and decodes here.
+          $model = Join-Path $env:RUNNER_TEMP "ggml-tiny.en.bin"
+          Invoke-WebRequest -UseBasicParsing -OutFile $model `
+            -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin"
+          $hash = (Get-FileHash -Algorithm SHA256 $model).Hash.ToLowerInvariant()
+          if ($hash -ne "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f") { throw "ggml-tiny.en.bin hash mismatch: $hash" }
+          ./scripts/asr-worker/smoke-asr-worker.ps1 -ModelPath $model
+
       - name: Build signed installer + updater artifacts
         shell: pwsh
         env:
@@ -171,6 +206,17 @@ jobs:
             throw "AI-polish worker was NOT packaged into the build output. Checked: $($workerRoots -join '; ')."
           }
           Write-Host "AI-polish worker packaged OK."
+          # Speech workers, each in its own directory.
+          foreach ($worker in "vk\voicewave-asr-vk.exe", "cpu\voicewave-asr-cpu.exe") {
+            $asrRoots = @(
+              "$env:VIBE_SAFE_TARGET_DIR\x86_64-pc-windows-gnu\release\asr-worker\$worker",
+              "$env:VIBE_SAFE_TARGET_DIR\release\asr-worker\$worker"
+            )
+            if (-not ($asrRoots | Where-Object { Test-Path $_ })) {
+              throw "Speech worker was NOT packaged into the build output. Checked: $($asrRoots -join '; ')."
+            }
+          }
+          Write-Host "Speech workers packaged OK."
 
       - name: Locate installer + signature
         id: artifact

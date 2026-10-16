@@ -46,7 +46,9 @@
       "windows/libwinpthread-1.dll": "libwinpthread-1.dll",
       "windows/faster-whisper/worker.py": "faster-whisper/worker.py",
       "windows/faster-whisper/python": "faster-whisper/python",
-      "windows/llm-polish/polish_worker.py": "llm-polish/polish_worker.py"
+      "windows/llm-polish/polish_worker.py": "llm-polish/polish_worker.py",
+      "windows/asr-worker/bin/vk": "asr-worker/vk",
+      "windows/asr-worker/bin/cpu": "asr-worker/cpu"
     },
     "windows": {
       "nsis": {
