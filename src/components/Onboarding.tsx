@@ -10,7 +10,12 @@ import {
   startMicLevelMonitor,
   stopMicLevelMonitor
 } from "../lib/tauri";
-import type { ModelCatalogItem, ModelStatus, VoiceWaveSnapshot } from "../types/voicewave";
+import type {
+  ModelCatalogItem,
+  ModelStatus,
+  SpeechEngineStatus,
+  VoiceWaveSnapshot
+} from "../types/voicewave";
 import { ModelDownloadProgress } from "./ModelDownloadProgress";
 
 type OnboardingStep = "welcome" | "mic" | "speak" | "done";
@@ -24,7 +29,10 @@ const HEARD_LEVEL = 0.045;
 const HEARD_HOLD_MS = 600;
 
 interface OnboardingProps {
+  /** This PC's two primary rows (Small, Large Turbo) from the per-machine catalog. */
   catalog: ModelCatalogItem[];
+  /** Plan 019 engine state: unsupported CPUs, and the one-time graphics card check. */
+  speechEngine: SpeechEngineStatus | null;
   statuses: Record<string, ModelStatus>;
   hasInstalledModel: boolean;
   /** Resolves true once the model is installed (see useVoiceWave). */
@@ -318,8 +326,27 @@ function MicMeter({
 
 /* ------------------------------------------------------------ onboarding */
 
+/** Shown while the one-time graphics card check runs (driver shader compile,
+ * 25-41 s measured). Dictation already works meanwhile, on the processor. */
+export function GpuPreparingNote({ className = "" }: { className?: string }) {
+  return (
+    <div className={`flex items-start gap-3 rounded-2xl border border-edge bg-inset px-4 py-3 ${className}`} role="status">
+      <span className="vw-gpu-prep-dot mt-1.5" aria-hidden="true" />
+      <div>
+        <p className="text-sm font-semibold text-ink-strong">
+          Getting your graphics card ready (one time, up to a minute)
+        </p>
+        <p className="mt-0.5 text-xs text-hint">
+          Dictation already works. It runs on your processor until this finishes, then gets much faster.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function Onboarding({
   catalog,
+  speechEngine,
   statuses,
   hasInstalledModel,
   installModel,
@@ -337,7 +364,7 @@ export function Onboarding({
 }: OnboardingProps) {
   const [step, setStep] = useState<OnboardingStep>("welcome");
   const [modelChoice, setModelChoice] = useState(
-    () => catalog.find((row) => row.recommended)?.modelId ?? "fw-small.en"
+    () => catalog.find((row) => row.recommended)?.modelId ?? catalog[0]?.modelId ?? "fw-small.en"
   );
   const modelPickedRef = useRef(false);
   // A ref, not state: Retry calls startDownload in the same tick the previous
@@ -387,10 +414,11 @@ export function Onboarding({
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
-  const smallRecommended = catalog.some((row) => row.modelId === "fw-small.en" && row.recommended);
-  const turboRecommended = catalog.some(
-    (row) => row.modelId === "fw-large-v3-turbo" && row.recommended
-  );
+  const smallRow = catalog.find((row) => row.tier === "small");
+  const turboRow = catalog.find((row) => row.tier === "largeTurbo");
+  const gpuMachine = speechEngine?.gpuName != null;
+  const cpuUnsupported = speechEngine?.cpuSupport === "unsupported";
+  const gpuPreparing = speechEngine?.preparing ?? false;
   const catalogRow = catalog.find((row) => row.modelId === modelChoice);
 
   const motes = useMemo(
@@ -569,7 +597,15 @@ export function Onboarding({
                   Private, offline, and yours — audio never leaves this machine.
                 </p>
 
-                {!modelReady && (
+                {cpuUnsupported ? (
+                  <div className="mt-6 max-w-[30rem] rounded-2xl border border-status-danger-border bg-status-danger-bg px-5 py-4" role="alert">
+                    <p className="text-sm font-semibold text-status-danger-text">This PC isn't supported</p>
+                    <p className="mt-1 text-xs leading-relaxed text-status-danger-text">
+                      VoiceWave's speech engine needs a processor with SSE4.1, which almost every PC since 2008
+                      has. This one doesn't, so dictation can't run here.
+                    </p>
+                  </div>
+                ) : !modelReady && smallRow && turboRow && (
                   <div className="mt-6">
                     <p className="text-xs font-semibold uppercase tracking-[0.14em] text-hint">
                       Speech model
@@ -577,17 +613,21 @@ export function Onboarding({
                     <div className="vw-seg mt-2 inline-flex" role="group" aria-label="Speech model choice">
                       <button
                         type="button"
-                        className={`vw-seg-btn ${modelChoice === "fw-small.en" ? "vw-seg-btn-active" : ""}`}
-                        onClick={() => chooseModel("fw-small.en")}
+                        className={`vw-seg-btn ${modelChoice === smallRow.modelId ? "vw-seg-btn-active" : ""}`}
+                        onClick={() => chooseModel(smallRow.modelId)}
                       >
-                        {smallRecommended ? "Small · recommended" : "Small"}
+                        {smallRow.recommended ? "Small · recommended" : "Small"}
                       </button>
                       <button
                         type="button"
-                        className={`vw-seg-btn ${modelChoice === "fw-large-v3-turbo" ? "vw-seg-btn-active" : ""}`}
-                        onClick={() => chooseModel("fw-large-v3-turbo")}
+                        className={`vw-seg-btn ${modelChoice === turboRow.modelId ? "vw-seg-btn-active" : ""}`}
+                        onClick={() => chooseModel(turboRow.modelId)}
                       >
-                        {turboRecommended ? "Large Turbo · recommended" : "Large Turbo · slower on this PC"}
+                        {turboRow.recommended
+                          ? "Large Turbo · recommended"
+                          : gpuMachine
+                            ? "Large Turbo"
+                            : "Large Turbo · slower on this PC"}
                       </button>
                     </div>
                     {catalogRow && (
@@ -618,10 +658,16 @@ export function Onboarding({
                 </div>
 
                 <div className="mt-auto flex items-center gap-3 pt-8">
-                  <button type="button" className="vw-btn-primary" onClick={begin}>
-                    {modelReady ? "Get started" : "Set up VoiceWave"}
-                    <ArrowRight size={16} className="ml-1.5 inline-block" />
-                  </button>
+                  {cpuUnsupported ? (
+                    <button type="button" className="vw-btn-secondary" onClick={onComplete}>
+                      Close setup
+                    </button>
+                  ) : (
+                    <button type="button" className="vw-btn-primary" onClick={begin}>
+                      {modelReady ? "Get started" : "Set up VoiceWave"}
+                      <ArrowRight size={16} className="ml-1.5 inline-block" />
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -729,6 +775,7 @@ export function Onboarding({
                     <p className="mt-1 text-xs text-hint">
                       Longer thought? Double-tap {hotkeyLabel} for hands-free, then pause or press it again.
                     </p>
+                    {gpuPreparing && <GpuPreparingNote className="mt-4" />}
                   </>
                 ) : (
                   // While the model downloads, teach both gestures so the wait

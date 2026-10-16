@@ -1980,3 +1980,31 @@ body {
     transition: none;
   }
 }
+
+/* Plan 019: one-time graphics card check in progress. */
+.vw-gpu-prep-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--vw-cta-gradient);
+  animation: vw-gpu-prep-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes vw-gpu-prep-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vw-gpu-prep-dot {
+    animation: none;
+  }
+}

@@ -35,6 +35,10 @@ import {
   listInputDevices,
   listModelCatalog,
   listVoiceSnippets,
+  answerGpuUpgrade,
+  finishGpuUpgrade,
+  getSpeechEngineStatus,
+  removeModel,
   loadHotkeyConfig,
   loadSnapshot,
   loadSettings,
@@ -104,6 +108,8 @@ import type {
   InsertResult,
   InstalledModel,
   ModelCatalogItem,
+  SpeechEngineStatus,
+  GpuAccelerationMode,
   ModelRecommendation,
   ModelEvent,
   ModelStatus,
@@ -133,8 +139,9 @@ const MIN_RELEASE_TAIL_MS = 120;
 const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
 // Both model families are valid (plan 019): faster-whisper (fw-*) and
-// whisper.cpp GGML (wcpp-*). The backend lists wcpp-* in the catalog only when
-// VOICEWAVE_GGML_MODELS=1, so users still see two models.
+// whisper.cpp GGML (wcpp-*). The backend's catalog shows each PC one family as
+// its two primary rows ("Small", "Large Turbo"), plus installed models of the
+// other family.
 const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo", "wcpp-small.en", "wcpp-large-v3-turbo"] as const;
 // Retired catalog models migrate to the closest surviving option (mirrors
 // normalize_active_model_id in src-tauri/src/settings/mod.rs).
@@ -257,7 +264,9 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
     downloadUrl: "faster-whisper://small.en",
     signature: "local",
     recommended: true,
-    hardwareNote: "Fast on most laptops"
+    hardwareNote: "Fast on most laptops",
+    tier: "small",
+    primary: true
   },
   {
     modelId: "fw-large-v3-turbo",
@@ -270,7 +279,9 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
     downloadUrl: "faster-whisper://large-v3-turbo",
     signature: "local",
     recommended: false,
-    hardwareNote: "Higher accuracy, but much slower without an NVIDIA GPU"
+    hardwareNote: "Higher accuracy, but much slower without a graphics card",
+    tier: "largeTurbo",
+    primary: true
   }
 ];
 
@@ -435,6 +446,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
     onboardingCompleted: settings.onboardingCompleted ?? false,
     theme: settings.theme ?? "system",
+    gpuAcceleration: settings.gpuAcceleration ?? "auto",
     // polishProfile / polishProfileCustomized are deliberately NOT defaulted:
     // their absence is the "legacy backend" signal the UI uses to fall back
     // to inferring a profile from the old deterministic fields (plan 010).
@@ -550,6 +562,7 @@ export function useVoiceWave() {
       {}
     )
   );
+  const [speechEngine, setSpeechEngine] = useState<SpeechEngineStatus | null>(null);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkRun | null>(null);
   const [modelRecommendation, setModelRecommendation] = useState<ModelRecommendation | null>(null);
   const [modelSpeeds, setModelSpeeds] = useState<Record<string, number>>({});
@@ -683,10 +696,22 @@ export function useVoiceWave() {
     [tauriAvailable]
   );
 
+  const refreshSpeechEngine = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setSpeechEngine(await getSpeechEngineStatus());
+    } catch {
+      // Engine status is informational; the next refresh retries.
+    }
+  }, [tauriAvailable]);
+
   const refreshPhase3Data = useCallback(async (activeModelOverride?: string) => {
     if (!tauriAvailable) {
       return;
     }
+    void refreshSpeechEngine();
     try {
       const [catalogRows, installedRows, historyRows, queueRows, termRows, snippetRows, benchmark] = await Promise.all([
         listModelCatalog(),
@@ -724,7 +749,27 @@ export function useVoiceWave() {
     } catch (loadErr) {
       setError(loadErr instanceof Error ? loadErr.message : "Failed to load Phase III data.");
     }
-  }, [settings.activeModel, tauriAvailable]);
+  }, [refreshSpeechEngine, settings.activeModel, tauriAvailable]);
+
+  // The one-time graphics card check takes up to a minute; follow it (and an
+  // accepted upgrade waiting to switch) closely, then refresh the catalog
+  // once it settles so "Running on ..." and the active model catch up.
+  const enginePreparing = speechEngine?.preparing ?? false;
+  const wasPreparingRef = useRef(false);
+  useEffect(() => {
+    if (wasPreparingRef.current && !enginePreparing) {
+      void refreshPhase3Data();
+      void loadSettings()
+        .then((next) => setSettings(normalizeSettings(next)))
+        .catch(() => undefined);
+    }
+    wasPreparingRef.current = enginePreparing;
+    if (!enginePreparing) {
+      return;
+    }
+    const timer = window.setInterval(() => void refreshSpeechEngine(), 1500);
+    return () => window.clearInterval(timer);
+  }, [enginePreparing, refreshPhase3Data, refreshSpeechEngine]);
 
   const refreshDictionary = useCallback(async () => {
     if (!tauriAvailable) {
@@ -846,10 +891,9 @@ export function useVoiceWave() {
       }
     }
 
-    const preferredInstalledOrder = ["fw-small.en", "fw-large-v3-turbo"];
     const installedSet = new Set(installedModels.map((row) => row.modelId));
     const fallbackInstalled =
-      preferredInstalledOrder.find((modelId) => installedSet.has(modelId)) ??
+      modelCatalog.find((row) => row.primary && installedSet.has(row.modelId))?.modelId ??
       installedModels[0]?.modelId ??
       null;
 
@@ -862,9 +906,8 @@ export function useVoiceWave() {
     }
 
     const bootstrapModelId =
-      modelCatalog.find((row) => row.modelId === "fw-small.en")?.modelId ??
-      modelCatalog.find((row) => row.modelId === "fw-large-v3-turbo")?.modelId ??
-      modelCatalog[0]?.modelId ??
+      modelCatalog.find((row) => row.primary && row.recommended)?.modelId ??
+      modelCatalog.find((row) => row.primary)?.modelId ??
       null;
     if (!bootstrapModelId) {
       throw new Error("No models are available in catalog. Open Models and refresh runtime state.");
@@ -1285,6 +1328,23 @@ export function useVoiceWave() {
     [settings, tauriAvailable]
   );
 
+  const setGpuAcceleration = useCallback(
+    async (mode: GpuAccelerationMode) => {
+      const nextSettings = { ...settings, gpuAcceleration: mode };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+        await refreshSpeechEngine();
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save GPU acceleration setting");
+      }
+    },
+    [refreshSpeechEngine, settings, tauriAvailable]
+  );
+
   const [polishModelProgress, setPolishModelProgress] = useState<PolishModelProgress | null>(null);
 
   const setLlmPolishEnabled = useCallback(
@@ -1550,6 +1610,15 @@ export function useVoiceWave() {
         const status = await downloadModel({ modelId });
         setModelStatuses((prev) => ({ ...prev, [modelId]: status }));
         await refreshPhase3Data();
+        if (status.state === "installed" && !isFasterWhisperModelId(modelId)) {
+          // An accepted GPU upgrade switches once its model qualifies; a
+          // no-op for any other download. Runs in the background (up to a
+          // minute on first GPU use) while the engine status is polled.
+          void finishGpuUpgrade()
+            .catch(() => undefined)
+            .finally(() => void refreshPhase3Data());
+          void refreshSpeechEngine();
+        }
         return status.state === "installed";
       } catch (modelErr) {
         const message = modelErr instanceof Error ? modelErr.message : "Model install failed";
@@ -1585,7 +1654,57 @@ export function useVoiceWave() {
         return false;
       }
     },
-    [modelCatalog, refreshPhase3Data, settings.activeModel, tauriAvailable]
+    [modelCatalog, refreshPhase3Data, refreshSpeechEngine, settings.activeModel, tauriAvailable]
+  );
+
+  /** One-time "your graphics card can make dictation faster" notice. Accept
+   * downloads the GGML model with the normal downloader; the backend then
+   * qualifies it and switches. Decline, cancel or failure leave the current
+   * model dictating. */
+  const answerUpgradeOffer = useCallback(
+    async (accept: boolean) => {
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        const modelId = await answerGpuUpgrade(accept);
+        await refreshSpeechEngine();
+        if (!modelId) {
+          return;
+        }
+        if (installedModels.some((row) => row.modelId === modelId)) {
+          void finishGpuUpgrade()
+            .catch(() => undefined)
+            .finally(() => void refreshPhase3Data());
+          void refreshSpeechEngine();
+        } else {
+          await installModel(modelId);
+        }
+      } catch (upgradeErr) {
+        setError(upgradeErr instanceof Error ? upgradeErr.message : "The upgrade could not start");
+      }
+    },
+    [installModel, installedModels, refreshPhase3Data, refreshSpeechEngine, tauriAvailable]
+  );
+
+  const removeInstalledModel = useCallback(
+    async (modelId: string) => {
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        await removeModel(modelId);
+        setModelStatuses((prev) => {
+          const next = { ...prev };
+          delete next[modelId];
+          return next;
+        });
+        await refreshPhase3Data();
+      } catch (removeErr) {
+        setError(removeErr instanceof Error ? removeErr.message : "Could not remove the model");
+      }
+    },
+    [refreshPhase3Data, tauriAvailable]
   );
 
   const cancelModelInstall = useCallback(async (modelId: string) => {
@@ -2426,6 +2545,7 @@ export function useVoiceWave() {
     lastInsertion,
     lastHotkeyEvent,
     modelCatalog,
+    speechEngine,
     installedModels,
     modelStatuses,
     benchmarkResults,
@@ -2464,6 +2584,10 @@ export function useVoiceWave() {
     recommendedVadThreshold: RECOMMENDED_VAD_THRESHOLD,
     setPreferClipboardFallback,
     setSpokenEditCommands,
+    setGpuAcceleration,
+    answerUpgradeOffer,
+    removeInstalledModel,
+    refreshSpeechEngine,
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,

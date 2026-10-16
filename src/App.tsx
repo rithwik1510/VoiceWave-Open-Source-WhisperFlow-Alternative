@@ -36,7 +36,7 @@ import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard } from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
-import { Onboarding } from "./components/Onboarding";
+import { GpuPreparingNote, Onboarding } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
@@ -50,11 +50,14 @@ import type {
   CodeModeSettings,
   DomainPackId,
   FormatProfile,
+  GpuAccelerationMode,
   MicVolumeGuardMode,
+  ModelCatalogItem,
   PolishOutcome,
   PolishProfile,
   RetentionPolicy,
   SessionHistoryRecord,
+  SpeechEngineStatus,
   ThemePreference,
   VoiceWaveSettings
 } from "./types/voicewave";
@@ -460,6 +463,66 @@ function OverlayModal({ title, subtitle, onClose, children, maxWidthClassName = 
   );
 }
 
+/** Models page: where dictation runs, the one-time graphics card check, an
+ * accepted upgrade in flight, and a nudge to Small when Large Turbo is stuck
+ * on the processor (~10 s per dictation there). */
+function ModelEngineStatus({
+  engine,
+  activeRow,
+  smallRow,
+  pendingRow,
+  smallInstalled,
+  onUseSmall
+}: {
+  engine: SpeechEngineStatus;
+  activeRow: ModelCatalogItem | null;
+  smallRow: ModelCatalogItem | null;
+  pendingRow: ModelCatalogItem | null;
+  smallInstalled: boolean;
+  onUseSmall: (modelId: string) => void;
+}) {
+  if (engine.preparing) {
+    return <GpuPreparingNote className="mt-4" />;
+  }
+  const onCpu = engine.runningOn?.device === "cpu";
+  const turboOnCpu = onCpu && activeRow?.tier === "largeTurbo" && smallRow !== null;
+  return (
+    <div className="mt-4 space-y-1.5 text-sm">
+      {engine.runningOn && (
+        <p className="flex items-center gap-2 text-label">
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${onCpu ? "bg-edge-strong" : "bg-accent"}`}
+            aria-hidden="true"
+          />
+          {engine.runningOn.device === "gpu"
+            ? `Running on ${engine.runningOn.name ?? engine.gpuName ?? "your graphics card"}`
+            : "Running on your processor"}
+        </p>
+      )}
+      {engine.qualification === "failed" && engine.gpuName && (
+        <p className="text-xs text-faint" title={engine.qualificationDetail ?? undefined}>
+          Your {engine.gpuName} didn't pass VoiceWave's quick check, so dictation stays on your processor.
+        </p>
+      )}
+      {pendingRow && (
+        <p className="text-xs text-faint">
+          Switching to {pendingRow.displayName} once it's downloaded and checked. Dictation keeps working meanwhile.
+        </p>
+      )}
+      {turboOnCpu && smallRow && (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <p className="text-xs text-faint">
+            Large Turbo takes around 10 seconds per dictation on the processor. Small is much faster here.
+          </p>
+          <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => onUseSmall(smallRow.modelId)}>
+            {smallInstalled ? "Switch to Small" : `Get Small (${formatBytes(smallRow.sizeBytes)})`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const theme = THEMES.A;
   const [activeNav, setActiveNav] = useState("home");
@@ -511,6 +574,8 @@ function App() {
   const [snippetSyncError, setSnippetSyncError] = useState<string | null>(null);
   // The user's explicit pick in the model gate; null follows the per-PC default.
   const [setupModelChoice, setSetupModelChoice] = useState<string | null>(null);
+  // Models page: the row whose Remove is waiting for a second click.
+  const [confirmRemoveModelId, setConfirmRemoveModelId] = useState<string | null>(null);
   const {
     activeState,
     approveDictionaryQueueEntry,
@@ -568,6 +633,10 @@ function App() {
     setReleaseTailMs,
     setPreferClipboardFallback,
     setSpokenEditCommands,
+    setGpuAcceleration,
+    speechEngine,
+    answerUpgradeOffer,
+    removeInstalledModel,
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,
@@ -659,10 +728,13 @@ function App() {
     [cloudRecentSentences, cloudUserId, sessionHistory]
   );
   const hasInstalledModel = installedModels.length > 0;
-  const setupCatalog = useMemo(
-    () => modelCatalog.filter((row) => row.modelId === "fw-small.en" || row.modelId === "fw-large-v3-turbo"),
-    [modelCatalog]
-  );
+  // AI polish (llama.cpp) is built for AVX2 processors.
+  const polishUnsupported = speechEngine !== null && speechEngine.cpuSupport !== "full";
+  // This PC's two rows, "Small" and "Large Turbo" (whisper.cpp on GPU-path
+  // machines, faster-whisper elsewhere). Onboarding, the gate and the Models
+  // page all read the same backend catalog.
+  const setupCatalog = useMemo(() => modelCatalog.filter((row) => row.primary), [modelCatalog]);
+  const cpuUnsupported = speechEngine?.cpuSupport === "unsupported";
   const showOnboarding = tauriAvailable && !settings.onboardingCompleted;
   // The plain model gate stays as the fallback for users who skipped
   // onboarding without installing a model; it hides while the flow is up.
@@ -676,6 +748,11 @@ function App() {
     !showOnboarding &&
     !showModelSetupGate &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
+  // One-time GPU upgrade notice for existing faster-whisper users (plan 019);
+  // never stacked on the other first-run dialogs.
+  const upgradeOffer = speechEngine?.upgradeOffer ?? null;
+  const showUpgradeNotice =
+    tauriAvailable && !showOnboarding && !showModelSetupGate && !showAnalyticsConsent && upgradeOffer !== null;
   // The gate shows, in order: a download already running (picked in
   // onboarding before "Skip setup", or started here), the user's pick, a
   // download that failed or was cancelled (so Resume is one click), then the
@@ -693,6 +770,7 @@ function App() {
     setupModelChoice ??
     interruptedSetupModelId ??
     setupCatalog.find((row) => row.recommended)?.modelId ??
+    setupCatalog[0]?.modelId ??
     "fw-small.en";
   const selectedSetupCatalogRow = setupCatalog.find((row) => row.modelId === gateModelId) ?? null;
   const selectedSetupStatus = modelStatuses[gateModelId];
@@ -1572,13 +1650,29 @@ function App() {
                     <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Model Manager</h3>
                     <p className="mt-1 text-sm text-faint">
                       {installedModels.length} of {modelCatalog.length} installed · active{" "}
-                      <span className="font-semibold text-ink-strong">{settings.activeModel}</span>
+                      <span className="font-semibold text-ink-strong">
+                        {modelCatalog.find((row) => row.modelId === settings.activeModel)?.displayName ??
+                          settings.activeModel}
+                      </span>
                     </p>
                   </div>
                   <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={() => void refreshPhase3Data()}>
                     Refresh
                   </button>
                 </div>
+
+                {speechEngine && (
+                  <ModelEngineStatus
+                    engine={speechEngine}
+                    activeRow={modelCatalog.find((row) => row.modelId === settings.activeModel) ?? null}
+                    smallRow={setupCatalog.find((row) => row.tier === "small") ?? null}
+                    pendingRow={modelCatalog.find((row) => row.modelId === speechEngine.pendingUpgrade) ?? null}
+                    smallInstalled={setupCatalog.some((row) => row.tier === "small" && installedModelSet.has(row.modelId))}
+                    onUseSmall={(modelId) =>
+                      void (installedModelSet.has(modelId) ? makeModelActive(modelId) : installModel(modelId))
+                    }
+                  />
+                )}
 
                 <div className="vw-row-list mt-5">
                   {modelCatalog.map((model) => {
@@ -1672,6 +1766,34 @@ function App() {
                                 onClick={() => void makeModelActive(model.modelId)}
                               >
                                 Make Active
+                              </button>
+                            )}
+                            {isInstalled && !isActiveModel && (
+                              <button
+                                type="button"
+                                className={`vw-btn-sm ${
+                                  confirmRemoveModelId === model.modelId ? "vw-btn-danger" : "vw-btn-secondary"
+                                }`}
+                                title={`Delete this model and free ${formatBytes(
+                                  installedModels.find((row) => row.modelId === model.modelId)?.sizeBytes ??
+                                    model.sizeBytes
+                                )}`}
+                                onBlur={() => setConfirmRemoveModelId(null)}
+                                onClick={() => {
+                                  if (confirmRemoveModelId !== model.modelId) {
+                                    setConfirmRemoveModelId(model.modelId);
+                                    return;
+                                  }
+                                  setConfirmRemoveModelId(null);
+                                  void removeInstalledModel(model.modelId);
+                                }}
+                              >
+                                {confirmRemoveModelId === model.modelId
+                                  ? "Confirm remove"
+                                  : `Remove · ${formatBytes(
+                                      installedModels.find((row) => row.modelId === model.modelId)?.sizeBytes ??
+                                        model.sizeBytes
+                                    )}`}
                               </button>
                             )}
                           </div>
@@ -2823,6 +2945,31 @@ function App() {
 
                   <div className="vw-set-row">
                     <div>
+                      <p className="vw-set-title">GPU acceleration</p>
+                      <p className="vw-set-desc">
+                        {settings.gpuAcceleration === "off"
+                          ? "Dictation runs on your processor."
+                          : speechEngine?.gpuName
+                            ? `Dictation uses your ${speechEngine.gpuName} after a one-time check, and falls back to your processor if it's ever unavailable.`
+                            : "No supported graphics card on this PC, so dictation runs on your processor."}
+                      </p>
+                    </div>
+                    <div className="vw-seg" role="group" aria-label="GPU acceleration">
+                      {(["auto", "off"] as GpuAccelerationMode[]).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          className={`vw-seg-btn ${(settings.gpuAcceleration ?? "auto") === mode ? "vw-seg-btn-active" : ""}`}
+                          onClick={() => void setGpuAcceleration(mode)}
+                        >
+                          {mode === "auto" ? "Auto" : "Off"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
                       <p className="vw-set-title">Spoken edit commands</p>
                       <p className="vw-set-desc">
                         Say "new line", "new paragraph", or "bullet point" to add structure while dictating.
@@ -2865,16 +3012,17 @@ function App() {
                     <div>
                       <p className="vw-set-title">On-device AI polish</p>
                       <p className="vw-set-desc">
-                        Standard can offer a cleaned-up version after insertion. Coding and Writing use the
-                        validated local result as the inserted text. Nothing is sent to the cloud; first use
-                        needs a one-time ~1 GB model download.
+                        {polishUnsupported
+                          ? "AI polish needs a processor with AVX2 support, which this PC doesn't have. Dictation and formatting still work as usual."
+                          : "Standard can offer a cleaned-up version after insertion. Coding and Writing use the validated local result as the inserted text. Nothing is sent to the cloud; first use needs a one-time ~1 GB model download."}
                       </p>
                     </div>
                     <span className="vw-switch">
                       <input
                         type="checkbox"
                         aria-label="Enable on-device AI polish"
-                        checked={settings.llmPolishEnabled ?? false}
+                        checked={!polishUnsupported && (settings.llmPolishEnabled ?? false)}
+                        disabled={polishUnsupported}
                         onChange={(event) => void setLlmPolishEnabled(event.target.checked)}
                       />
                       <span className="vw-switch-track" aria-hidden="true" />
@@ -3455,6 +3603,7 @@ function App() {
       {showOnboarding && (
         <Onboarding
           catalog={setupCatalog}
+          speechEngine={speechEngine}
           statuses={modelStatuses}
           hasInstalledModel={hasInstalledModel}
           installModel={installModel}
@@ -3504,6 +3653,43 @@ function App() {
         </div>
       )}
 
+      {showUpgradeNotice && upgradeOffer && (
+        <div className="vw-model-gate-backdrop">
+          <section
+            className="vw-model-gate-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Faster dictation with your graphics card"
+          >
+            <header>
+              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
+                {upgradeOffer.tier === "largeTurbo"
+                  ? "Your graphics card can make dictation up to 10× faster"
+                  : "Your graphics card can make dictation faster"}
+              </h3>
+              <p className="mt-1 text-sm text-faint">
+                One-time download ({formatBytes(upgradeOffer.sizeBytes)}) of the{" "}
+                {upgradeOffer.tier === "largeTurbo" ? "Large Turbo" : "Small"} model built for your{" "}
+                {speechEngine?.gpuName ?? "graphics card"}.
+              </p>
+            </header>
+            <p className="mt-4 text-sm leading-relaxed text-label">
+              Dictation keeps working as it does now while it downloads. VoiceWave runs a quick check on your
+              graphics card, then switches over. If anything goes wrong you stay on your current model, which also
+              stays installed as a backup.
+            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+              <button type="button" className="vw-btn-primary" onClick={() => void answerUpgradeOffer(true)}>
+                Download ({formatBytes(upgradeOffer.sizeBytes)})
+              </button>
+              <button type="button" className="vw-btn-secondary" onClick={() => void answerUpgradeOffer(false)}>
+                Not now
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {showModelSetupGate && (
         <div className="vw-model-gate-backdrop">
           <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Enable Dictation">
@@ -3516,6 +3702,15 @@ function App() {
               </p>
             </header>
 
+            {cpuUnsupported ? (
+              <div className="mt-4 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3" role="alert">
+                <p className="text-sm font-semibold text-status-danger-text">This PC isn't supported</p>
+                <p className="mt-1 text-xs leading-relaxed text-status-danger-text">
+                  VoiceWave's speech engine needs a processor with SSE4.1, which this one doesn't have.
+                </p>
+              </div>
+            ) : (
+            <>
             <div className="vw-model-gate-tabs" role="tablist" aria-label="Model size selector">
               {setupCatalog.map((row) => (
                 <button
@@ -3529,7 +3724,7 @@ function App() {
                 >
                   {row.recommended && <span className="vw-model-gate-badge">Recommended</span>}
                   <span className="vw-model-gate-tab-title">
-                    {row.modelId === "fw-small.en" ? "Small" : "Large Turbo"}
+                    {row.tier === "small" ? "Small" : "Large Turbo"}
                   </span>
                   <span className="vw-model-gate-tab-copy">{row.hardwareNote}</span>
                 </button>
@@ -3552,10 +3747,12 @@ function App() {
                 />
               ) : (
                 <button type="button" className="vw-btn-primary" onClick={() => void handleSetupModelInstall()}>
-                  {gateModelId === "fw-small.en" ? "Download Small Model" : "Download Large Model"}
+                  {selectedSetupCatalogRow?.tier === "largeTurbo" ? "Download Large Model" : "Download Small Model"}
                 </button>
               )}
             </div>
+            </>
+            )}
           </section>
         </div>
       )}
