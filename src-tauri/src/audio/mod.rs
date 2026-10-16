@@ -905,17 +905,18 @@ fn trim_capture_edges(samples: &[f32], frame_size: usize, threshold: f32) -> Vec
     };
     let last = last_voiced_frame.unwrap_or(first);
 
-    // Head padding: keep 4 leading silent frames (~80 ms) so leading
-    // consonants (plosives like "p", "t", "k") are not clipped.
-    const HEAD_PAD_FRAMES: usize = 4;
-    // Tail padding: keep 15 trailing frames (~300 ms at 16 kHz with 20 ms
+    // Head padding: keep 25 leading frames (~500 ms). Soft onsets ("re-",
+    // "can", "f") sit below the threshold for longer than a plosive burst;
+    // the old 80 ms pad turned "Restart" into "Please start" on real
+    // dictation (2026-10 replay sweep: 9/20 -> 12/20 exact with 500 ms).
+    const HEAD_PAD_FRAMES: usize = 25;
+    // Tail padding: keep 25 trailing frames (~500 ms at 16 kHz with 20 ms
     // frames) past the last voiced frame so soft word endings ("s", "th",
     // "f", drifted "e") that drop below the VAD threshold still get
-    // delivered to the decoder. This must stay >= TAIL_PAD_FRAMES in
+    // delivered to the decoder. Both pads must stay >= the pads in
     // trim_low_energy_edges (inference/audio_pipeline.rs) — otherwise the
-    // inference-layer trim has nothing to pad with and soft word endings
-    // are lost.
-    const TAIL_PAD_FRAMES: usize = 15;
+    // inference-layer trim has nothing to pad with.
+    const TAIL_PAD_FRAMES: usize = 25;
     let start_frame = first.saturating_sub(HEAD_PAD_FRAMES);
     let end_frame_exclusive = last.saturating_add(1).saturating_add(TAIL_PAD_FRAMES);
     let start = start_frame.saturating_mul(frame_size).min(samples.len());

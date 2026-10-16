@@ -107,7 +107,12 @@ export interface VoiceWaveSettings {
    * profile's defaults ("Writing · Customized"). Optional for the same
    * legacy-backend reason as `polishProfile`. */
   polishProfileCustomized?: boolean;
+  /** Settings → Dictation → GPU acceleration (plan 019). Off keeps dictation
+   * on the processor. The backend defaults it to "auto". */
+  gpuAcceleration?: GpuAccelerationMode;
 }
+
+export type GpuAccelerationMode = "auto" | "off";
 
 export interface VoiceWaveSnapshot {
   state: VoiceWaveHudState;
@@ -385,6 +390,45 @@ export interface ModelCatalogItem {
   recommended: boolean;
   /** One-line, hardware-specific note shown next to the model. */
   hardwareNote: string;
+  /** "Small" or "Large Turbo", whichever engine family the row belongs to. */
+  tier: ModelTier;
+  /** One of the two rows offered on this PC. False for an installed model of
+   * the other family (e.g. an upgrader's processor fallback), listed only so
+   * it can be used or removed. */
+  primary: boolean;
+}
+
+export type ModelTier = "small" | "largeTurbo";
+
+/** A model the backend offers to download (GPU upgrade, or the processor model). */
+export interface ModelOffer {
+  modelId: string;
+  tier: ModelTier;
+  sizeBytes: number;
+}
+
+/** Plan 019 engine state from `get_speech_engine_status`. */
+export interface SpeechEngineStatus {
+  /** "unsupported" = no SSE4.1 (nothing can run); "noAvx2" = no GPU engine
+   * and no AI polish. */
+  cpuSupport: "full" | "noAvx2" | "unsupported";
+  /** The graphics card dictation uses, on machines that have one that qualifies. */
+  gpuName: string | null;
+  recommendedModelId: string;
+  /** Where the active model runs, as the speech worker reported it; null
+   * while the one-time graphics card check runs or is about to. */
+  runningOn: { device: "gpu" | "cpu"; name: string | null } | null;
+  /** The one-time graphics card check (shader compile + test clips) is
+   * running, or starts any moment (model just activated, app just launched). */
+  preparing: boolean;
+  qualification: "passed" | "failed" | "retry" | null;
+  qualificationDetail: string | null;
+  upgradeOffer: ModelOffer | null;
+  pendingUpgrade: string | null;
+  /** The active graphics-card model is stuck on the processor (check failed,
+   * GPU cooling down or gone, acceleration off) with no processor model
+   * installed, so every dictation is slow: the model to switch to. */
+  cpuModelOffer: ModelOffer | null;
 }
 
 export interface InstalledModel {

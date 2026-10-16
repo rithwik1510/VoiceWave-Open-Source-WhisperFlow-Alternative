@@ -42,6 +42,13 @@ pub struct LatencyMetricRecord {
     pub backend_requested: String,
     pub backend_used: String,
     pub backend_fallback: bool,
+    /// Engine that produced the text ("faster-whisper", "whisper.cpp-vulkan",
+    /// "whisper.cpp-cpu"); `backend_used` comes from the engine's own report.
+    #[serde(default)]
+    pub asr_engine: Option<String>,
+    /// Why the dictation left the GPU rung (error class + detail), if it did.
+    #[serde(default)]
+    pub asr_step_down_reason: Option<String>,
     pub hold_to_first_draft_ms: u64,
     pub incremental_decode_ms: u64,
     pub release_finalize_ms: u64,
@@ -163,6 +170,9 @@ struct DiagnosticsBundle {
     exported_at_utc_ms: u64,
     redaction_summary: String,
     settings_snapshot: DiagnosticsSettingsSnapshot,
+    /// Plan 019 engine selection: CPU support, chosen GPU identity,
+    /// qualification results with timings, per-driver disables.
+    speech_engine: serde_json::Value,
     aggregate: DiagnosticsAggregate,
     recent_records: Vec<LatencyMetricRecord>,
 }
@@ -333,6 +343,7 @@ impl DiagnosticsManager {
         app_version: &str,
         settings: &VoiceWaveSettings,
         watchdog_recovery_count: u64,
+        speech_engine: serde_json::Value,
     ) -> Result<DiagnosticsExportResult, DiagnosticsError> {
         if !opt_in {
             return Err(DiagnosticsError::OptInRequired);
@@ -359,6 +370,7 @@ impl DiagnosticsManager {
                 release_tail_ms: settings.release_tail_ms,
                 prefer_clipboard_fallback: settings.prefer_clipboard_fallback,
             },
+            speech_engine,
             aggregate: aggregate_metrics(&self.store.records, watchdog_recovery_count),
             recent_records: self
                 .store
@@ -661,6 +673,8 @@ mod tests {
                 backend_requested: "cpu".to_string(),
                 backend_used: "cpu".to_string(),
                 backend_fallback: false,
+                asr_engine: None,
+                asr_step_down_reason: None,
                 hold_to_first_draft_ms: 0,
                 incremental_decode_ms: 0,
                 release_finalize_ms: 30,
@@ -720,6 +734,8 @@ mod tests {
                 backend_requested: "cuda".to_string(),
                 backend_used: "cuda".to_string(),
                 backend_fallback: false,
+                asr_engine: None,
+                asr_step_down_reason: None,
                 hold_to_first_draft_ms: 850,
                 incremental_decode_ms: 1100,
                 release_finalize_ms: 900,
@@ -770,7 +786,13 @@ mod tests {
         let mut manager = test_manager("opt-in");
 
         let err = manager
-            .export_bundle(false, "0.1.0", &VoiceWaveSettings::default(), 0)
+            .export_bundle(
+                false,
+                "0.1.0",
+                &VoiceWaveSettings::default(),
+                0,
+                serde_json::Value::Null,
+            )
             .expect_err("export should require opt in");
         assert!(matches!(err, DiagnosticsError::OptInRequired));
     }
@@ -803,6 +825,8 @@ mod tests {
                 backend_requested: "cpu".to_string(),
                 backend_used: "cpu".to_string(),
                 backend_fallback: false,
+                asr_engine: None,
+                asr_step_down_reason: None,
                 hold_to_first_draft_ms: 0,
                 incremental_decode_ms: 0,
                 release_finalize_ms: 0,
@@ -862,6 +886,8 @@ mod tests {
                 backend_requested: "cpu".to_string(),
                 backend_used: "cpu".to_string(),
                 backend_fallback: false,
+                asr_engine: None,
+                asr_step_down_reason: None,
                 hold_to_first_draft_ms: 0,
                 incremental_decode_ms: 0,
                 release_finalize_ms: 0,
@@ -935,6 +961,8 @@ mod tests {
                 backend_requested: "cpu".to_string(),
                 backend_used: "cpu".to_string(),
                 backend_fallback: false,
+                asr_engine: None,
+                asr_step_down_reason: None,
                 hold_to_first_draft_ms: 0,
                 incremental_decode_ms: 0,
                 release_finalize_ms: 0,

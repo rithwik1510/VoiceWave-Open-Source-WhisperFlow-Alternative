@@ -16,7 +16,9 @@ const CATALOG: ModelCatalogItem[] = [
     downloadUrl: "https://example.invalid",
     signature: "local",
     recommended: true,
-    hardwareNote: "Fast on most laptops"
+    hardwareNote: "Fast on most laptops",
+    tier: "small",
+    primary: true
   }
 ];
 
@@ -33,10 +35,15 @@ function makeSnapshot(overrides: Partial<VoiceWaveSnapshot> = {}): VoiceWaveSnap
 function renderFlow(overrides: Partial<Parameters<typeof Onboarding>[0]> = {}) {
   const props = {
     catalog: CATALOG,
+    speechEngine: null,
     statuses: {},
     hasInstalledModel: true,
-    installModel: vi.fn().mockResolvedValue(undefined),
+    installModel: vi.fn().mockResolvedValue(true),
+    cancelModelInstall: vi.fn().mockResolvedValue(undefined),
     makeModelActive: vi.fn().mockResolvedValue(undefined),
+    inputDevices: [],
+    inputDevice: null,
+    setInputDevice: vi.fn().mockResolvedValue(undefined),
     hotkeyLabel: "Ctrl+Windows",
     snapshot: makeSnapshot(),
     usageOptIn: true,

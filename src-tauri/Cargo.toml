@@ -1,6 +1,6 @@
 [package]
 name = "voicewave_core"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 description = "VoiceWave Phase I local core"
 default-run = "voicewave_core"
@@ -15,8 +15,6 @@ tauri-build = { version = "2.0.2", features = [] }
 [features]
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:tauri-plugin-single-instance"]
-whisper-cuda = ["whisper-rs/cuda"]
-whisper-vulkan = ["whisper-rs/vulkan"]
 
 [dependencies]
 aes-gcm = "0.10.3"
@@ -26,6 +24,7 @@ chrono = "0.4.41"
 cpal = "0.15.3"
 directories = "5.0.1"
 ed25519-dalek = "2.1.1"
+flate2 = "1"
 rand = "0.8.5"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.140"
@@ -38,17 +37,12 @@ thiserror = "2.0.12"
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.13"
 unicode-normalization = "0.1.24"
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
-whisper-rs = "0.15.1"
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
 ureq = "2.12.0"
 zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
-
-[patch.crates-io]
-whisper-rs = { path = "../vendor/whisper-rs" }
-whisper-rs-sys = { path = "../vendor/whisper-rs-sys" }
 
 # `npm run tauri:dev` builds the dev profile, and that binary is what gets
 # daily-driven during development. At opt-level 0 the per-dictation audio DSP

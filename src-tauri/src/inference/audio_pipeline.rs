@@ -26,14 +26,6 @@ pub struct ProcessedAudio {
     pub samples: Vec<f32>,
 }
 
-pub fn process_for_active(samples: &[f32]) -> ProcessedAudio {
-    let version = active_pipeline_version();
-    ProcessedAudio {
-        version,
-        samples: process_for_version(samples, version),
-    }
-}
-
 pub fn process_for_faster_whisper_primary(samples: &[f32]) -> ProcessedAudio {
     let version = select_primary_pipeline_for_faster_whisper();
     ProcessedAudio {
@@ -99,14 +91,6 @@ pub fn process_for_version(samples: &[f32], version: AudioPipelineVersion) -> Ve
         AudioPipelineVersion::V1 => condition_audio_v1(samples),
         AudioPipelineVersion::V2 => condition_audio_v2(samples),
     }
-}
-
-fn active_pipeline_version() -> AudioPipelineVersion {
-    // v1 should only be reachable through explicit emergency switches.
-    if force_v1_enabled() || emergency_v1_enabled() {
-        return AudioPipelineVersion::V1;
-    }
-    AudioPipelineVersion::V2
 }
 
 fn select_primary_pipeline_for_faster_whisper() -> AudioPipelineVersion {
@@ -461,14 +445,15 @@ fn trim_low_energy_edges(samples: &[f32], frame_size: usize, threshold: f32) -> 
     };
     let last = last_voiced_frame.unwrap_or(first);
 
-    // Head padding: 4 frames (~80 ms) so leading plosives (p/t/k) and
-    // aspirated onsets are not clipped.
-    const HEAD_PAD_FRAMES: usize = 4;
-    // Tail padding: 15 frames (~300 ms) so soft word endings that drop below
+    // Head padding: 25 frames (~500 ms), matching the capture layer. Soft
+    // onsets ("re-", "can") stay below the threshold well past 80 ms; the
+    // old 4-frame pad clipped them (2026-10 real-voice replay sweep).
+    const HEAD_PAD_FRAMES: usize = 25;
+    // Tail padding: 25 frames (~500 ms) so soft word endings that drop below
     // the RMS threshold ("...house", "...about", "...thing") survive, AND so
     // Whisper receives an unambiguous trailing-silence cue instead of an
     // audio cliff — which is what was causing the last 2-3 words to drop.
-    const TAIL_PAD_FRAMES: usize = 15;
+    const TAIL_PAD_FRAMES: usize = 25;
 
     let start_frame = first.saturating_sub(HEAD_PAD_FRAMES);
     let end_frame_exclusive = last.saturating_add(1).saturating_add(TAIL_PAD_FRAMES);

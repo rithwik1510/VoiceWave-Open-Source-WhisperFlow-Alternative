@@ -1,7 +1,7 @@
 {
   "name": "voicewave-phase1",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -26,16 +26,8 @@
     "phase5:reliability": "powershell -ExecutionPolicy Bypass -File ./scripts/phase5/run-phase5-reliability.ps1",
     "phase5:reliability:gate": "powershell -ExecutionPolicy Bypass -File ./scripts/phase5/run-phase5-reliability.ps1 -Enforce",
     "release:gate": "powershell -ExecutionPolicy Bypass -File ./scripts/release/run-release-gate.ps1 -Enforce",
-    "phaseA:cpu": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseA/run-phaseA-cpu-latency.ps1",
-    "phaseA:cpu:generate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseA/run-phaseA-cpu-latency.ps1 -Generate",
-    "phaseA:cpu:gate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseA/run-phaseA-cpu-latency.ps1 -Enforce",
     "phaseB:gpu:check": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-gpu-readiness.ps1",
     "phaseB:gpu:check:gate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-gpu-readiness.ps1 -Enforce",
-    "phaseB:gpu": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-gpu-latency.ps1",
-    "phaseB:gpu:generate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-gpu-latency.ps1 -Generate",
-    "phaseB:gpu:gate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-gpu-latency.ps1 -Enforce",
-    "phaseB:fw": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-fw-latency.ps1",
-    "phaseB:fw:generate": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-fw-latency.ps1 -Generate",
     "phaseB:fw:live": "powershell -ExecutionPolicy Bypass -File ./scripts/phaseB/run-phaseB-live-fw-report.ps1",
     "faster-whisper:setup:cpu": "powershell -ExecutionPolicy Bypass -File ./scripts/faster_whisper/setup-faster-whisper-cpu.ps1",
     "faster-whisper:reset": "powershell -ExecutionPolicy Bypass -File ./scripts/faster_whisper/reset-faster-whisper-runtime.ps1",
@@ -61,7 +53,7 @@
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.6",
     "@vitejs/plugin-react": "^4.6.0",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.12",
     "autoprefixer": "^10.4.21",
     "jsdom": "^26.0.0",
     "postcss": "^8.5.10",
@@ -69,10 +61,10 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.2",
     "vite": "^6.4.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "@grpc/grpc-js": "1.9.16",
+    "@grpc/grpc-js": "1.13.7",
     "protobufjs": "7.6.5",
     "ws": "8.21.0",
     "websocket-driver": "0.7.5"

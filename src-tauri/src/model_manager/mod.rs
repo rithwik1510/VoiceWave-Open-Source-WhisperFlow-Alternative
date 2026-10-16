@@ -1,4 +1,5 @@
 use crate::atomic_file;
+use crate::inference::gpu_select::{model_tier, HardwareProfile, ModelTier};
 use base64::Engine;
 use directories::ProjectDirs;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -9,12 +10,17 @@ use std::{
     env, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const FASTER_WHISPER_FORMAT: &str = "faster-whisper";
 const FASTER_WHISPER_VERSION: &str = "faster-whisper-v1";
 const WCPP_FORMAT: &str = "ggml";
+/// huggingface.co/ggerganov/whisper.cpp commit the GGML models are pinned to.
+/// The revision is part of each download URL, so the SHA-256 values below
+/// stay valid even if the repo's files are replaced later.
+const GGML_REPO_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+const WCPP_VERSION: &str = "wcpp-5359861";
 const MANIFEST_VERIFY_KEY_B64: &str = "BFHdCqQYd/56J4tm8cYMUnhrfHOR6YyJqiwXPgO+5gU=";
 // Generated via `generate_fw_small_catalog_signature` test (dev key = production key).
 const BUILTIN_FW_SMALL_SIGNATURE: &str =
@@ -22,6 +28,12 @@ const BUILTIN_FW_SMALL_SIGNATURE: &str =
 // Generated via `generate_fw_turbo_catalog_signature` test (dev key = production key).
 const BUILTIN_FW_LARGE_TURBO_SIGNATURE: &str =
     "IfGO/sqcNE4flIvVG/YcTlrx2DbUDntDGHUtG1dWTiiwEwqwZbYZO/pCwf0q8YZ0gMRmHYyQLddf3Es+Ux42DQ==";
+// Signed with the same dev key over the rows in `build_whispercpp_catalog`
+// (payload: `manifest_signature_payload`). Re-sign if any field changes.
+const BUILTIN_WCPP_SMALL_EN_SIGNATURE: &str =
+    "R7gA3H6JW+GI+vJamDV53bLHKTS4/WMpyLphTSvAjjZIkyt1IYC/x61Uzc+MGo8QHgVA+b663bP6j8UHFvY4Dw==";
+const BUILTIN_WCPP_LARGE_TURBO_SIGNATURE: &str =
+    "501QKU4taYPMqEXngLpXgowESdwCbDfZK5WQljaNXIsB0gIoy6plf/5CFp7tzGxAsr4L5XTnboz0rGC5918QCw==";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -51,12 +63,19 @@ pub struct ModelCatalogItem {
     pub download_url: String,
     pub signature: String,
     /// The model VoiceWave recommends for THIS machine's hardware (exactly one
-    /// catalog row is true). See `recommended_model_id`.
+    /// catalog row is true). See `HardwareProfile::recommended_model_id`.
     #[serde(default)]
     pub recommended: bool,
     /// One honest sentence on how the model will perform on this machine.
     #[serde(default)]
     pub hardware_note: String,
+    /// "Small" or "Large Turbo", whatever the family.
+    pub tier: ModelTier,
+    /// One of the two rows offered on this PC (the GGML family on GPU-path
+    /// machines, faster-whisper elsewhere). False for an installed model of
+    /// the other family, listed only so it can be used or removed.
+    #[serde(default)]
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +217,289 @@ struct DownloadCheckpointStore {
     downloads: Vec<DownloadCheckpoint>,
 }
 
+enum DownloadSource {
+    Http(String),
+    File(PathBuf),
+}
+
+/// A download prepared under the `model_manager` lock by
+/// `ModelManager::begin_download`, run without it (`run`), then recorded
+/// under the lock again by `ModelManager::finish_download`.
+pub struct DownloadPlan {
+    manifest: SignedModelManifest,
+    checkpoint: DownloadCheckpoint,
+    source: DownloadSource,
+    quarantine_dir: PathBuf,
+    max_storage_bytes: Option<u64>,
+    chunk_bytes: usize,
+}
+
+/// How `DownloadPlan::run` ended when it did not fail.
+pub enum DownloadOutcome {
+    /// The partial file is complete and matches the manifest's SHA-256.
+    Verified { sha256: String },
+    /// Cancelled or paused; the partial file is kept for resume.
+    Stopped,
+}
+
+/// Progress events are throttled: HTTP reads return a few KB at a time.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
+impl DownloadPlan {
+    /// Downloads the rest of the artifact into the partial file and checks it
+    /// against the pinned SHA-256. Touches no installed model and no manager
+    /// state, so it runs without the `model_manager` lock.
+    ///
+    /// Resume is always on. If a resumed download fails the hash, the kept
+    /// bytes were bad (or the server's file changed), so the partial is
+    /// discarded and the download restarts from zero once; a fresh download
+    /// that still mismatches is quarantined and reported.
+    pub fn run<F, C, P>(
+        &mut self,
+        mut should_cancel: C,
+        mut should_pause: P,
+        mut on_progress: F,
+    ) -> Result<DownloadOutcome, ModelError>
+    where
+        F: FnMut(ModelStatus),
+        C: FnMut() -> bool,
+        P: FnMut() -> bool,
+    {
+        loop {
+            let resumed_from = self.checkpoint.downloaded_bytes;
+            let Some(actual) =
+                self.fetch(&mut should_cancel, &mut should_pause, &mut on_progress)?
+            else {
+                return Ok(DownloadOutcome::Stopped);
+            };
+            if actual == self.manifest.sha256 {
+                return Ok(DownloadOutcome::Verified { sha256: actual });
+            }
+
+            let model_id = self.manifest.model_id.clone();
+            let partial_path = PathBuf::from(&self.checkpoint.partial_path);
+            self.checkpoint.downloaded_bytes = 0;
+            self.checkpoint.updated_at_utc_ms = now_utc_ms();
+            if resumed_from > 0 {
+                fs::remove_file(&partial_path).map_err(ModelError::Write)?;
+                self.checkpoint.last_error = Some(
+                    "Saved download data was corrupt; restarting from the beginning.".to_string(),
+                );
+                on_progress(status_from_checkpoint(&self.checkpoint, false));
+                continue;
+            }
+
+            let quarantine_path = quarantine_file(
+                &self.quarantine_dir,
+                &partial_path,
+                &model_id,
+                "checksum-mismatch",
+            )?
+            .map(|path| path.to_string_lossy().to_string());
+            self.checkpoint.state = ModelStatusState::Failed;
+            self.checkpoint.last_error = Some(format!(
+                "Checksum mismatch (expected {}, got {}). Artifact quarantined.",
+                self.manifest.sha256, actual
+            ));
+            return Err(ModelError::ChecksumMismatch {
+                model_id,
+                expected: self.manifest.sha256.clone(),
+                actual,
+                quarantine_path,
+            });
+        }
+    }
+
+    /// One pass: hash the bytes already on disk (streamed, never loaded into
+    /// RAM), then download and hash the rest. Returns the SHA-256 of the
+    /// complete partial file, or None when cancelled or paused.
+    fn fetch<F, C, P>(
+        &mut self,
+        should_cancel: &mut C,
+        should_pause: &mut P,
+        on_progress: &mut F,
+    ) -> Result<Option<String>, ModelError>
+    where
+        F: FnMut(ModelStatus),
+        C: FnMut() -> bool,
+        P: FnMut() -> bool,
+    {
+        let partial_path = PathBuf::from(&self.checkpoint.partial_path);
+        // A plain write handle, not append: on Windows an append-only handle
+        // cannot truncate, which a restart from zero needs.
+        let mut partial_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&partial_path)
+            .map_err(ModelError::Write)?;
+        partial_file
+            .set_len(self.checkpoint.downloaded_bytes)
+            .map_err(ModelError::Write)?;
+        partial_file
+            .seek(SeekFrom::End(0))
+            .map_err(ModelError::Write)?;
+
+        let mut hasher = Sha256::new();
+        if self.checkpoint.downloaded_bytes > 0 {
+            let kept = fs::File::open(&partial_path).map_err(ModelError::Read)?;
+            io::copy(
+                &mut kept.take(self.checkpoint.downloaded_bytes),
+                &mut hasher,
+            )
+            .map_err(ModelError::Read)?;
+        }
+
+        let mut source: Box<dyn Read> =
+            if self.checkpoint.downloaded_bytes >= self.checkpoint.total_bytes {
+                // Already complete (e.g. a verified file whose move failed).
+                Box::new(io::empty())
+            } else {
+                self.open_source(&mut partial_file, &mut hasher)?
+            };
+
+        let mut buffer = vec![0_u8; self.chunk_bytes];
+        let mut last_emit: Option<Instant> = None;
+        while self.checkpoint.downloaded_bytes < self.checkpoint.total_bytes {
+            if self.stop_requested(should_cancel, should_pause) {
+                partial_file.flush().map_err(ModelError::Write)?;
+                on_progress(status_from_checkpoint(&self.checkpoint, false));
+                return Ok(None);
+            }
+
+            let read = source.read(&mut buffer).map_err(ModelError::Read)?;
+            if read == 0 {
+                self.checkpoint.state = ModelStatusState::Failed;
+                self.checkpoint.last_error =
+                    Some("Source stream ended before expected size.".to_string());
+                return Err(ModelError::CorruptSource {
+                    model_id: self.manifest.model_id.clone(),
+                    expected: self.checkpoint.total_bytes,
+                });
+            }
+            // Never write past the expected size; a wrong file fails the hash.
+            let remaining = self.checkpoint.total_bytes - self.checkpoint.downloaded_bytes;
+            let read = read.min(usize::try_from(remaining).unwrap_or(usize::MAX));
+
+            let next_total = self.checkpoint.downloaded_bytes + read as u64;
+            if let Some(limit) = self.max_storage_bytes {
+                if next_total > limit {
+                    self.checkpoint.state = ModelStatusState::Failed;
+                    self.checkpoint.last_error = Some(format!(
+                        "Low disk detected. Needed {next_total} bytes but limit is {limit}."
+                    ));
+                    on_progress(status_from_checkpoint(&self.checkpoint, false));
+                    return Err(ModelError::LowDisk {
+                        model_id: self.manifest.model_id.clone(),
+                        limit,
+                    });
+                }
+            }
+
+            if let Err(write_err) = partial_file.write_all(&buffer[..read]) {
+                if write_err.kind() == io::ErrorKind::StorageFull
+                    || write_err.raw_os_error() == Some(112)
+                {
+                    self.checkpoint.state = ModelStatusState::Failed;
+                    self.checkpoint.last_error =
+                        Some("Low disk while writing model artifact.".to_string());
+                    return Err(ModelError::LowDisk {
+                        model_id: self.manifest.model_id.clone(),
+                        limit: next_total,
+                    });
+                }
+                return Err(ModelError::Write(write_err));
+            }
+            hasher.update(&buffer[..read]);
+
+            self.checkpoint.downloaded_bytes = next_total;
+            self.checkpoint.state = ModelStatusState::Downloading;
+            self.checkpoint.last_error = None;
+            self.checkpoint.updated_at_utc_ms = now_utc_ms();
+            if last_emit.is_none_or(|at| at.elapsed() >= PROGRESS_EMIT_INTERVAL) {
+                on_progress(status_from_checkpoint(&self.checkpoint, false));
+                last_emit = Some(Instant::now());
+            }
+        }
+
+        // Flushed to disk before it can be promoted: a rename alone can
+        // publish a zero-filled file after a power loss.
+        partial_file.sync_all().map_err(ModelError::Write)?;
+        Ok(Some(to_hex(&hasher.finalize())))
+    }
+
+    /// Records a cancel or pause request in the checkpoint.
+    fn stop_requested<C, P>(&mut self, should_cancel: &mut C, should_pause: &mut P) -> bool
+    where
+        C: FnMut() -> bool,
+        P: FnMut() -> bool,
+    {
+        let (state, message) = if should_cancel() {
+            (ModelStatusState::Cancelled, "Download cancelled by user.")
+        } else if should_pause() {
+            (ModelStatusState::Paused, "Download paused.")
+        } else {
+            return false;
+        };
+        self.checkpoint.state = state;
+        self.checkpoint.last_error = Some(message.to_string());
+        self.checkpoint.updated_at_utc_ms = now_utc_ms();
+        true
+    }
+
+    /// Opens the source at the resume offset. A server that ignores the
+    /// Range request gets a clean restart: partial truncated, hash reset.
+    fn open_source(
+        &mut self,
+        partial_file: &mut fs::File,
+        hasher: &mut Sha256,
+    ) -> Result<Box<dyn Read>, ModelError> {
+        let offset = self.checkpoint.downloaded_bytes;
+        match &self.source {
+            DownloadSource::File(path) => {
+                let mut file = fs::File::open(path).map_err(|err| {
+                    if err.kind() == io::ErrorKind::NotFound {
+                        ModelError::SourceMissing {
+                            model_id: self.manifest.model_id.clone(),
+                            expected_path: path.to_string_lossy().to_string(),
+                        }
+                    } else {
+                        ModelError::Read(err)
+                    }
+                })?;
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(ModelError::Read)?;
+                Ok(Box::new(file))
+            }
+            DownloadSource::Http(url) => {
+                let agent = ureq::AgentBuilder::new()
+                    .timeout_connect(Duration::from_secs(15))
+                    .timeout_read(Duration::from_secs(30))
+                    .build();
+                let mut request = agent.get(url).set("User-Agent", "voicewave/0.1");
+                if offset > 0 {
+                    request = request.set("Range", &format!("bytes={offset}-"));
+                }
+                let response = request.call().map_err(|err| {
+                    ModelError::Read(io::Error::new(io::ErrorKind::Other, err.to_string()))
+                })?;
+                if offset > 0 && response.status() != 206 {
+                    // A 200 carries the whole file from byte 0.
+                    partial_file.set_len(0).map_err(ModelError::Write)?;
+                    partial_file
+                        .seek(SeekFrom::Start(0))
+                        .map_err(ModelError::Write)?;
+                    *hasher = Sha256::new();
+                    self.checkpoint.downloaded_bytes = 0;
+                    self.checkpoint.last_error =
+                        Some("Source does not support resume; restarted download.".to_string());
+                }
+                Ok(Box::new(response.into_reader()))
+            }
+        }
+    }
+}
+
 pub struct ModelManager {
     model_dir: PathBuf,
     source_dir: PathBuf,
@@ -255,11 +557,38 @@ impl ModelManager {
         Ok(manager)
     }
 
-    pub fn list_catalog(&self) -> Vec<ModelCatalogItem> {
-        let gpu_accelerated = crate::inference::gpu_acceleration_available();
+    /// What this PC is offered (plan 019): always two rows, "Small" and
+    /// "Large Turbo", from the machine's model family, plus any installed
+    /// model of the other family (an upgrader's faster-whisper fallback, or
+    /// a GGML model after the GPU went away) so it stays usable and
+    /// removable. `active_model` picks the copy for the row in use.
+    pub fn list_catalog(
+        &self,
+        hardware: &HardwareProfile,
+        active_model: &str,
+    ) -> Vec<ModelCatalogItem> {
+        let primary = [
+            hardware.model_id(ModelTier::Small),
+            hardware.model_id(ModelTier::LargeTurbo),
+        ];
         self.catalog
             .iter()
-            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
+            .filter(|manifest| {
+                primary.contains(&manifest.model_id.as_str())
+                    || self.installed.contains_key(&manifest.model_id)
+            })
+            .filter_map(|manifest| {
+                let active = manifest.model_id == active_model;
+                manifest_to_catalog_item(manifest, Some(hardware), active)
+            })
+            .collect()
+    }
+
+    /// Every catalog model id, both families.
+    pub fn catalog_model_ids(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|manifest| manifest.model_id.clone())
             .collect()
     }
 
@@ -300,9 +629,10 @@ impl ModelManager {
                 expected_path: cache_path.to_string_lossy().to_string(),
             });
         }
-        // The caller only gets here after the worker loaded the model, which
-        // proves model.bin/config parse. This catches the files a successful
-        // load does NOT prove are on disk (e.g. a missing tokenizer.json makes
+        // Callers get here after the worker loaded the model (proving
+        // model.bin/config parse) or when adopting an existing cache at
+        // startup. This catches the files a successful load does NOT prove
+        // are on disk (e.g. a missing tokenizer.json makes
         // faster-whisper silently fetch one online, which then fails offline).
         verify_faster_whisper_snapshot(&cache_path).map_err(|reason| {
             ModelError::IncompleteModel {
@@ -330,12 +660,53 @@ impl ModelManager {
         Ok(installed)
     }
 
+    /// Any catalog model, either family, without machine-specific copy.
     pub fn get_catalog_item(&self, model_id: &str) -> Option<ModelCatalogItem> {
-        let gpu_accelerated = crate::inference::gpu_acceleration_available();
         self.catalog
             .iter()
             .find(|item| item.model_id == model_id)
-            .map(|manifest| manifest_to_catalog_item(manifest, gpu_accelerated))
+            .and_then(|manifest| manifest_to_catalog_item(manifest, None, false))
+    }
+
+    /// Delete an installed model's files and unregister it. Only paths inside
+    /// VoiceWave's own data directory are ever deleted.
+    pub fn remove_model_files(&mut self, model_id: &str) -> Result<(), ModelError> {
+        let Some(installed) = self.installed.get(model_id).cloned() else {
+            return Ok(());
+        };
+        let path = PathBuf::from(&installed.file_path);
+        // A faster-whisper model lives in a Hugging Face cache repo directory
+        // ("models--org--name"); older installs registered that directory,
+        // newer ones its snapshot. Remove the whole repo either way.
+        let target = if is_virtual_model_format(&installed.format) {
+            path.ancestors()
+                .find(|dir| {
+                    dir.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("models--"))
+                })
+                .map(Path::to_path_buf)
+        } else {
+            Some(path)
+        };
+        let data_root = self
+            .model_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.model_dir.clone());
+        if let Some(target) = target.filter(|target| target.starts_with(&data_root)) {
+            let removed = if target.is_dir() {
+                fs::remove_dir_all(&target)
+            } else {
+                fs::remove_file(&target)
+            };
+            match removed {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(ModelError::Write(err)),
+            }
+        }
+        self.remove_installed(model_id)
     }
 
     pub fn get_installed(&self, model_id: &str) -> Option<InstalledModel> {
@@ -363,11 +734,9 @@ impl ModelManager {
         }
 
         if let Some(checkpoint) = self.downloads.get(model_id) {
-            return Some(self.status_from_checkpoint(
-                model_id,
+            return Some(status_from_checkpoint(
                 checkpoint,
                 active_model.is_some_and(|value| value == model_id),
-                None,
             ));
         }
 
@@ -389,11 +758,14 @@ impl ModelManager {
         })
     }
 
+    /// Download, verify and install a model in one call while holding `&mut
+    /// self` throughout. The app splits these phases so the `model_manager`
+    /// lock is not held during the download (see `state.rs` download_model).
     pub fn install_model_resumable<F, C, P>(
         &mut self,
         model_id: &str,
-        mut should_cancel: C,
-        mut should_pause: P,
+        should_cancel: C,
+        should_pause: P,
         mut on_progress: F,
     ) -> Result<ModelStatus, ModelError>
     where
@@ -401,6 +773,18 @@ impl ModelManager {
         C: FnMut() -> bool,
         P: FnMut() -> bool,
     {
+        let mut plan = self.begin_download(model_id)?;
+        let outcome = plan.run(should_cancel, should_pause, &mut on_progress);
+        let status = self.finish_download(plan, outcome)?;
+        if status.installed {
+            on_progress(status.clone());
+        }
+        Ok(status)
+    }
+
+    /// Phase 1 (needs the lock): validate the signed manifest, resolve the
+    /// source and restore the resume checkpoint from the partial file.
+    pub fn begin_download(&mut self, model_id: &str) -> Result<DownloadPlan, ModelError> {
         let manifest = self
             .catalog
             .iter()
@@ -415,9 +799,12 @@ impl ModelManager {
             });
         }
 
+        // The signature covers the pinned sha256, size and URL, so a tampered
+        // catalog entry cannot redirect the download or relax the hash check.
         if validate_manifest_signature(&manifest).is_err() {
             if let Some(checkpoint) = self.downloads.remove(model_id) {
-                let _ = self.quarantine_path(
+                let _ = quarantine_file(
+                    &self.quarantine_dir,
                     Path::new(&checkpoint.partial_path),
                     model_id,
                     "manifest-signature",
@@ -428,7 +815,12 @@ impl ModelManager {
             // Also quarantine any orphan partial artifact if checkpoint metadata is missing.
             let orphan_partial = self.partial_model_path_for(&manifest);
             if orphan_partial.exists() {
-                let _ = self.quarantine_path(&orphan_partial, model_id, "manifest-signature");
+                let _ = quarantine_file(
+                    &self.quarantine_dir,
+                    &orphan_partial,
+                    model_id,
+                    "manifest-signature",
+                );
                 let _ = fs::remove_file(&orphan_partial);
             }
             return Err(ModelError::ManifestSignatureInvalid {
@@ -439,264 +831,106 @@ impl ModelManager {
         fs::create_dir_all(self.model_dir.join("downloads")).map_err(ModelError::Write)?;
         fs::create_dir_all(&self.quarantine_dir).map_err(ModelError::Write)?;
 
-        let mut checkpoint = self.prepare_checkpoint(&manifest)?;
-
-        if should_cancel() {
-            checkpoint.state = ModelStatusState::Cancelled;
-            checkpoint.last_error = Some("Download cancelled before start.".to_string());
-            checkpoint.updated_at_utc_ms = now_utc_ms();
-            self.downloads
-                .insert(model_id.to_string(), checkpoint.clone());
-            self.persist_downloads()?;
-            let status = self.status_from_checkpoint(model_id, &checkpoint, false, None);
-            on_progress(status.clone());
-            return Ok(status);
-        }
-
-        let download_url = manifest.download_url.clone();
-        if is_http_url(&download_url) && checkpoint.downloaded_bytes > 0 && !http_resume_enabled() {
-            if let Ok(_) = fs::remove_file(&checkpoint.partial_path) {
-                checkpoint.downloaded_bytes = 0;
-                checkpoint.state = ModelStatusState::Downloading;
-                checkpoint.last_error =
-                    Some("Restarting download to avoid corrupted resume data.".to_string());
-                checkpoint.updated_at_utc_ms = now_utc_ms();
-                self.downloads
-                    .insert(model_id.to_string(), checkpoint.clone());
-                self.persist_downloads()?;
-            }
-        }
-
-        let mut partial_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&checkpoint.partial_path)
-            .map_err(ModelError::Write)?;
-
-        if checkpoint.downloaded_bytes == 0 {
-            let _ = partial_file.set_len(0);
-        }
-
-        let mut source: Box<dyn Read> = if is_http_url(&download_url) {
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(15))
-                .timeout_read(Duration::from_secs(30))
-                .build();
-            let mut request = agent.get(&download_url).set("User-Agent", "voicewave/0.1");
-            if checkpoint.downloaded_bytes > 0 && http_resume_enabled() {
-                request = request.set("Range", &format!("bytes={}-", checkpoint.downloaded_bytes));
-            }
-            let mut response = request.call().map_err(|err| {
-                ModelError::Read(io::Error::new(io::ErrorKind::Other, err.to_string()))
-            })?;
-            if checkpoint.downloaded_bytes > 0 && http_resume_enabled() && response.status() != 206
-            {
-                checkpoint.downloaded_bytes = 0;
-                checkpoint.state = ModelStatusState::Downloading;
-                checkpoint.last_error =
-                    Some("Source does not support resume; restarted download.".to_string());
-                checkpoint.updated_at_utc_ms = now_utc_ms();
-                let _ = partial_file.set_len(0);
-                self.downloads
-                    .insert(model_id.to_string(), checkpoint.clone());
-                self.persist_downloads()?;
-                response = agent
-                    .get(&download_url)
-                    .set("User-Agent", "voicewave/0.1")
-                    .call()
-                    .map_err(|err| {
-                        ModelError::Read(io::Error::new(io::ErrorKind::Other, err.to_string()))
-                    })?;
-            }
-            Box::new(response.into_reader())
+        let source = if is_http_url(&manifest.download_url) {
+            DownloadSource::Http(manifest.download_url.clone())
         } else {
             let source_path = self.resolve_download_source(&manifest)?;
-            let source_meta = fs::metadata(&source_path).map_err(|err| {
-                if err.kind() == io::ErrorKind::NotFound {
-                    ModelError::SourceMissing {
-                        model_id: model_id.to_string(),
-                        expected_path: source_path.to_string_lossy().to_string(),
+            let source_len = fs::metadata(&source_path)
+                .map_err(|err| {
+                    if err.kind() == io::ErrorKind::NotFound {
+                        ModelError::SourceMissing {
+                            model_id: model_id.to_string(),
+                            expected_path: source_path.to_string_lossy().to_string(),
+                        }
+                    } else {
+                        ModelError::Read(err)
                     }
-                } else {
-                    ModelError::Read(err)
-                }
-            })?;
-            if source_meta.len() != manifest.size {
+                })?
+                .len();
+            if source_len != manifest.size {
                 return Err(ModelError::ManifestSizeMismatch {
                     model_id: model_id.to_string(),
                     expected: manifest.size,
-                    actual: source_meta.len(),
+                    actual: source_len,
                 });
             }
-            let mut file = fs::File::open(&source_path).map_err(|err| {
-                if err.kind() == io::ErrorKind::NotFound {
-                    ModelError::SourceMissing {
-                        model_id: model_id.to_string(),
-                        expected_path: source_path.to_string_lossy().to_string(),
-                    }
-                } else {
-                    ModelError::Read(err)
-                }
-            })?;
-            file.seek(SeekFrom::Start(checkpoint.downloaded_bytes))
-                .map_err(ModelError::Read)?;
-            Box::new(file)
+            DownloadSource::File(source_path)
         };
 
-        let mut buffer = vec![0_u8; self.download_chunk_bytes.max(4 * 1024)];
+        let checkpoint = self.prepare_checkpoint(&manifest)?;
+        Ok(DownloadPlan {
+            manifest,
+            checkpoint,
+            source,
+            quarantine_dir: self.quarantine_dir.clone(),
+            max_storage_bytes: self.max_storage_bytes,
+            chunk_bytes: self.download_chunk_bytes.max(4 * 1024),
+        })
+    }
 
-        while checkpoint.downloaded_bytes < checkpoint.total_bytes {
-            if should_cancel() {
-                checkpoint.state = ModelStatusState::Cancelled;
-                checkpoint.last_error = Some("Download cancelled by user.".to_string());
-                checkpoint.updated_at_utc_ms = now_utc_ms();
-                self.downloads
-                    .insert(model_id.to_string(), checkpoint.clone());
+    /// Phase 3 (needs the lock): record how `DownloadPlan::run` ended. Only a
+    /// verified artifact is moved into place, and `fs::rename` replaces the
+    /// old file in one step (on Windows it fails without touching the target
+    /// if that file is in use), so a working model is never deleted before
+    /// its replacement is ready.
+    pub fn finish_download(
+        &mut self,
+        mut plan: DownloadPlan,
+        outcome: Result<DownloadOutcome, ModelError>,
+    ) -> Result<ModelStatus, ModelError> {
+        let model_id = plan.manifest.model_id.clone();
+        let verified_sha256 = match outcome {
+            Ok(DownloadOutcome::Verified { sha256 }) => sha256,
+            Ok(DownloadOutcome::Stopped) => {
+                self.downloads.insert(model_id, plan.checkpoint.clone());
                 self.persist_downloads()?;
-                let status = self.status_from_checkpoint(model_id, &checkpoint, false, None);
-                on_progress(status.clone());
-                return Ok(status);
+                return Ok(status_from_checkpoint(&plan.checkpoint, false));
             }
-            if should_pause() {
-                checkpoint.state = ModelStatusState::Paused;
-                checkpoint.last_error = Some("Download paused.".to_string());
-                checkpoint.updated_at_utc_ms = now_utc_ms();
-                self.downloads
-                    .insert(model_id.to_string(), checkpoint.clone());
-                self.persist_downloads()?;
-                let status = self.status_from_checkpoint(model_id, &checkpoint, false, None);
-                on_progress(status.clone());
-                return Ok(status);
-            }
-
-            let read = source.read(&mut buffer).map_err(ModelError::Read)?;
-            if read == 0 {
-                checkpoint.state = ModelStatusState::Failed;
-                checkpoint.last_error =
-                    Some("Source stream ended before expected size.".to_string());
-                checkpoint.updated_at_utc_ms = now_utc_ms();
-                self.downloads
-                    .insert(model_id.to_string(), checkpoint.clone());
-                self.persist_downloads()?;
-                return Err(ModelError::CorruptSource {
-                    model_id: model_id.to_string(),
-                    expected: checkpoint.total_bytes,
-                });
-            }
-
-            let next_total = checkpoint.downloaded_bytes + read as u64;
-            if let Some(limit) = self.max_storage_bytes {
-                if next_total > limit {
-                    checkpoint.state = ModelStatusState::Failed;
-                    checkpoint.last_error = Some(format!(
-                        "Low disk detected. Needed {next_total} bytes but limit is {limit}."
-                    ));
-                    checkpoint.updated_at_utc_ms = now_utc_ms();
-                    self.downloads
-                        .insert(model_id.to_string(), checkpoint.clone());
-                    self.persist_downloads()?;
-                    let status = self.status_from_checkpoint(model_id, &checkpoint, false, None);
-                    on_progress(status.clone());
-                    return Err(ModelError::LowDisk {
-                        model_id: model_id.to_string(),
-                        limit,
-                    });
+            Err(err) => {
+                if plan.checkpoint.state != ModelStatusState::Failed {
+                    plan.checkpoint.state = ModelStatusState::Failed;
+                    plan.checkpoint.last_error = Some(err.to_string());
                 }
+                plan.checkpoint.updated_at_utc_ms = now_utc_ms();
+                self.downloads.insert(model_id, plan.checkpoint);
+                self.persist_downloads()?;
+                return Err(err);
             }
-
-            if let Err(write_err) = partial_file.write_all(&buffer[..read]) {
-                let kind = write_err.kind();
-                if kind == io::ErrorKind::StorageFull || write_err.raw_os_error() == Some(112) {
-                    checkpoint.state = ModelStatusState::Failed;
-                    checkpoint.last_error =
-                        Some("Low disk while writing model artifact.".to_string());
-                    checkpoint.updated_at_utc_ms = now_utc_ms();
-                    self.downloads
-                        .insert(model_id.to_string(), checkpoint.clone());
-                    self.persist_downloads()?;
-                    return Err(ModelError::LowDisk {
-                        model_id: model_id.to_string(),
-                        limit: checkpoint.downloaded_bytes + read as u64,
-                    });
-                }
-                return Err(ModelError::Write(write_err));
-            }
-
-            checkpoint.downloaded_bytes = next_total;
-            checkpoint.state = ModelStatusState::Downloading;
-            checkpoint.last_error = None;
-            checkpoint.updated_at_utc_ms = now_utc_ms();
-
-            self.downloads
-                .insert(model_id.to_string(), checkpoint.clone());
-            self.persist_downloads()?;
-            let status = self.status_from_checkpoint(model_id, &checkpoint, false, None);
-            on_progress(status.clone());
-        }
-
-        partial_file.flush().map_err(ModelError::Write)?;
-
-        let final_path = self.final_model_path_for(&manifest);
-        if final_path.exists() {
-            fs::remove_file(&final_path).map_err(ModelError::Write)?;
-        }
-        fs::rename(&checkpoint.partial_path, &final_path).map_err(ModelError::Write)?;
-
-        // GGML/GGUF downloads trust HTTPS integrity (no pre-computed hash available).
-        // Skip reading the whole file into RAM — use metadata for size instead.
-        let skip_checksum = manifest.format == WCPP_FORMAT;
-        let (final_size, verified_checksum) = if skip_checksum {
-            let size = fs::metadata(&final_path)
-                .map(|m| m.len())
-                .unwrap_or(manifest.size);
-            (size, String::new())
-        } else {
-            let verification_bytes = fs::read(&final_path).map_err(ModelError::Read)?;
-            let checksum = sha256_hex(&verification_bytes);
-            (verification_bytes.len() as u64, checksum)
         };
 
-        if !skip_checksum && verified_checksum != manifest.sha256 {
-            let quarantine_path = self
-                .quarantine_path(&final_path, model_id, "checksum-mismatch")?
-                .map(|path| path.to_string_lossy().to_string());
-            checkpoint.downloaded_bytes = 0;
-            checkpoint.state = ModelStatusState::Failed;
-            checkpoint.last_error = Some(format!(
-                "Checksum mismatch (expected {}, got {}). Artifact quarantined.",
-                manifest.sha256, verified_checksum
+        let final_path = self.final_model_path_for(&plan.manifest);
+        if let Err(err) = fs::rename(&plan.checkpoint.partial_path, &final_path) {
+            // The verified partial stays put; a retry re-hashes it and tries
+            // the move again without downloading anything.
+            plan.checkpoint.state = ModelStatusState::Failed;
+            plan.checkpoint.last_error = Some(format!(
+                "Couldn't move the verified model into place: {err}"
             ));
-            checkpoint.updated_at_utc_ms = now_utc_ms();
-            self.downloads
-                .insert(model_id.to_string(), checkpoint.clone());
+            plan.checkpoint.updated_at_utc_ms = now_utc_ms();
+            self.downloads.insert(model_id, plan.checkpoint);
             self.persist_downloads()?;
-            return Err(ModelError::ChecksumMismatch {
-                model_id: model_id.to_string(),
-                expected: manifest.sha256,
-                actual: verified_checksum,
-                quarantine_path,
-            });
+            return Err(ModelError::Write(err));
         }
 
         let installed = InstalledModel {
-            model_id: manifest.model_id.clone(),
-            version: manifest.version.clone(),
-            format: manifest.format.clone(),
-            size_bytes: final_size,
+            model_id: plan.manifest.model_id.clone(),
+            version: plan.manifest.version.clone(),
+            format: plan.manifest.format.clone(),
+            size_bytes: plan.manifest.size,
             file_path: final_path.to_string_lossy().to_string(),
-            sha256: verified_checksum,
+            sha256: verified_sha256,
             installed_at_utc_ms: now_utc_ms(),
-            checksum_verified: !skip_checksum,
+            checksum_verified: true,
         };
 
         self.installed
             .insert(installed.model_id.clone(), installed.clone());
         self.persist_installed()?;
-        self.downloads.remove(model_id);
+        self.downloads.remove(&model_id);
         self.persist_downloads()?;
 
-        let status = ModelStatus {
-            model_id: model_id.to_string(),
+        Ok(ModelStatus {
+            model_id,
             state: ModelStatusState::Installed,
             progress: 100,
             active: false,
@@ -705,12 +939,10 @@ impl ModelManager {
                 "Model installed successfully with manifest + checksum verification.".to_string(),
             ),
             installed_model: Some(installed),
-            downloaded_bytes: Some(manifest.size),
-            total_bytes: Some(manifest.size),
+            downloaded_bytes: Some(plan.manifest.size),
+            total_bytes: Some(plan.manifest.size),
             resumable: false,
-        };
-        on_progress(status.clone());
-        Ok(status)
+        })
     }
 
     #[cfg(test)]
@@ -776,7 +1008,12 @@ impl ModelManager {
 
         if checkpoint.version != manifest.version {
             let old_path = PathBuf::from(&checkpoint.partial_path);
-            let _ = self.quarantine_path(&old_path, &manifest.model_id, "version-drift");
+            let _ = quarantine_file(
+                &self.quarantine_dir,
+                &old_path,
+                &manifest.model_id,
+                "version-drift",
+            );
             let _ = fs::remove_file(old_path);
             checkpoint.version = manifest.version.clone();
             checkpoint.partial_path = partial_path.to_string_lossy().to_string();
@@ -785,14 +1022,20 @@ impl ModelManager {
             checkpoint.last_error = None;
         }
 
+        // The partial file's length is the resume point: it is what actually
+        // reached disk, whatever the last persisted checkpoint said.
+        checkpoint.last_error = None;
         if partial_path.exists() {
             let file_size = fs::metadata(&partial_path).map_err(ModelError::Read)?.len();
             if file_size > manifest.size {
-                let _ =
-                    self.quarantine_path(&partial_path, &manifest.model_id, "oversized-partial");
+                let _ = quarantine_file(
+                    &self.quarantine_dir,
+                    &partial_path,
+                    &manifest.model_id,
+                    "oversized-partial",
+                );
                 let _ = fs::remove_file(&partial_path);
                 checkpoint.downloaded_bytes = 0;
-                checkpoint.state = ModelStatusState::Failed;
                 checkpoint.last_error =
                     Some("Corrupt partial artifact detected and quarantined.".to_string());
             } else {
@@ -803,50 +1046,13 @@ impl ModelManager {
         }
 
         checkpoint.total_bytes = manifest.size;
+        checkpoint.state = ModelStatusState::Downloading;
         checkpoint.updated_at_utc_ms = now_utc_ms();
 
         self.downloads
             .insert(manifest.model_id.clone(), checkpoint.clone());
         self.persist_downloads()?;
         Ok(checkpoint)
-    }
-
-    fn status_from_checkpoint(
-        &self,
-        model_id: &str,
-        checkpoint: &DownloadCheckpoint,
-        active: bool,
-        message_override: Option<String>,
-    ) -> ModelStatus {
-        let progress = if checkpoint.total_bytes == 0 {
-            0
-        } else {
-            ((checkpoint.downloaded_bytes.saturating_mul(100)) / checkpoint.total_bytes).min(100)
-                as u8
-        };
-
-        let resumable = matches!(
-            checkpoint.state,
-            ModelStatusState::Downloading
-                | ModelStatusState::Paused
-                | ModelStatusState::Cancelled
-                | ModelStatusState::Failed
-        );
-
-        ModelStatus {
-            model_id: model_id.to_string(),
-            state: checkpoint.state.clone(),
-            progress,
-            active,
-            installed: false,
-            message: message_override
-                .or_else(|| checkpoint.last_error.clone())
-                .or_else(|| Some("Model download checkpoint restored.".to_string())),
-            installed_model: None,
-            downloaded_bytes: Some(checkpoint.downloaded_bytes),
-            total_bytes: Some(checkpoint.total_bytes),
-            resumable,
-        }
     }
 
     fn load_installed(&mut self) -> Result<(), ModelError> {
@@ -932,7 +1138,8 @@ impl ModelManager {
             match fs::metadata(path) {
                 Ok(meta) => {
                     if meta.len() != model.size_bytes {
-                        let _ = self.quarantine_path(path, model_id, "size-mismatch");
+                        let _ =
+                            quarantine_file(&self.quarantine_dir, path, model_id, "size-mismatch");
                         let _ = fs::remove_file(path);
                         to_remove.push(model_id.clone());
                         changed = true;
@@ -1065,7 +1272,6 @@ impl ModelManager {
                 env_source_dir.as_ref(),
                 &local_source_dir,
             ) {
-                let payload = fs::read(&source_path).map_err(ModelError::Read)?;
                 let format = source_path
                     .extension()
                     .and_then(|ext| ext.to_str())
@@ -1077,8 +1283,8 @@ impl ModelManager {
                         }
                     })
                     .unwrap_or("bin");
-                manifest.size = payload.len() as u64;
-                manifest.sha256 = sha256_hex(&payload);
+                manifest.size = fs::metadata(&source_path).map_err(ModelError::Read)?.len();
+                manifest.sha256 = sha256_file(&source_path).map_err(ModelError::Read)?;
                 manifest.format = format.to_string();
                 manifest.download_url = format!("file://{}", source_path.to_string_lossy());
                 manifest.signature = sign_manifest(manifest);
@@ -1132,39 +1338,6 @@ impl ModelManager {
             manifest.version.replace('.', "_"),
             ext
         ))
-    }
-
-    fn quarantine_path(
-        &self,
-        path: &Path,
-        model_id: &str,
-        reason: &str,
-    ) -> Result<Option<PathBuf>, ModelError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        fs::create_dir_all(&self.quarantine_dir).map_err(ModelError::Write)?;
-
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("bin");
-        let target = self.quarantine_dir.join(format!(
-            "{}-{}-{}.{}",
-            model_id.replace('.', "_"),
-            reason,
-            now_utc_ms(),
-            extension
-        ));
-
-        match fs::rename(path, &target) {
-            Ok(_) => Ok(Some(target)),
-            Err(_) => {
-                fs::copy(path, &target).map_err(ModelError::Write)?;
-                fs::remove_file(path).map_err(ModelError::Write)?;
-                Ok(Some(target))
-            }
-        }
     }
 
     fn reconcile_downloads_after_restart(&mut self) -> Result<(), ModelError> {
@@ -1231,7 +1404,12 @@ impl ModelManager {
         }
 
         for (partial_path, model_id) in quarantine_jobs {
-            let _ = self.quarantine_path(&partial_path, &model_id, "oversized-partial");
+            let _ = quarantine_file(
+                &self.quarantine_dir,
+                &partial_path,
+                &model_id,
+                "oversized-partial",
+            );
             let _ = fs::remove_file(&partial_path);
         }
         if changed {
@@ -1280,6 +1458,73 @@ fn resolve_override_source_path_for_manifest(
     }
 
     None
+}
+
+fn status_from_checkpoint(checkpoint: &DownloadCheckpoint, active: bool) -> ModelStatus {
+    let progress = if checkpoint.total_bytes == 0 {
+        0
+    } else {
+        ((checkpoint.downloaded_bytes.saturating_mul(100)) / checkpoint.total_bytes).min(100) as u8
+    };
+
+    let resumable = matches!(
+        checkpoint.state,
+        ModelStatusState::Downloading
+            | ModelStatusState::Paused
+            | ModelStatusState::Cancelled
+            | ModelStatusState::Failed
+    );
+
+    ModelStatus {
+        model_id: checkpoint.model_id.clone(),
+        state: checkpoint.state.clone(),
+        progress,
+        active,
+        installed: false,
+        message: checkpoint
+            .last_error
+            .clone()
+            .or_else(|| Some("Model download checkpoint restored.".to_string())),
+        installed_model: None,
+        downloaded_bytes: Some(checkpoint.downloaded_bytes),
+        total_bytes: Some(checkpoint.total_bytes),
+        resumable,
+    }
+}
+
+/// Moves `path` into `quarantine_dir` (kept for inspection, out of the way of
+/// the next attempt). Returns the new location, or None if `path` is absent.
+fn quarantine_file(
+    quarantine_dir: &Path,
+    path: &Path,
+    model_id: &str,
+    reason: &str,
+) -> Result<Option<PathBuf>, ModelError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::create_dir_all(quarantine_dir).map_err(ModelError::Write)?;
+
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bin");
+    let target = quarantine_dir.join(format!(
+        "{}-{}-{}.{}",
+        model_id.replace('.', "_"),
+        reason,
+        now_utc_ms(),
+        extension
+    ));
+
+    match fs::rename(path, &target) {
+        Ok(_) => Ok(Some(target)),
+        Err(_) => {
+            fs::copy(path, &target).map_err(ModelError::Write)?;
+            fs::remove_file(path).map_err(ModelError::Write)?;
+            Ok(Some(target))
+        }
+    }
 }
 
 fn now_utc_ms() -> u64 {
@@ -1355,12 +1600,6 @@ fn is_http_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-fn http_resume_enabled() -> bool {
-    env::var("VOICEWAVE_HTTP_RESUME")
-        .map(|value| value == "1")
-        .unwrap_or(false)
-}
-
 fn default_model_format() -> String {
     "bin".to_string()
 }
@@ -1408,52 +1647,74 @@ fn verify_faster_whisper_snapshot(repo_dir: &Path) -> Result<PathBuf, String> {
     Ok(snapshot)
 }
 
-/// The catalog model that suits a machine. The bundled speech runtime decodes
-/// on CPU unless GPU acceleration is available (optional GPU runtime or a
-/// CUDA toolkit, plus an NVIDIA GPU), and on CPU large-v3-turbo is several
-/// times slower than small.en at every clip length: whisper pads each clip to
-/// a 30 s window, so short dictations pay turbo's full encoder cost. Measured
-/// with the shipped worker settings on a Ryzen 7 5800H (8 cores, 12 threads):
-/// small.en 1.7 s / 3.0 s vs turbo 7.4-9.5 s / 8.6 s for 4.8 s / 25 s clips.
-pub fn recommended_model_id(gpu_accelerated: bool) -> &'static str {
-    if gpu_accelerated {
-        "fw-large-v3-turbo"
-    } else {
-        "fw-small.en"
-    }
-}
-
-/// Display name and one-line performance note for a catalog model on this
-/// machine. Turbo is never pitched as a good pick on a CPU-only machine.
-fn model_hardware_fit(model_id: &str, gpu_accelerated: bool) -> (String, String) {
-    let (name, note) = match (model_id, gpu_accelerated) {
-        ("fw-small.en", false) => (
-            "small.en · recommended for this PC",
+/// Display name and one-line performance note for a catalog row on this
+/// machine (`hardware` = None: no machine-specific copy). Turbo is never
+/// pitched as a good pick without a graphics card: on the CPU whisper pads
+/// every clip to a 30 s window, so short dictations pay turbo's full encoder
+/// cost (Ryzen 7 5800H: small.en ~2 s vs turbo 7-9 s per dictation).
+/// `active`: the row is the model dictation uses now.
+fn model_fit(
+    model_id: &str,
+    hardware: Option<&HardwareProfile>,
+    active: bool,
+) -> Option<(String, String)> {
+    let tier = model_tier(model_id)?;
+    let ggml = model_id.starts_with("wcpp-");
+    let name = match tier {
+        ModelTier::Small => "Small",
+        ModelTier::LargeTurbo => "Large Turbo",
+    };
+    let Some(hardware) = hardware else {
+        return Some((name.to_string(), String::new()));
+    };
+    let recommended = hardware.recommended == tier;
+    let (suffix, note) = match (hardware.gpu_path(), ggml, tier) {
+        // GPU-path machine, its own rows.
+        (true, true, ModelTier::Small) if recommended => ("", "Fast on your graphics card."),
+        (true, true, ModelTier::Small) => (
+            "",
+            "Fast on your graphics card, at a third of the download.",
+        ),
+        (true, true, ModelTier::LargeTurbo) if recommended => {
+            ("", "Best accuracy, and fast on your graphics card.")
+        }
+        (true, true, ModelTier::LargeTurbo) => (
+            "",
+            "Best accuracy, but may be slow with this PC's graphics memory.",
+        ),
+        // GPU-path machine, an installed faster-whisper model: the one in
+        // use (an upgrader before the switch), or kept as the fallback.
+        (true, false, _) if active => (" (processor version)", "Runs on your processor."),
+        (true, false, _) => (
+            " (processor version)",
+            "Kept as the backup if your graphics card has a problem. Remove it to free up space.",
+        ),
+        // CPU machine, its own rows.
+        (false, false, ModelTier::Small) => (
+            "",
             "Fast on any modern laptop: about 2 seconds per dictation.",
         ),
-        ("fw-small.en", true) => (
-            "small.en · smaller download",
-            "Fast and accurate, at a third of the download size.",
+        (false, false, ModelTier::LargeTurbo) => (
+            "",
+            "Best accuracy, but expect 7+ seconds per dictation without a graphics card.",
         ),
-        ("fw-large-v3-turbo", false) => (
-            "large-v3-turbo · slower on this PC",
-            "No GPU acceleration here: expect 7+ seconds per dictation, even on fast laptops.",
+        // CPU machine, an installed GGML model (the GPU went away).
+        (false, true, _) => (
+            " (graphics card version)",
+            "Made for a graphics card this PC is not using right now; slower on the processor.",
         ),
-        ("fw-large-v3-turbo", true) => (
-            "large-v3-turbo · recommended for this PC",
-            "Best accuracy, and fast on your NVIDIA GPU.",
-        ),
-        _ => return (model_id.to_string(), String::new()),
     };
-    (name.to_string(), note.to_string())
+    Some((format!("{name}{suffix}"), note.to_string()))
 }
 
 fn manifest_to_catalog_item(
     manifest: &SignedModelManifest,
-    gpu_accelerated: bool,
-) -> ModelCatalogItem {
-    let (display_name, hardware_note) = model_hardware_fit(&manifest.model_id, gpu_accelerated);
-    ModelCatalogItem {
+    hardware: Option<&HardwareProfile>,
+    active: bool,
+) -> Option<ModelCatalogItem> {
+    let tier = model_tier(&manifest.model_id)?;
+    let (display_name, hardware_note) = model_fit(&manifest.model_id, hardware, active)?;
+    Some(ModelCatalogItem {
         model_id: manifest.model_id.clone(),
         display_name,
         version: manifest.version.clone(),
@@ -1463,9 +1724,12 @@ fn manifest_to_catalog_item(
         license: manifest.license.clone(),
         download_url: manifest.download_url.clone(),
         signature: manifest.signature.clone(),
-        recommended: manifest.model_id == recommended_model_id(gpu_accelerated),
+        recommended: hardware
+            .is_some_and(|hardware| manifest.model_id == hardware.recommended_model_id()),
         hardware_note,
-    }
+        tier,
+        primary: hardware.is_some_and(|hardware| hardware.model_id(tier) == manifest.model_id),
+    })
 }
 
 fn manifest_signature_payload(manifest: &SignedModelManifest) -> String {
@@ -1584,9 +1848,9 @@ fn build_synthetic_catalog() -> Vec<SignedModelManifest> {
 fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
     let mut manifests = Vec::new();
 
-    // Catalog intentionally holds exactly two options: the fast default and the
-    // best-accuracy GPU model. fw-large-v3 and the wcpp-* GGML entries were
-    // retired 2026-07; settings normalization migrates users off them.
+    // Users see exactly two options: the fast default and the best-accuracy
+    // model. fw-large-v3 was retired 2026-07; settings normalization migrates
+    // users off it.
     let faster_rows = [
         (
             "fw-small.en",
@@ -1614,6 +1878,41 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
             signature: signature.to_string(),
         };
         manifests.push(manifest);
+    }
+
+    // Plan 019: whisper.cpp GGML models for the speech workers. Both families
+    // are always in the catalog; `list_catalog` shows each machine its own.
+    {
+        let ggml_rows = [
+            (
+                "wcpp-small.en",
+                "ggml-small.en.bin",
+                487_614_201_u64,
+                "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+                BUILTIN_WCPP_SMALL_EN_SIGNATURE,
+            ),
+            (
+                "wcpp-large-v3-turbo",
+                "ggml-large-v3-turbo.bin",
+                1_624_555_275_u64,
+                "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+                BUILTIN_WCPP_LARGE_TURBO_SIGNATURE,
+            ),
+        ];
+        for (model_id, file_name, size, sha256, signature) in ggml_rows {
+            manifests.push(SignedModelManifest {
+                model_id: model_id.to_string(),
+                version: WCPP_VERSION.to_string(),
+                format: WCPP_FORMAT.to_string(),
+                size,
+                sha256: sha256.to_string(),
+                license: "MIT (whisper.cpp + OpenAI Whisper weights)".to_string(),
+                download_url: format!(
+                    "https://huggingface.co/ggerganov/whisper.cpp/resolve/{GGML_REPO_REVISION}/{file_name}"
+                ),
+                signature: signature.to_string(),
+            });
+        }
     }
 
     manifests
@@ -1644,9 +1943,17 @@ fn source_payload_for_manifest(model_id: &str, version: &str, expected_size: u64
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
+    to_hex(&Sha256::digest(bytes))
+}
+
+/// SHA-256 of a file, streamed so a multi-GB model never sits in RAM.
+fn sha256_file(path: &Path) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
+    io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn to_hex(digest: &[u8]) -> String {
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         out.push_str(&format!("{byte:02x}"));
@@ -1724,8 +2031,13 @@ mod tests {
         let ids: Vec<&str> = catalog.iter().map(|m| m.model_id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["fw-small.en", "fw-large-v3-turbo"],
-            "retired models (fw-large-v3, wcpp-*) must not reappear in the catalog"
+            vec![
+                "fw-small.en",
+                "fw-large-v3-turbo",
+                "wcpp-small.en",
+                "wcpp-large-v3-turbo"
+            ],
+            "fw-large-v3 is retired; both families stay in the catalog (plan 019)"
         );
         for manifest in &catalog {
             assert!(

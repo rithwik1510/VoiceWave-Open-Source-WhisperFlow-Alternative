@@ -44,7 +44,7 @@ use history::{
 #[cfg(feature = "desktop")]
 use hotkey::{HotkeyAction, HotkeyConfig, HotkeyPhase, HotkeySnapshot};
 #[cfg(feature = "desktop")]
-use inference::{kill_faster_whisper_workers, llm_polish::kill_polish_worker};
+use inference::{kill_asr_workers, kill_faster_whisper_workers, llm_polish::kill_polish_worker};
 #[cfg(feature = "desktop")]
 use insertion::{InsertResult, InsertTextRequest, RecentInsertion, UndoResult};
 #[cfg(feature = "desktop")]
@@ -837,13 +837,15 @@ fn configure_main_window_close_behavior(app: &tauri::AppHandle, hide_to_tray: bo
     }
 }
 
-/// Kill the python side-processes before the app goes away. Both workers are
-/// spawned DETACHED_PROCESS, so without this a quit during the first-run model
-/// download leaves a python.exe downloading ~487 MB with no UI attached to it.
-/// Safe to call more than once (both helpers no-op when nothing is running).
+/// Kill the worker side-processes before the app goes away. Windows does not
+/// kill children with their parent, so without this a quit during the
+/// first-run model download leaves a python.exe downloading ~487 MB with no UI
+/// attached to it, and a speech worker would keep its model in (V)RAM.
+/// Safe to call more than once (the helpers no-op when nothing is running).
 #[cfg(feature = "desktop")]
 fn shutdown_inference_workers() {
     kill_faster_whisper_workers();
+    kill_asr_workers();
     kill_polish_worker();
 }
 
@@ -1134,6 +1136,26 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
         .set_focus()
         .map_err(|err| format!("failed to focus main window: {err}"))?;
     Ok(())
+}
+
+/// Opens Windows Settings > Privacy > Microphone, where desktop-app mic
+/// access is switched off when onboarding hears nothing. The URI is fixed, so
+/// nothing from the frontend reaches the shell.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn open_microphone_privacy_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg("ms-settings:privacy-microphone")
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("failed to open microphone privacy settings: {err}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("microphone privacy settings are only available on Windows".to_string())
+    }
 }
 
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -1642,6 +1664,60 @@ async fn list_model_catalog(
     Ok(runtime.controller.list_model_catalog().await)
 }
 
+/// Plan 019 engine state for the UI: CPU support, the chosen GPU, where the
+/// active model runs, the one-time GPU check and the upgrade offer.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn get_speech_engine_status(
+    runtime: State<'_, RuntimeContext>,
+) -> Result<state::SpeechEngineStatus, String> {
+    Ok(runtime.controller.speech_engine_status().await)
+}
+
+/// Answer the one-time GPU upgrade notice; returns the model to download
+/// when accepted.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn answer_gpu_upgrade(
+    runtime: State<'_, RuntimeContext>,
+    accept: bool,
+) -> Result<Option<String>, String> {
+    runtime
+        .controller
+        .answer_gpu_upgrade(accept)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
+/// Qualify the accepted upgrade model and switch to it (no-op otherwise).
+/// Can take a minute on first GPU use; the UI polls the engine status.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn finish_gpu_upgrade(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
+    runtime
+        .controller
+        .finish_gpu_upgrade(app)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn remove_model(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+    model_id: String,
+) -> Result<Vec<InstalledModel>, String> {
+    runtime
+        .controller
+        .remove_model(app, model_id)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn list_installed_models(
@@ -2131,6 +2207,9 @@ async fn download_polish_model(
     app: tauri::AppHandle,
     runtime: State<'_, RuntimeContext>,
 ) -> Result<(), String> {
+    if !crate::inference::llm_polish::polish_supported() {
+        return Err(crate::inference::llm_polish::POLISH_UNSUPPORTED_MESSAGE.to_string());
+    }
     let progress_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::inference::llm_polish::download_polish_model(|downloaded, total| {
@@ -2223,8 +2302,13 @@ pub fn run() {
             // + CUDA context init + kernel compilation. After warmup it drops
             // to ~500 ms. Fire-and-forget; never blocks startup.
             let controller_for_prewarm = controller.clone();
+            let app_for_upgrade = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 controller_for_prewarm.prewarm_active_model().await;
+                // A GPU upgrade accepted before a restart: qualify + switch.
+                if let Err(err) = controller_for_prewarm.finish_gpu_upgrade(app_for_upgrade).await {
+                    eprintln!("voicewave: resuming the GPU upgrade failed: {err}");
+                }
                 // Warm the optional formatter only after ASR is ready. Running
                 // both model preloads concurrently causes avoidable CPU, disk,
                 // and memory contention on budget machines.
@@ -2338,6 +2422,7 @@ pub fn run() {
             set_pro_post_processing_enabled,
             set_dictation_profile,
             show_main_window,
+            open_microphone_privacy_settings,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
             set_pill_window_mode,
@@ -2364,6 +2449,10 @@ pub fn run() {
             get_recent_insertions,
             trigger_hotkey_action,
             list_model_catalog,
+            get_speech_engine_status,
+            answer_gpu_upgrade,
+            finish_gpu_upgrade,
+            remove_model,
             list_installed_models,
             get_model_status,
             download_model,

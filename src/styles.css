@@ -1980,3 +1980,45 @@ body {
     transition: none;
   }
 }
+
+/* Plan 019: one-time graphics card check in progress. */
+.vw-gpu-prep-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--vw-cta-gradient);
+  animation: vw-gpu-prep-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes vw-gpu-prep-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+/* The check reports no progress, so the onboarding bar eases toward its
+   ~minute estimate and waits there. */
+.vw-onb-progress-estimate {
+  width: 92%;
+  animation: vw-onb-estimate 50s cubic-bezier(0.15, 0.55, 0.35, 1) both;
+}
+
+@keyframes vw-onb-estimate {
+  from {
+    width: 4%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vw-gpu-prep-dot,
+  .vw-onb-progress-estimate {
+    animation: none;
+  }
+}

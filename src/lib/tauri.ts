@@ -28,6 +28,7 @@ import type {
   InsertTextRequest,
   LatencyBreakdownEvent,
   ModelCatalogItem,
+  SpeechEngineStatus,
   ModelDownloadRequest,
   ModelEvent,
   ModelRecommendation,
@@ -391,6 +392,11 @@ export async function stopMicLevelMonitor(): Promise<void> {
   await invokeVoicewave<void>("stop_mic_level_monitor");
 }
 
+/** Windows Settings > Privacy > Microphone (desktop-app mic access). */
+export async function openMicrophonePrivacySettings(): Promise<void> {
+  await invokeVoicewave<void>("open_microphone_privacy_settings");
+}
+
 export async function runAudioQualityDiagnostic(durationMs?: number): Promise<AudioQualityReport> {
   return invokeVoicewave<AudioQualityReport>("run_audio_quality_diagnostic", {
     durationMs: durationMs ?? null
@@ -461,6 +467,24 @@ export async function triggerHotkeyAction(action: HotkeyAction, phase: HotkeyPha
 
 export async function listModelCatalog(): Promise<ModelCatalogItem[]> {
   return invokeVoicewave<ModelCatalogItem[]>("list_model_catalog");
+}
+
+export async function getSpeechEngineStatus(): Promise<SpeechEngineStatus> {
+  return invokeVoicewave<SpeechEngineStatus>("get_speech_engine_status");
+}
+
+/** Accept (returns the model to download) or decline the one-time GPU upgrade. */
+export async function answerGpuUpgrade(accept: boolean): Promise<string | null> {
+  return invokeVoicewave<string | null>("answer_gpu_upgrade", { accept });
+}
+
+/** Qualify the accepted upgrade model and switch to it; a no-op otherwise. */
+export async function finishGpuUpgrade(): Promise<void> {
+  return invokeVoicewave<void>("finish_gpu_upgrade");
+}
+
+export async function removeModel(modelId: string): Promise<InstalledModel[]> {
+  return invokeVoicewave<InstalledModel[]>("remove_model", { modelId });
 }
 
 export async function listInstalledModels(): Promise<InstalledModel[]> {

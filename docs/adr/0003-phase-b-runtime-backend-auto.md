@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by plan 019 (`plans/019-universal-gpu-speech-engine.md`): the in-process whisper-rs path, `backend.rs` and the `whisper-cuda` feature were removed; whisper.cpp now runs in separate speech worker processes. The `backendRequested` / `backendUsed` / `backendFallback` telemetry fields remain.
 
 ## Context
 

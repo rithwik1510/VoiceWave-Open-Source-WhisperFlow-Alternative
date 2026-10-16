@@ -28,12 +28,33 @@ try {
     throw "Production dependency vulnerabilities exceed policy (high=$prodHigh critical=$prodCritical)."
   }
 
+  # Dev-only advisories with no patched release anywhere, accepted until the
+  # date. Production deps (above) are never allowlisted.
+  # GHSA-vfj7-8cjw-p6xm: braces <=3.0.3, reached only via Tailwind 3's build
+  # tooling on our own glob patterns; the fix is the Tailwind 4 migration.
+  $allowlist = @{ 'GHSA-vfj7-8cjw-p6xm' = [datetime]'2027-01-31' }
+  $activeAllowlist = @($allowlist.Keys | Where-Object { (Get-Date) -lt $allowlist[$_] })
+
   $allAuditRaw = npm audit --json
   $allAudit = $allAuditRaw | ConvertFrom-Json
-  $allHigh = [int]$allAudit.metadata.vulnerabilities.high
-  $allCritical = [int]$allAudit.metadata.vulnerabilities.critical
-  if ($allHigh -gt 0 -or $allCritical -gt 0) {
-    throw "Dependency vulnerabilities exceed policy (high=$allHigh critical=$allCritical)."
+  # Judge the advisories themselves (package severities roll up their
+  # dependencies' advisories, so they would re-count an allowlisted one).
+  $advisories = @{}
+  foreach ($entry in $allAudit.vulnerabilities.PSObject.Properties) {
+    foreach ($via in @($entry.Value.via)) {
+      if ($via -is [string]) { continue }
+      $advisories[($via.url -split '/')[-1]] = $via.severity
+    }
+  }
+  $blocking = @($advisories.Keys | Where-Object {
+      @('high', 'critical') -contains $advisories[$_] -and $activeAllowlist -notcontains $_
+    })
+  $allowed = @($advisories.Keys | Where-Object { $activeAllowlist -contains $_ })
+  if ($allowed.Count -gt 0) {
+    Write-Host ("Allowlisted dev advisories: {0}" -f (($allowed | Sort-Object) -join ', '))
+  }
+  if ($blocking.Count -gt 0) {
+    throw "Dependency vulnerabilities exceed policy (high/critical advisories: $(($blocking | Sort-Object) -join ', '))."
   }
 
   $cargoAudit = Get-Command cargo-audit -ErrorAction SilentlyContinue
@@ -47,7 +68,8 @@ try {
     $result = 'warn-local-skip'
     Write-Warning 'cargo-audit is not installed; skipping Rust advisory scan outside CI.'
   } else {
-    cargo audit -q
+    # The Rust crate lives in src-tauri/, so there is no Cargo.lock at the repo root.
+    cargo audit -q --file (Join-Path $repoRoot 'src-tauri/Cargo.lock')
     if ($LASTEXITCODE -ne 0) {
       throw 'cargo audit reported Rust advisories.'
     }

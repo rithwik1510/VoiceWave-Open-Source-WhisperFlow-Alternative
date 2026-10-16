@@ -28,13 +28,15 @@ use crate::{
         HotkeySnapshot,
     },
     inference::{
-        cancel_faster_whisper_downloads, cpu_runtime_pool_enabled,
-        download_faster_whisper_model, ensure_faster_whisper_ready, faster_whisper_cache_hint,
-        faster_whisper_runtime_model_id, is_faster_whisper_model,
-        note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
-        polish_gate::gate_polish_candidate, prefetch_faster_whisper_model, prewarm_runtime,
-        warmup_faster_whisper_model, warmup_plan_for_model, InferenceError, InferenceWorker,
-        RuntimeDecodePolicy, WarmupPlan,
+        cancel_faster_whisper_download, download_faster_whisper_model, ensure_faster_whisper_ready,
+        gpu_select::hardware_profile_async,
+        faster_whisper_cache_hint, faster_whisper_counterpart, faster_whisper_runtime_model_id,
+        is_faster_whisper_model, is_whisper_cpp_model, note_audio_pipeline_decode_hard_failure,
+        note_audio_pipeline_decode_success, polish_gate::gate_polish_candidate,
+        prefetch_faster_whisper_model, prewarm_asr_worker, release_idle_asr_workers,
+        set_gpu_acceleration, uses_whisper_pipeline, warmup_faster_whisper_model,
+        warmup_plan_for_model, AsrModel, InferenceError, InferenceWorker, RuntimeDecodePolicy,
+        StepDownKind, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
@@ -49,7 +51,8 @@ use crate::{
     settings::{
         apply_profile_defaults, normalize_hotkey_bindings, normalize_pro_settings, resolve_profile,
         AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
-        DomainPackId, FormatProfile, InsertPath, PolishProfile, SettingsError, SettingsStore,
+        DomainPackId, FormatProfile, GpuAcceleration, InsertPath, PolishProfile, SettingsError,
+        SettingsStore,
         VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
     },
     snippet::{
@@ -58,8 +61,8 @@ use crate::{
     },
     stats::{StatsManager, StatsSummary},
     transcript::{
-        finalize_literal_transcript, finalize_pro_transcript, merge_incremental_transcript,
-        sanitize_user_transcript, ProTranscriptOptions,
+        finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
+        ProTranscriptOptions,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -74,7 +77,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -280,8 +283,33 @@ pub fn announce_store_resets(app: &AppHandle) {
     });
 }
 
+/// Copy for the once-per-session GPU step-down pill (plan 019). A Large
+/// Turbo dictation on the processor can take ~10 s, so say why, and point at
+/// Small, which is fast there. `Preparing` normally arrives here when a
+/// faster-whisper model decoded during the GPU check; without one the
+/// dictation waits for the check and its notice goes out up front.
+fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
+    let turbo = model_id.contains("large-v3-turbo");
+    match kind {
+        StepDownKind::Preparing => (
+            "Getting your graphics card ready",
+            "One-time setup, up to a minute. Until then dictation runs on your processor."
+                .to_string(),
+        ),
+        StepDownKind::Unavailable | StepDownKind::Fault => (
+            "Ran on your processor this time",
+            if turbo {
+                "Your graphics card wasn't available, so this took longer. Small is much faster on the processor; switch in Models."
+            } else {
+                "Your graphics card wasn't available, so this one took a little longer."
+            }
+            .to_string(),
+        ),
+    }
+}
+
 /// Cooldown between repeats of the same recurring pill warning (mic guard,
-/// CPU fallback, poor audio) so a persistent condition doesn't nag on every
+/// poor audio) so a persistent condition doesn't nag on every
 /// single dictation.
 const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
 
@@ -356,6 +384,8 @@ struct LatencyBreakdownEvent {
     backend_requested: String,
     backend_used: String,
     backend_fallback: bool,
+    asr_engine: String,
+    asr_step_down_reason: Option<String>,
     hold_to_first_draft_ms: u64,
     incremental_decode_ms: u64,
     release_finalize_ms: u64,
@@ -568,11 +598,6 @@ const RELEASE_WATCHDOG_FAST_MS: u64 = 220;
 const RELEASE_WATCHDOG_FAST_MIN_AUDIO_MS: u64 = 900;
 const SHORT_UTTERANCE_MAX_MS: u64 = 8_000;
 const MEDIUM_UTTERANCE_MAX_MS: u64 = 16_000;
-const INCREMENTAL_DECODE_CADENCE_MS: u64 = 220;
-const INCREMENTAL_MIN_VOICED_MS: u64 = 400;
-const INCREMENTAL_WINDOW_MS: u64 = 1_400;
-const INCREMENTAL_WINDOW_OVERLAP_MS: u64 = 280;
-const FINALIZE_LOOKBACK_MS: u64 = 1_200;
 /// How long capture may sit finished waiting on the speech engine before the
 /// pill explains why. The start-of-dictation GPU warmup normally lands well
 /// inside this, so the notice only fires for a genuinely cold engine.
@@ -581,7 +606,6 @@ const FW_MIN_DECODE_AUDIO_MS_DEFAULT: u64 = 280;
 const FINAL_DECODE_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 const FINAL_DECODE_TIMEOUT_MS_MIN: u64 = 8_000;
 const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 240_000;
-const TRANSCRIPT_OVERLAP_TOKENS: usize = 8;
 const BENCHMARK_RELIABILITY_WINDOW: usize = 40;
 const CORRECTION_SESSION_WINDOW_MS: u64 = 15_000;
 const CORRECTION_MIN_SHARED_RATIO: f32 = 0.72;
@@ -827,12 +851,12 @@ fn asr_integrity_metrics(raw_transcript: &str, final_transcript: &str) -> (f32, 
 }
 
 fn should_reject_low_confidence_transcript_as_no_speech(
-    use_faster_whisper: bool,
+    whisper_pipeline: bool,
     captured_audio_ms: u64,
     transcript: &str,
     fw_no_speech_prob: Option<f32>,
 ) -> bool {
-    if !use_faster_whisper {
+    if !whisper_pipeline {
         return false;
     }
 
@@ -1142,34 +1166,6 @@ fn play_cue_without_blocking(cue: crate::cue::CueSound) {
     tauri::async_runtime::spawn_blocking(move || crate::cue::play(cue));
 }
 
-#[derive(Debug, Clone)]
-struct IncrementalAudioChunk {
-    samples: Vec<f32>,
-    voiced: bool,
-}
-
-#[derive(Debug, Clone)]
-struct DecodeWindow {
-    end_sample: usize,
-    samples: Vec<f32>,
-}
-
-#[derive(Debug)]
-struct DecodeJobResult {
-    window: DecodeWindow,
-    transcript: Option<String>,
-    elapsed_ms: u64,
-}
-
-#[derive(Debug, Default, Clone)]
-struct IncrementalPreviewResult {
-    committed_draft: String,
-    last_committed_sample: usize,
-    hold_to_first_draft_ms: u64,
-    incremental_decode_ms: u64,
-    incremental_windows_decoded: u32,
-}
-
 pub fn release_watchdog_threshold_ms() -> u64 {
     RELEASE_WATCHDOG_MS
 }
@@ -1207,15 +1203,6 @@ fn effective_release_watchdog_threshold_ms(
 
 pub fn release_watchdog_recovered(release_to_transcribing_ms: u64, threshold_ms: u64) -> bool {
     release_to_transcribing_ms > threshold_ms
-}
-
-fn incremental_pre_release_decode_enabled() -> bool {
-    std::env::var("VOICEWAVE_INCREMENTAL_PRE_RELEASE_DECODE_ENABLED")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            normalized == "1" || normalized == "true" || normalized == "on"
-        })
-        .unwrap_or(false)
 }
 
 fn clamp_max_utterance_ms(value: u64) -> u64 {
@@ -1353,11 +1340,12 @@ pub struct VoiceWaveController {
     // Arc + std::sync::Mutex (not tokio) so the fire-and-forget guard task can
     // own a clone without borrowing the controller.
     mic_guard_last_warned_at: Arc<StdMutex<Option<Instant>>>,
-    backend_notice_last_at: Arc<StdMutex<Option<Instant>>>,
     poor_audio_notice_last_at: Arc<StdMutex<Option<Instant>>>,
     // Bluetooth hands-free profiles are a device property, not a transient
     // condition — one heads-up per app session is enough.
     mic_profile_notice_sent: AtomicBool,
+    // At most one GPU step-down pill per app session (plan 019).
+    gpu_notice_sent: AtomicBool,
 }
 
 impl VoiceWaveController {
@@ -1416,7 +1404,25 @@ impl VoiceWaveController {
         let permission_manager = PermissionManager::new(&audio);
         let history_manager = HistoryManager::new()?;
         let billing_manager = BillingManager::new()?;
-        let model_manager = crate::model_manager::ModelManager::new()?;
+        let mut model_manager = crate::model_manager::ModelManager::new()?;
+        // Older builds' startup prewarm downloaded the active model without
+        // registering it. Dictation now requires a registered model, so adopt
+        // any complete cache instead of sending upgraders back through setup.
+        for model_id in model_manager.catalog_model_ids() {
+            if model_manager.get_installed(&model_id).is_some() {
+                continue;
+            }
+            let Some(runtime_model) = faster_whisper_runtime_model_id(&model_id) else {
+                continue;
+            };
+            let cache_dir = faster_whisper_cache_hint(runtime_model);
+            if cache_dir.exists() {
+                // Incomplete caches fail verification and stay unregistered.
+                let _ = model_manager
+                    .install_faster_whisper_model(&model_id, &cache_dir.to_string_lossy());
+            }
+        }
+        set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
         let dictionary_manager = DictionaryManager::new()?;
         let snippet_manager = SnippetManager::new()?;
         let diagnostics_manager = DiagnosticsManager::new()?;
@@ -1433,16 +1439,6 @@ impl VoiceWaveController {
                 eprintln!("stats backfill failed: {err}");
             }
         }
-        if cpu_runtime_pool_enabled() && !is_faster_whisper_model(&settings.active_model) {
-            if let Some(installed_model) = model_manager.get_installed(&settings.active_model) {
-                prewarm_runtime(
-                    settings.active_model.clone(),
-                    installed_model.file_path.clone(),
-                    DecodeMode::Balanced,
-                );
-            }
-        }
-
         Ok(Self {
             audio,
             settings_store,
@@ -1479,9 +1475,9 @@ impl VoiceWaveController {
             decode_policy: Mutex::new(RuntimeDecodePolicy::default()),
             correction_session: Mutex::new(None),
             mic_guard_last_warned_at: Arc::new(StdMutex::new(None)),
-            backend_notice_last_at: Arc::new(StdMutex::new(None)),
             poor_audio_notice_last_at: Arc::new(StdMutex::new(None)),
             mic_profile_notice_sent: AtomicBool::new(false),
+            gpu_notice_sent: AtomicBool::new(false),
         })
     }
 
@@ -1517,24 +1513,64 @@ impl VoiceWaveController {
             toggle: settings.toggle_hotkey.clone(),
             push_to_talk: settings.push_to_talk_hotkey.clone(),
         })?;
+        drop(hotkey_manager);
+        set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
 
         if is_faster_whisper_model(&settings.active_model) {
+            release_idle_asr_workers();
             tauri::async_runtime::spawn(async {
                 let _ = ensure_faster_whisper_ready().await;
             });
-        } else if cpu_runtime_pool_enabled() {
-            let model_path = {
-                let manager = self.model_manager.lock().await;
-                manager
-                    .get_installed(&settings.active_model)
-                    .map(|row| row.file_path.clone())
-            };
-            if let Some(path) = model_path {
-                prewarm_runtime(settings.active_model.clone(), path, DecodeMode::Balanced);
-            }
+        } else if is_whisper_cpp_model(&settings.active_model) {
+            self.spawn_asr_worker_prewarm(&settings.active_model).await;
         }
 
         Ok(settings)
+    }
+
+    /// Spawn the speech worker and load an installed whisper.cpp model in the
+    /// background (or run its one-time GPU qualification), so the next
+    /// dictation decodes warm. Fire-and-forget.
+    async fn spawn_asr_worker_prewarm(&self, model_id: &str) {
+        let Some(model) = self.installed_asr_model(model_id).await else {
+            return;
+        };
+        let baseline = self.fw_baseline(model_id).await;
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = prewarm_asr_worker(model, baseline).await {
+                eprintln!("voicewave: speech worker prewarm failed: {err}");
+            }
+        });
+    }
+
+    /// An installed whisper.cpp model as the speech workers see it.
+    async fn installed_asr_model(&self, model_id: &str) -> Option<AsrModel> {
+        let manager = self.model_manager.lock().await;
+        manager.get_installed(model_id).map(|row| AsrModel {
+            id: row.model_id,
+            path: PathBuf::from(row.file_path),
+            sha256: row.sha256,
+        })
+    }
+
+    /// The installed faster-whisper model a whisper.cpp model uses as its CPU
+    /// rung (faster than whisper.cpp on the CPU for short clips): its
+    /// same-size counterpart, else any installed one, Small first.
+    async fn installed_fw_fallback(&self, model_id: &str) -> Option<String> {
+        let manager = self.model_manager.lock().await;
+        faster_whisper_counterpart(model_id)
+            .into_iter()
+            .chain(["fw-small.en", "fw-large-v3-turbo"])
+            .find(|fw_model| manager.get_installed(fw_model).is_some())
+            .map(str::to_string)
+    }
+
+    /// Runtime id of that fallback: qualification must beat it.
+    async fn fw_baseline(&self, model_id: &str) -> Option<String> {
+        self.installed_fw_fallback(model_id)
+            .await
+            .and_then(|fw_model| faster_whisper_runtime_model_id(&fw_model))
+            .map(str::to_string)
     }
 
     /// Pre-load the active model into its runtime cache at app startup so the
@@ -1574,17 +1610,16 @@ impl VoiceWaveController {
                 }
             }
             WarmupPlan::WhisperCpp => {
-                if !cpu_runtime_pool_enabled() {
-                    return;
-                }
-                let model_path = {
-                    let manager = self.model_manager.lock().await;
-                    manager
-                        .get_installed(&active_model)
-                        .map(|row| row.file_path.clone())
-                };
-                if let Some(path) = model_path {
-                    prewarm_runtime(active_model, path, DecodeMode::Balanced);
+                // Awaited, so polish prewarm (run after this) never loads a
+                // second large model at the same time.
+                if let Some(model) = self.installed_asr_model(&active_model).await {
+                    let baseline = self.fw_baseline(&active_model).await;
+                    match prewarm_asr_worker(model, baseline).await {
+                        Ok(()) => eprintln!("voicewave: cold-start warmup complete for {active_model}"),
+                        Err(err) => eprintln!(
+                            "voicewave: cold-start speech worker warmup failed for {active_model}: {err}"
+                        ),
+                    }
                 }
             }
             WarmupPlan::Unsupported => {
@@ -1614,6 +1649,8 @@ impl VoiceWaveController {
         if !crate::inference::llm_polish::is_polish_model_present() {
             return;
         }
+        // Never alongside a GPU qualification: two large model loads at once.
+        let _heavy = crate::inference::HEAVY_LOAD.lock().await;
 
         let profile_name = profile.as_str();
         match crate::inference::llm_polish::polish_text_for_profile(
@@ -1912,6 +1949,9 @@ impl VoiceWaveController {
                     );
                     return;
                 }
+                // The pill's error color-flash carries no text; the notice is
+                // the only place the user actually learns what went wrong.
+                let (notice_title, notice_detail) = controller.dictation_failure_notice(&err).await;
                 controller
                     .set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
@@ -1919,22 +1959,71 @@ impl VoiceWaveController {
                     .update_state(
                         &app,
                         VoiceWaveHudState::Error,
-                        Some(format!("Dictation failed: {err}")),
+                        Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
-                // The pill's error color-flash carries no text; the notice is
-                // the only place the user actually learns what went wrong.
-                let (notice_title, notice_detail) = match &err {
-                    ControllerError::MissingModel(_) => (
-                        "Install a model to start",
-                        "Double-click the pill, open Models, and install fw-small.en.".to_string(),
-                    ),
-                    _ => ("Dictation failed", err.to_string()),
-                };
                 emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                // No model and nothing downloading: the fix lives in the main
+                // window (onboarding or the model gate), and the compact pill
+                // takes no clicks, so bring the window to the user.
+                if matches!(err, ControllerError::MissingModel(_))
+                    && controller.model_download_cancels.lock().await.is_empty()
+                {
+                    if let Err(show_err) = crate::show_main_window(app.clone()).await {
+                        eprintln!("voicewave: could not show main window for setup: {show_err}");
+                    }
+                }
             }
         });
         Ok(())
+    }
+
+    /// Pill copy for a failed dictation. Setup problems (no model, model
+    /// still downloading, microphone unavailable, speech engine down) say what
+    /// to do next; anything unexpected keeps the raw error.
+    async fn dictation_failure_notice(&self, err: &ControllerError) -> (&'static str, String) {
+        let (title, detail) = match err {
+            ControllerError::MissingModel(_) => {
+                if self.model_download_cancels.lock().await.is_empty() {
+                    (
+                        "Finish setting up VoiceWave",
+                        "Choose a speech model in the VoiceWave window to start dictating.",
+                    )
+                } else {
+                    (
+                        "Speech model is still downloading",
+                        "Dictation works as soon as it finishes. Progress is in the VoiceWave window.",
+                    )
+                }
+            }
+            ControllerError::Audio(AudioError::MissingInputDevice) => (
+                "No microphone found",
+                "Plug in a microphone, or pick one in VoiceWave Settings > Audio.",
+            ),
+            ControllerError::Audio(AudioError::DeviceNotFound(_)) => (
+                "Microphone not connected",
+                "Reconnect it, or pick another one in VoiceWave Settings > Audio.",
+            ),
+            ControllerError::Audio(
+                AudioError::Devices(_)
+                | AudioError::DefaultInputConfig(_)
+                | AudioError::BuildStream(_)
+                | AudioError::PlayStream(_),
+            ) => (
+                "Couldn't open the microphone",
+                "Check that Windows lets desktop apps use the microphone (Settings > Privacy > Microphone) and that no other app is holding it.",
+            ),
+            ControllerError::Runtime(message)
+                if message.starts_with("Faster-Whisper runtime is not ready") =>
+            {
+                (
+                    "Speech engine didn't start",
+                    "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
+                )
+            }
+            _ => return ("Dictation failed", err.to_string()),
+        };
+        (title, detail.to_string())
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
@@ -2150,11 +2239,16 @@ impl VoiceWaveController {
     ) -> Result<DiagnosticsExportResult, ControllerError> {
         let settings = self.settings.lock().await.clone();
         let watchdog_recovery_count = self.watchdog_recovery_count.load(Ordering::Relaxed);
+        let speech_engine =
+            tokio::task::spawn_blocking(crate::inference::gpu_select::diagnostics_snapshot)
+                .await
+                .unwrap_or_default();
         let result = self.diagnostics_manager.lock().await.export_bundle(
             settings.diagnostics_opt_in,
             env!("CARGO_PKG_VERSION"),
             &settings,
             watchdog_recovery_count,
+            speech_engine,
         )?;
         Ok(result)
     }
@@ -2563,7 +2657,12 @@ impl VoiceWaveController {
     }
 
     pub async fn list_model_catalog(&self) -> Vec<ModelCatalogItem> {
-        self.model_manager.lock().await.list_catalog()
+        let hardware = hardware_profile_async().await;
+        let active_model = self.settings.lock().await.active_model.clone();
+        self.model_manager
+            .lock()
+            .await
+            .list_catalog(&hardware, &active_model)
     }
 
     pub async fn list_installed_models(&self) -> Vec<InstalledModel> {
@@ -2598,6 +2697,40 @@ impl VoiceWaveController {
                 .map(|item| item.size_bytes)
                 .unwrap_or(0);
 
+            // Registered before any other await so Cancel can reach this
+            // download for its whole lifetime (runtime prep included), and
+            // checked in the same lock so a second request for a model that is
+            // already downloading (onboarding started it, then the setup gate
+            // or Models page asked again) reports progress instead of racing a
+            // second worker into the same cache. Removed on every exit path.
+            let cancel_token = {
+                let mut cancels = self.model_download_cancels.lock().await;
+                if cancels.contains_key(&model_id) {
+                    drop(cancels);
+                    let (downloaded, progress) =
+                        faster_whisper_download_progress(&model_id, expected_total_bytes);
+                    return Ok(ModelStatus {
+                        model_id: model_id.clone(),
+                        state: ModelStatusState::Downloading,
+                        progress,
+                        active: active_model == model_id,
+                        installed: false,
+                        message: Some(format!(
+                            "Downloading model weights ({} MB of {} MB)...",
+                            downloaded / 1_048_576,
+                            expected_total_bytes / 1_048_576,
+                        )),
+                        installed_model: None,
+                        downloaded_bytes: Some(downloaded),
+                        total_bytes: Some(expected_total_bytes.max(1)),
+                        resumable: false,
+                    });
+                }
+                let token = CancellationToken::new();
+                cancels.insert(model_id.clone(), token.clone());
+                token
+            };
+
             let preparing = ModelStatus {
                 model_id: model_id.clone(),
                 state: ModelStatusState::Downloading,
@@ -2615,15 +2748,6 @@ impl VoiceWaveController {
                 .await
                 .insert(model_id.clone(), preparing.clone());
             self.emit_model_status(&app, &preparing);
-
-            // Registered before any await so Cancel can reach this download for
-            // its whole lifetime (runtime prep included). Removed on every exit
-            // path below.
-            let cancel_token = CancellationToken::new();
-            self.model_download_cancels
-                .lock()
-                .await
-                .insert(model_id.clone(), cancel_token.clone());
 
             if let Err(err) = ensure_faster_whisper_ready().await {
                 // Cancel kills the worker, which can be what made runtime prep
@@ -2857,11 +2981,19 @@ impl VoiceWaveController {
         }
         let app_for_emit = app.clone();
 
-        let cancel_token = CancellationToken::new();
-        self.model_download_cancels
-            .lock()
-            .await
-            .insert(model_id.clone(), cancel_token.clone());
+        // Same guard as the faster-whisper path: a second request for a model
+        // already downloading reports its progress instead of writing a second
+        // stream into the same partial file. Removed on every exit path below.
+        let cancel_token = {
+            let mut cancels = self.model_download_cancels.lock().await;
+            if cancels.contains_key(&model_id) {
+                drop(cancels);
+                return self.get_model_status(model_id).await;
+            }
+            let token = CancellationToken::new();
+            cancels.insert(model_id.clone(), token.clone());
+            token
+        };
 
         let pause_flag = {
             let mut pauses = self.model_download_pauses.lock().await;
@@ -2875,18 +3007,33 @@ impl VoiceWaveController {
 
         let mut latest_progress = None::<ModelStatus>;
         let model_id_for_events = model_id.clone();
-        let result = self.model_manager.lock().await.install_model_resumable(
-            &model_id,
-            || cancel_token.is_cancelled(),
-            || pause_flag.load(Ordering::Relaxed),
-            |status| {
-                latest_progress = Some(status.clone());
-                if let Ok(mut statuses) = self.model_statuses.try_lock() {
-                    statuses.insert(model_id_for_events.clone(), status.clone());
-                }
-                self.emit_model_status(&app_for_emit, &status);
-            },
-        );
+        // The model_manager lock is held only to plan the download and to
+        // record its result. The transfer itself (minutes for a 1.6 GB model)
+        // runs unlocked, so status queries, cancel and other model operations
+        // stay responsive; block_in_place keeps it off the async workers.
+        let begun = self.model_manager.lock().await.begin_download(&model_id);
+        let result = match begun {
+            Ok(mut plan) => {
+                let outcome = tokio::task::block_in_place(|| {
+                    plan.run(
+                        || cancel_token.is_cancelled(),
+                        || pause_flag.load(Ordering::Relaxed),
+                        |status| {
+                            latest_progress = Some(status.clone());
+                            if let Ok(mut statuses) = self.model_statuses.try_lock() {
+                                statuses.insert(model_id_for_events.clone(), status.clone());
+                            }
+                            self.emit_model_status(&app_for_emit, &status);
+                        },
+                    )
+                });
+                self.model_manager
+                    .lock()
+                    .await
+                    .finish_download(plan, outcome)
+            }
+            Err(err) => Err(err),
+        };
 
         self.model_download_cancels.lock().await.remove(&model_id);
 
@@ -2968,9 +3115,9 @@ impl VoiceWaveController {
                 return Ok(status);
             };
             token.cancel();
-            // Kills only the dedicated download worker; the warm dictation
-            // worker keeps running.
-            cancel_faster_whisper_downloads();
+            // Kills only this model's download worker; the warm dictation
+            // worker and any other model's download keep running.
+            cancel_faster_whisper_download(&model_id);
             let expected_total_bytes: u64 = self
                 .model_manager
                 .lock()
@@ -3149,6 +3296,7 @@ impl VoiceWaveController {
         );
 
         if is_faster_whisper_model(&model_id) {
+            release_idle_asr_workers();
             // Load the newly active model now (cache-only, so a model that
             // isn't downloaded yet fails fast instead of fetching silently).
             let warm_model_id = model_id.clone();
@@ -3157,16 +3305,8 @@ impl VoiceWaveController {
                     let _ = prefetch_faster_whisper_model(&warm_model_id).await;
                 }
             });
-        } else if cpu_runtime_pool_enabled() {
-            let model_path = {
-                let manager = self.model_manager.lock().await;
-                manager
-                    .get_installed(&model_id)
-                    .map(|row| row.file_path.clone())
-            };
-            if let Some(path) = model_path {
-                prewarm_runtime(model_id.clone(), path, DecodeMode::Balanced);
-            }
+        } else if is_whisper_cpp_model(&model_id) {
+            self.spawn_asr_worker_prewarm(&model_id).await;
         }
 
         Ok(settings)
@@ -3649,9 +3789,24 @@ impl VoiceWaveController {
         let silence_timeout_ms = ((max_capture_ms as f32) * 0.22).round() as u64;
         let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
         let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
-        let incremental_enabled = mode == DictationMode::Microphone
-            && incremental_pre_release_decode_enabled()
-            && !use_faster_whisper;
+        let use_asr_worker = is_whisper_cpp_model(&settings.active_model);
+        // faster-whisper and the whisper.cpp speech worker share capture,
+        // conditioning, quality gates and finalization (plan 019).
+        let whisper_pipeline = uses_whisper_pipeline(&settings.active_model);
+        // Fail on the press, not after the user has spoken a whole sentence: a
+        // model only counts once its download finished and was registered (a
+        // half-downloaded model must never reach a worker).
+        if mode == DictationMode::Microphone
+            && whisper_pipeline
+            && self
+                .model_manager
+                .lock()
+                .await
+                .get_installed(&settings.active_model)
+                .is_none()
+        {
+            return Err(ControllerError::MissingModel(settings.active_model.clone()));
+        }
         let fw_ready_task = if mode == DictationMode::Microphone && use_faster_whisper {
             let warmup_model_id = settings.active_model.clone();
             Some(tokio::spawn(async move {
@@ -3668,6 +3823,12 @@ impl VoiceWaveController {
         } else {
             None
         };
+        if mode == DictationMode::Microphone && use_asr_worker {
+            // Spawn/load the speech worker while the user speaks (startup
+            // prewarm missed, worker died, or a GPU failure dropped it). A
+            // no-op when it is already loaded.
+            self.spawn_asr_worker_prewarm(&settings.active_model).await;
+        }
 
         // OS mic-volume guard: external apps (browser auto-gain, call apps,
         // vendor utilities) silently lower the system capture volume and both
@@ -3756,37 +3917,6 @@ impl VoiceWaveController {
             });
         }
 
-        let draft_worker = if incremental_enabled {
-            Some(
-                self.build_inference_worker(&settings.active_model, mode, DecodeMode::Fast, false)
-                    .await?,
-            )
-        } else {
-            None
-        };
-
-        let mut incremental_tx: Option<UnboundedSender<IncrementalAudioChunk>> = None;
-        let mut incremental_task: Option<JoinHandle<IncrementalPreviewResult>> = None;
-        let preview_shared = Arc::new(StdMutex::new(IncrementalPreviewResult::default()));
-        if incremental_enabled {
-            let (tx, rx) = unbounded_channel::<IncrementalAudioChunk>();
-            incremental_tx = Some(tx);
-            let preview_shared_for_task = Arc::clone(&preview_shared);
-            let preview_worker = draft_worker
-                .as_ref()
-                .expect("incremental decode should have worker")
-                .clone();
-            incremental_task = Some(tokio::spawn(run_incremental_preview_decode(
-                rx,
-                preview_worker,
-                cancel_token.clone(),
-                app.clone(),
-                flow_started,
-                self.audio.target_sample_rate,
-                preview_shared_for_task,
-            )));
-        }
-
         let capture_started = Instant::now();
         let segments = match mode {
             DictationMode::Fixture => phase1::build_fixture_segments(settings.vad_threshold),
@@ -3816,7 +3946,7 @@ impl VoiceWaveController {
                         Duration::from_millis(silence_timeout_ms),
                         Duration::from_millis(release_tail_ms),
                     ),
-                    preserve_full_capture: use_faster_whisper,
+                    preserve_full_capture: whisper_pipeline,
                     // Adaptive VAD warmup: for the first 2 seconds, use a
                     // lower threshold (60% of normal) so quiet speakers and
                     // mics at distance don't get missed before the system
@@ -3825,7 +3955,6 @@ impl VoiceWaveController {
                     vad_warmup_threshold: Some(clamp_vad_threshold(threshold * 0.6)),
                     vad_warmup_duration: Duration::from_millis(2_000),
                 };
-                let tx_for_capture = incremental_tx.clone();
                 let app_for_capture = app.clone();
                 let mut last_level_emit = Instant::now();
                 let (ready_tx, ready_rx) = oneshot::channel::<()>();
@@ -3844,13 +3973,7 @@ impl VoiceWaveController {
                                 let _ = tx.send(());
                             }
                         },
-                        move |normalized_chunk, voiced_chunk| {
-                            if let Some(sender) = tx_for_capture.as_ref() {
-                                let _ = sender.send(IncrementalAudioChunk {
-                                    samples: normalized_chunk.to_vec(),
-                                    voiced: voiced_chunk,
-                                });
-                            }
+                        move |normalized_chunk, _voiced_chunk| {
                             // 33 ms cadence (~30 fps) so the pill waveform tracks
                             // syllable-level dynamics; 70 ms read as sluggish.
                             if last_level_emit.elapsed() >= Duration::from_millis(33) {
@@ -3888,9 +4011,6 @@ impl VoiceWaveController {
                     Ok(rows) => rows,
                     Err(AudioError::Cancelled) => {
                         eprintln!("voicewave: capture cancelled (session={session_id})");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -3908,9 +4028,6 @@ impl VoiceWaveController {
                     }
                     Err(AudioError::NoSpeechDetected) => {
                         eprintln!("voicewave: capture ended with no speech (session={session_id})");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -3950,21 +4067,14 @@ impl VoiceWaveController {
                     }
                     Err(err) => {
                         eprintln!("voicewave: capture failed (session={session_id}): {err}");
-                        if let Some(task) = incremental_task.take() {
-                            task.abort();
-                        }
                         return Err(ControllerError::Audio(err));
                     }
                 }
             }
         };
-        drop(incremental_tx);
         let capture_ms = capture_started.elapsed().as_millis() as u64;
 
         if cancel_token.is_cancelled() {
-            if let Some(task) = incremental_task.take() {
-                task.abort();
-            }
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
@@ -3976,9 +4086,6 @@ impl VoiceWaveController {
             return Ok(());
         }
         if segments.is_empty() {
-            if let Some(task) = incremental_task.take() {
-                task.abort();
-            }
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
@@ -3999,22 +4106,6 @@ impl VoiceWaveController {
             );
             return Ok(());
         }
-
-        if let Some(task) = incremental_task.take() {
-            let mut task = task;
-            if task.is_finished() {
-                let _ = task.await;
-            } else {
-                let _ = timeout(Duration::from_millis(80), &mut task).await;
-                if !task.is_finished() {
-                    task.abort();
-                }
-            }
-        }
-        let preview = preview_shared
-            .lock()
-            .map(|state| state.clone())
-            .unwrap_or_default();
 
         let audio_quality = analyze_captured_segments(
             &segments,
@@ -4076,15 +4167,7 @@ impl VoiceWaveController {
                 format!("runtime-policy:{}", decode_mode_key(policy_selected_mode))
             }
         }];
-        if mode == DictationMode::Microphone && !use_faster_whisper {
-            // Keep legacy whisper.cpp path conservative: never go below Balanced.
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, DecodeMode::Balanced);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons.push("legacy-whisper-floor:balanced".to_string());
-            }
-        }
-        if use_faster_whisper && mode == DictationMode::Microphone {
+        if whisper_pipeline && mode == DictationMode::Microphone {
             let mut decode_floor = match audio_quality.quality {
                 AudioQualityBand::Good => DecodeMode::Fast,
                 AudioQualityBand::Fair => DecodeMode::Balanced,
@@ -4235,30 +4318,7 @@ impl VoiceWaveController {
 
         let decode_started = Instant::now();
         let source_samples = merged_samples;
-        let lookback_samples =
-            ms_to_sample_count(FINALIZE_LOOKBACK_MS, self.audio.target_sample_rate);
-        let has_committed_draft = !use_faster_whisper && !preview.committed_draft.trim().is_empty();
-        let mut tail_start = 0usize;
-        if has_committed_draft && preview.last_committed_sample > 0 {
-            tail_start = preview
-                .last_committed_sample
-                .saturating_sub(lookback_samples)
-                .min(source_samples.len());
-        }
-        let mut finalize_samples = if tail_start < source_samples.len() {
-            source_samples[tail_start..].to_vec()
-        } else {
-            Vec::new()
-        };
-        if !use_faster_whisper && finalize_samples.is_empty() {
-            finalize_samples = source_samples.clone();
-            tail_start = 0;
-        }
-        if !use_faster_whisper && finalize_samples.is_empty() {
-            finalize_samples = source_samples.clone();
-            tail_start = 0;
-        }
-        if mode == DictationMode::Microphone && use_faster_whisper {
+        if mode == DictationMode::Microphone && whisper_pipeline {
             let finalize_audio_ms =
                 sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
             if finalize_audio_ms < fw_min_decode_audio_ms() {
@@ -4276,22 +4336,44 @@ impl VoiceWaveController {
                 return Ok(());
             }
         }
-        let finalize_tail_audio_ms = sample_count_to_ms(
-            source_samples.len().saturating_sub(tail_start),
-            self.audio.target_sample_rate,
-        );
+        // The whole capture is decoded at release.
+        let finalize_tail_audio_ms =
+            sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
         let finalize_started = Instant::now();
-        let finalize_samples_ref: &[f32] = if use_faster_whisper {
-            &source_samples
-        } else {
-            &finalize_samples
-        };
-        let finalize_timeout =
+        let finalize_samples_ref: &[f32] = &source_samples;
+        let default_finalize_timeout =
             final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
+        // During the one-time GPU check, a whisper.cpp model with no
+        // faster-whisper fallback waits for the check before decoding.
+        let waits_for_gpu_check = final_worker.waits_for_gpu_check().await;
+        // The speech worker may fail on the GPU and retry the same audio on
+        // the CPU rung; the outer timeout covers that wait and both attempts.
+        let finalize_timeout = final_worker
+            .asr_worker_timeout(
+                sample_count_to_ms(finalize_samples_ref.len(), self.audio.target_sample_rate),
+                default_finalize_timeout,
+                waits_for_gpu_check,
+            )
+            .unwrap_or(default_finalize_timeout);
+        // That wait can take most of a minute, so say why now rather than
+        // after the result. It uses the session's one GPU notice.
+        let gpu_wait_notice = waits_for_gpu_check
+            && mode == DictationMode::Microphone
+            && !self.gpu_notice_sent.swap(true, Ordering::Relaxed);
+        if gpu_wait_notice {
+            emit_pill_notice(
+                &app,
+                "info",
+                "Getting your graphics card ready",
+                Some("One-time setup, up to a minute. Your text appears when it's done.".to_string()),
+                15_000,
+            );
+        }
         // Long decodes leave the user staring at a spinner with no promise it
-        // is alive; past ~2.5s the pill says so explicitly.
+        // is alive; past ~2.5s the pill says so explicitly (unless the GPU
+        // notice above already explains the wait).
         let decode_watch_done = Arc::new(AtomicBool::new(false));
-        if mode == DictationMode::Microphone {
+        if mode == DictationMode::Microphone && !gpu_wait_notice {
             let done = Arc::clone(&decode_watch_done);
             let watch_app = app.clone();
             let watch_cancel = cancel_token.clone();
@@ -4337,17 +4419,10 @@ impl VoiceWaveController {
                 // setup state, not a decode failure: feeding it to the policy
                 // or the audio-pipeline fallback counters would degrade later
                 // dictations once the download finishes.
+                // The pill notice comes from `dictation_failure_notice`.
                 if err.to_string().contains("is not downloaded yet") {
-                    emit_pill_notice(
-                        &app,
-                        "warning",
-                        "Speech model isn't ready yet",
-                        Some("Finish the download in VoiceWave, then try again.".to_string()),
-                        4_000,
-                    );
-                    return Err(ControllerError::Runtime(
-                        "The speech model is still downloading. Finish the download in VoiceWave, then try again."
-                            .to_string(),
+                    return Err(ControllerError::MissingModel(
+                        final_worker.active_model().to_string(),
                     ));
                 }
                 if mode == DictationMode::Microphone {
@@ -4355,7 +4430,7 @@ impl VoiceWaveController {
                         .lock()
                         .await
                         .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if use_faster_whisper {
+                    if whisper_pipeline {
                         note_audio_pipeline_decode_hard_failure();
                     }
                 }
@@ -4371,7 +4446,7 @@ impl VoiceWaveController {
                         .lock()
                         .await
                         .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if use_faster_whisper {
+                    if whisper_pipeline {
                         note_audio_pipeline_decode_hard_failure();
                     }
                 }
@@ -4385,20 +4460,15 @@ impl VoiceWaveController {
         let release_finalize_ms = finalize_started.elapsed().as_millis() as u64;
         let decode_ms = decode_started.elapsed().as_millis() as u64;
         let decode_telemetry = finalize_output.telemetry;
-        if mode == DictationMode::Microphone && use_faster_whisper {
+        if mode == DictationMode::Microphone && whisper_pipeline {
             note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
         }
         if mode == DictationMode::Microphone {
-            if decode_telemetry.backend_fallback
-                && take_notice_cooldown(&self.backend_notice_last_at)
-            {
-                emit_pill_notice(
-                    &app,
-                    "warning",
-                    "Ran on CPU this time",
-                    Some("GPU wasn't available, so this dictation was slower.".to_string()),
-                    5_500,
-                );
+            if let Some(kind) = decode_telemetry.asr_step_down_kind.filter(|_| {
+                !self.gpu_notice_sent.swap(true, Ordering::Relaxed)
+            }) {
+                let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
+                emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
             } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
             {
                 emit_pill_notice(
@@ -4415,20 +4485,7 @@ impl VoiceWaveController {
         }
         let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
         let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
-        let merged_transcript = if has_committed_draft {
-            let merged = merge_incremental_transcript(
-                &preview.committed_draft,
-                &finalize_text,
-                TRANSCRIPT_OVERLAP_TOKENS,
-            );
-            if merged.trim().is_empty() {
-                preview.committed_draft.clone()
-            } else {
-                merged
-            }
-        } else {
-            finalize_text.clone()
-        };
+        let merged_transcript = finalize_text.clone();
         let baseline_transcript = sanitize_user_transcript(&merged_transcript);
         // Plan 010: the persisted polish profile is the single delivery
         // authority for this dictation. Resolve it once against the settings
@@ -4535,7 +4592,7 @@ impl VoiceWaveController {
             }
             if mode == DictationMode::Microphone {
                 self.decode_policy.lock().await.record_failure(decode_ms);
-                if use_faster_whisper {
+                if whisper_pipeline {
                     note_audio_pipeline_decode_hard_failure();
                 }
             }
@@ -4545,7 +4602,7 @@ impl VoiceWaveController {
         }
         if mode == DictationMode::Microphone
             && should_reject_low_confidence_transcript_as_no_speech(
-                use_faster_whisper,
+                whisper_pipeline,
                 captured_audio_ms,
                 &baseline_transcript,
                 decode_telemetry.fw_no_speech_prob,
@@ -5049,10 +5106,12 @@ impl VoiceWaveController {
                 backend_requested: decode_telemetry.backend_requested.clone(),
                 backend_used: decode_telemetry.backend_used.clone(),
                 backend_fallback: decode_telemetry.backend_fallback,
-                hold_to_first_draft_ms: preview.hold_to_first_draft_ms,
-                incremental_decode_ms: preview.incremental_decode_ms,
+                asr_engine: decode_telemetry.asr_engine.clone(),
+                asr_step_down_reason: decode_telemetry.asr_step_down_reason.clone(),
+                hold_to_first_draft_ms: 0,
+                incremental_decode_ms: 0,
                 release_finalize_ms,
-                incremental_windows_decoded: preview.incremental_windows_decoded,
+                incremental_windows_decoded: 0,
                 finalize_tail_audio_ms,
                 asr_integrity_percent,
                 asr_raw_word_count,
@@ -5135,10 +5194,13 @@ impl VoiceWaveController {
                     backend_requested: decode_telemetry.backend_requested,
                     backend_used: decode_telemetry.backend_used,
                     backend_fallback: decode_telemetry.backend_fallback,
-                    hold_to_first_draft_ms: preview.hold_to_first_draft_ms,
-                    incremental_decode_ms: preview.incremental_decode_ms,
+                    asr_engine: Some(decode_telemetry.asr_engine)
+                        .filter(|engine| !engine.is_empty()),
+                    asr_step_down_reason: decode_telemetry.asr_step_down_reason,
+                    hold_to_first_draft_ms: 0,
+                    incremental_decode_ms: 0,
                     release_finalize_ms,
-                    incremental_windows_decoded: preview.incremental_windows_decoded,
+                    incremental_windows_decoded: 0,
                     finalize_tail_audio_ms,
                     asr_integrity_percent,
                     asr_raw_word_count,
@@ -5463,6 +5525,15 @@ impl VoiceWaveController {
         match mode {
             DictationMode::Fixture => Ok(InferenceWorker::new_fixture(model_id.to_string())),
             DictationMode::Microphone => {
+                let hint = {
+                    let manager = self.dictionary_manager.lock().await;
+                    // Build in ascending priority because hint builder reads terms in reverse:
+                    // environment terms < approved dictionary terms. Pending suggestions
+                    // are untrusted and must never bias decoding before approval.
+                    let mut terms = env_technical_terms();
+                    terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
+                    build_terminology_hint_from_texts(&terms, 10)
+                };
                 if is_faster_whisper_model(model_id) {
                     if !assume_fw_ready {
                         ensure_faster_whisper_ready().await.map_err(|err| {
@@ -5471,26 +5542,27 @@ impl VoiceWaveController {
                             ))
                         })?;
                     }
-                    let hint = {
-                        let manager = self.dictionary_manager.lock().await;
-                        // Build in ascending priority because hint builder reads terms in reverse:
-                        // environment terms < approved dictionary terms. Pending suggestions
-                        // are untrusted and must never bias decoding before approval.
-                        let mut terms = env_technical_terms();
-                        terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
-                        build_terminology_hint_from_texts(&terms, 10)
-                    };
                     Ok(InferenceWorker::new_faster_whisper_with_mode_and_hint(
                         model_id.to_string(),
                         decode_mode,
                         hint,
                     ))
                 } else {
-                    let model_path = self.resolve_active_model_path(model_id).await?;
-                    Ok(InferenceWorker::new_runtime_with_mode(
-                        model_id.to_string(),
-                        model_path,
+                    let path = self.resolve_active_model_path(model_id).await?;
+                    let sha256 = self
+                        .installed_asr_model(model_id)
+                        .await
+                        .map(|model| model.sha256)
+                        .unwrap_or_default();
+                    Ok(InferenceWorker::new_asr_worker(
+                        AsrModel {
+                            id: model_id.to_string(),
+                            path,
+                            sha256,
+                        },
                         decode_mode,
+                        hint,
+                        self.installed_fw_fallback(model_id).await,
                     ))
                 }
             }
@@ -5522,188 +5594,6 @@ impl VoiceWaveController {
     }
 }
 
-fn spawn_incremental_decode_job(
-    worker: InferenceWorker,
-    cancel_token: CancellationToken,
-    window: DecodeWindow,
-) -> JoinHandle<DecodeJobResult> {
-    tokio::spawn(async move {
-        let started = Instant::now();
-        let transcript = match worker
-            .transcribe_segment(
-                &window.samples,
-                &cancel_token,
-                |_text, _is_final, _elapsed_ms| {},
-            )
-            .await
-        {
-            Ok(output) => output.transcript,
-            Err(InferenceError::Cancelled) => None,
-            Err(err) => {
-                eprintln!("voicewave: incremental draft decode failed: {err}");
-                None
-            }
-        };
-        DecodeJobResult {
-            window,
-            transcript,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        }
-    })
-}
-
-async fn run_incremental_preview_decode(
-    mut rx: UnboundedReceiver<IncrementalAudioChunk>,
-    worker: InferenceWorker,
-    cancel_token: CancellationToken,
-    app: AppHandle,
-    flow_started: Instant,
-    sample_rate: u32,
-    preview_shared: Arc<StdMutex<IncrementalPreviewResult>>,
-) -> IncrementalPreviewResult {
-    let cadence = Duration::from_millis(INCREMENTAL_DECODE_CADENCE_MS);
-    let min_voiced_samples = ms_to_sample_count(INCREMENTAL_MIN_VOICED_MS, sample_rate);
-    let window_samples = ms_to_sample_count(INCREMENTAL_WINDOW_MS, sample_rate).max(1);
-    let overlap_samples = ms_to_sample_count(INCREMENTAL_WINDOW_OVERLAP_MS, sample_rate)
-        .min(window_samples.saturating_sub(1));
-    let step_samples = window_samples.saturating_sub(overlap_samples).max(1);
-
-    let mut captured_audio = Vec::<f32>::new();
-    let mut voiced_samples = 0usize;
-    let mut committed_draft = String::new();
-    let mut last_committed_sample = 0usize;
-    let mut hold_to_first_draft_ms = 0u64;
-    let mut incremental_decode_ms = 0u64;
-    let mut incremental_windows_decoded = 0u32;
-    let mut next_window_target = min_voiced_samples;
-    let mut last_schedule_at: Option<Instant> = None;
-    let mut pending_window: Option<DecodeWindow> = None;
-    let mut inflight: Option<JoinHandle<DecodeJobResult>> = None;
-    let mut channel_closed = false;
-
-    loop {
-        if cancel_token.is_cancelled() {
-            break;
-        }
-
-        if !channel_closed {
-            match timeout(Duration::from_millis(15), rx.recv()).await {
-                Ok(Some(chunk)) => {
-                    if chunk.voiced {
-                        voiced_samples = voiced_samples.saturating_add(chunk.samples.len());
-                    }
-                    captured_audio.extend_from_slice(&chunk.samples);
-                }
-                Ok(None) => {
-                    channel_closed = true;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let can_schedule_now = voiced_samples >= min_voiced_samples
-            && captured_audio.len() >= next_window_target
-            && last_schedule_at
-                .map(|scheduled_at| scheduled_at.elapsed() >= cadence)
-                .unwrap_or(true);
-        if can_schedule_now {
-            let end = captured_audio.len();
-            let start = end.saturating_sub(window_samples);
-            let window = DecodeWindow {
-                end_sample: end,
-                samples: captured_audio[start..end].to_vec(),
-            };
-            next_window_target = end.saturating_add(step_samples);
-            last_schedule_at = Some(Instant::now());
-            if inflight.is_none() {
-                inflight = Some(spawn_incremental_decode_job(
-                    worker.clone(),
-                    cancel_token.clone(),
-                    window,
-                ));
-            } else {
-                pending_window = Some(window);
-            }
-        }
-
-        if inflight.as_ref().is_some_and(|handle| handle.is_finished()) {
-            let handle = inflight
-                .take()
-                .expect("inflight decode handle should exist");
-            match handle.await {
-                Ok(result) => {
-                    incremental_windows_decoded = incremental_windows_decoded.saturating_add(1);
-                    incremental_decode_ms = incremental_decode_ms.saturating_add(result.elapsed_ms);
-                    if let Some(text) = result.transcript {
-                        let sanitized = sanitize_user_transcript(&text);
-                        if !sanitized.is_empty() {
-                            committed_draft = merge_incremental_transcript(
-                                &committed_draft,
-                                &sanitized,
-                                TRANSCRIPT_OVERLAP_TOKENS,
-                            );
-                            last_committed_sample = result.window.end_sample;
-                            if hold_to_first_draft_ms == 0 {
-                                hold_to_first_draft_ms = flow_started.elapsed().as_millis() as u64;
-                            }
-                            let _ = app.emit(
-                                "voicewave://transcript",
-                                TranscriptEvent {
-                                    text: committed_draft.clone(),
-                                    is_final: false,
-                                    elapsed_ms: flow_started.elapsed().as_millis() as u64,
-                                },
-                            );
-                            if let Ok(mut shared) = preview_shared.lock() {
-                                shared.committed_draft = committed_draft.clone();
-                                shared.last_committed_sample = last_committed_sample;
-                                shared.hold_to_first_draft_ms = hold_to_first_draft_ms;
-                                shared.incremental_decode_ms = incremental_decode_ms;
-                                shared.incremental_windows_decoded = incremental_windows_decoded;
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!("voicewave: incremental decode task join failed: {err}");
-                }
-            }
-
-            if let Some(window) = pending_window.take() {
-                inflight = Some(spawn_incremental_decode_job(
-                    worker.clone(),
-                    cancel_token.clone(),
-                    window,
-                ));
-            }
-        }
-
-        if channel_closed && inflight.is_none() && pending_window.is_none() {
-            break;
-        }
-
-        if channel_closed {
-            sleep(Duration::from_millis(6)).await;
-        }
-    }
-
-    let result = IncrementalPreviewResult {
-        committed_draft,
-        last_committed_sample,
-        hold_to_first_draft_ms,
-        incremental_decode_ms,
-        incremental_windows_decoded,
-    };
-    if let Ok(mut shared) = preview_shared.lock() {
-        *shared = result.clone();
-    }
-    result
-}
-
-fn ms_to_sample_count(ms: u64, sample_rate: u32) -> usize {
-    (((ms as f64 / 1000.0) * sample_rate as f64).round() as usize).max(1)
-}
-
 fn sample_count_to_ms(sample_count: usize, sample_rate: u32) -> u64 {
     if sample_rate == 0 {
         return 0;
@@ -5725,6 +5615,9 @@ fn percentile_index(len: usize, percentile: f32) -> usize {
     let idx = ((len as f32 - 1.0) * percentile.clamp(0.0, 1.0)).round() as usize;
     idx.min(len - 1)
 }
+
+mod gpu_engine;
+pub use gpu_engine::SpeechEngineStatus;
 
 #[cfg(test)]
 mod tests {
