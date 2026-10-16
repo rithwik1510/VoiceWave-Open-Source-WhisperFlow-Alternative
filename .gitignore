@@ -92,3 +92,10 @@ nul
 src-tauri/windows/asr-worker/bin/*/*
 !src-tauri/windows/asr-worker/bin/*/.gitkeep
 src-tauri/windows/asr-worker/build*/
+
+# Benchmark harness (scripts/bench): audio, models and results live in a temp
+# folder; never commit them even if a run is pointed inside the repo.
+scripts/bench/results/
+scripts/bench/**/*.wav
+scripts/bench/**/*.flac
+scripts/bench/**/*.bin
