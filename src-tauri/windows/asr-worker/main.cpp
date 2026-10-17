@@ -8,14 +8,20 @@
 // whisper/ggml logging on stderr. stdout never carries anything but JSON: fd 1
 // is redirected to stderr at startup and responses go through a private dup.
 //
-//   on start   -> {"ready":true,"protocol":1,"variant":"vk"|"cpu","whisperVersion":"1.9.5"}
+//   on start   -> {"ready":true,"protocol":1,"variant":"vk"|"cpu","whisperVersion":"1.9.5",
+//                  "engines":["whisper","parakeet"]}
 //   {"id":..,"command":"list_devices"}
-//   {"id":..,"command":"load","modelPath":..,"device":"gpu"|"cpu","luid"?:..,"ggmlIndex"?:n,
-//                             "flashAttention"?:bool,"threads"?:n,"warmup"?:bool}
+//   {"id":..,"command":"load","modelPath":..,"engine"?:"whisper"|"parakeet","device":"gpu"|"cpu",
+//                             "luid"?:..,"ggmlIndex"?:n,"flashAttention"?:bool,"threads"?:n,"warmup"?:bool}
 //   {"id":..,"command":"transcribe","audioPcm16B64":..,"sampleRateHz"?:16000,"beamSize"?:5,
 //                                   "language"?:"en","initialPrompt"?:..}
 //   {"id":..,"command":"cancel","targetId"?:..}   abandons the running transcribe
 //   {"id":..,"command":"shutdown"}
+//
+// Engines: "whisper" (default) runs whisper.cpp; "parakeet" runs NVIDIA Parakeet
+// TDT via whisper.cpp's parakeet.h. Parakeet decodes greedily, detects the
+// language itself and has no prompt, so it ignores beamSize, language,
+// initialPrompt and flashAttention; its noSpeechProb is always 0.
 //
 // Every response echoes the request id. Failures are
 // {"id":..,"ok":false,"errorClass":"artifact"|"resource"|"backend"|"protocol","error":..}.
@@ -30,6 +36,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +52,7 @@
 
 #include "ggml-backend.h"
 #include "json.hpp"
+#include "parakeet.h"
 #include "whisper.h"
 
 #ifdef VOICEWAVE_ASR_VULKAN
@@ -418,8 +426,9 @@ json device_list_response(const json &id) {
 // ----------------------------------------------------------------- model ---
 
 struct Loaded {
-    whisper_context *ctx = nullptr;
-    std::string backend;  // "vulkan" | "cpu": what whisper actually initialized
+    whisper_context *ctx = nullptr;    // engine "whisper"
+    parakeet_context *pctx = nullptr;  // engine "parakeet"; at most one of the two is set
+    std::string backend;  // "vulkan" | "cpu": what the engine actually initialized
     std::string device_name;
     std::string luid;
     int ggml_index = -1;
@@ -445,6 +454,7 @@ void file_close(void *ctx) { fclose((FILE *) ctx); }
 
 void unload() {
     if (g_model.ctx) whisper_free(g_model.ctx);
+    if (g_model.pctx) parakeet_free(g_model.pctx);
     g_model = Loaded{};
 }
 
@@ -467,15 +477,24 @@ whisper_full_params decode_params(int beam_size, int threads) {
     return wp;
 }
 
-// Which backend did whisper really initialize? whisper silently falls back to
-// CPU when the GPU backend fails, so we read its own allocation report: the
-// state's "using VulkanN backend" line and the model weights' buffer name.
-std::string detect_backend(const std::string &log, int ggml_index) {
+parakeet_full_params parakeet_decode_params(int threads) {
+    parakeet_full_params pp = parakeet_full_default_params(PARAKEET_SAMPLING_GREEDY);
+    pp.n_threads = threads;
+    pp.no_context = true;
+    pp.abort_callback = [](void *) { return g_cancel.load(); };
+    return pp;
+}
+
+// Which backend did the engine really initialize? whisper and parakeet both
+// silently fall back to CPU when the GPU backend fails, so we read their own
+// allocation report: the state's "using VulkanN backend" line and the model
+// weights' buffer name, logged by `model_load_fn`.
+std::string detect_backend(const std::string &log, int ggml_index, const char *model_load_fn) {
     if (ggml_index < 0) return "cpu";
     const std::string dev = "Vulkan" + std::to_string(ggml_index);
     const bool backend_up = log.find("using " + dev + " backend") != std::string::npos &&
                             log.find("failed to initialize " + dev) == std::string::npos;
-    const std::regex weights("whisper_model_load:\\s+" + dev + " total size");
+    const std::regex weights(std::string(model_load_fn) + ":\\s+" + dev + " total size");
     const bool weights_on_gpu = std::regex_search(log, weights);
     return backend_up && weights_on_gpu ? "vulkan" : "cpu";
 }
@@ -489,11 +508,14 @@ json handle_load(const json &req) {
     if (!g_devices.vulkan_ok) return fail(id, "backend", "Vulkan unavailable: " + g_devices.vulkan_error);
 #endif
     if (!req.contains("modelPath") || !req["modelPath"].is_string()) return fail(id, "protocol", "modelPath is required");
+    const std::string engine = req.value("engine", "whisper");
+    if (engine != "whisper" && engine != "parakeet") return fail(id, "protocol", "engine must be \"whisper\" or \"parakeet\"");
+    const bool parakeet = engine == "parakeet";
     const std::string device = req.value("device", "cpu");
     if (device != "cpu" && device != "gpu") return fail(id, "protocol", "device must be \"gpu\" or \"cpu\"");
     const bool want_gpu = device == "gpu";
     const int threads = req.value("threads", default_threads());
-    const bool flash_attn = req.value("flashAttention", false);
+    const bool flash_attn = !parakeet && req.value("flashAttention", false);
     const bool warmup = req.value("warmup", true);
 
     const Device *target = nullptr;
@@ -537,18 +559,27 @@ json handle_load(const json &req) {
     const std::string path = req["modelPath"].get<std::string>();
     FILE *f = _wfopen(utf8_to_wide(path).c_str(), L"rb");
     if (!f) return fail(id, "artifact", "cannot open model file: " + path);
-    whisper_model_loader loader{f, file_read, file_eof, file_close};
-
-    whisper_context_params cp = whisper_context_default_params();
-    cp.use_gpu = want_gpu;
-    cp.gpu_device = target ? target->ggml_index : 0;
-    cp.flash_attn = flash_attn;
 
     LogCapture capture;
     const double t0 = now_ms();
     whisper_context *ctx = nullptr;
+    parakeet_context *pctx = nullptr;
     try {
-        ctx = whisper_init_with_params(&loader, cp);  // closes the file via loader.close
+        // Both loaders close the file via loader.close.
+        if (parakeet) {
+            parakeet_model_loader loader{f, file_read, file_eof, file_close};
+            parakeet_context_params pcp = parakeet_context_default_params();
+            pcp.use_gpu = want_gpu;
+            pcp.gpu_device = target ? target->ggml_index : 0;
+            pctx = parakeet_init_with_params(&loader, pcp);
+        } else {
+            whisper_model_loader loader{f, file_read, file_eof, file_close};
+            whisper_context_params cp = whisper_context_default_params();
+            cp.use_gpu = want_gpu;
+            cp.gpu_device = target ? target->ggml_index : 0;
+            cp.flash_attn = flash_attn;
+            ctx = whisper_init_with_params(&loader, cp);
+        }
     } catch (const std::bad_alloc &) {
         return fail(id, "resource", "out of memory while loading the model");
     } catch (const std::exception &e) {
@@ -556,19 +587,23 @@ json handle_load(const json &req) {
     }
     const double load_ms = now_ms() - t0;
     const std::string log = capture.snapshot();
-    if (!ctx) {
+    if (!ctx && !pctx) {
         const std::string detail = last_error_line(log);
         return fail(id, classify(log, want_gpu ? "backend" : "artifact"),
                     "model load failed" + (detail.empty() ? std::string() : ": " + detail));
     }
 
-    const std::string backend = detect_backend(log, target ? target->ggml_index : -1);
+    const std::string backend = detect_backend(log, target ? target->ggml_index : -1,
+                                               parakeet ? "parakeet_model_load" : "whisper_model_load");
     if (want_gpu && backend != "vulkan") {
-        whisper_free(ctx);
-        return fail(id, classify(log, "backend"), "GPU backend did not initialize; whisper fell back to CPU");
+        if (ctx) whisper_free(ctx);
+        if (pctx) parakeet_free(pctx);
+        return fail(id, classify(log, "backend"),
+                    std::string("GPU backend did not initialize; ") + engine + " fell back to CPU");
     }
 
     g_model.ctx = ctx;
+    g_model.pctx = pctx;
     g_model.backend = backend;
     g_model.threads = threads;
     if (target) {
@@ -583,10 +618,18 @@ json handle_load(const json &req) {
     double warmup_ms = 0;
     if (warmup) {
         std::vector<float> silence(kSampleRate, 0.0f);
-        whisper_full_params wp = decode_params(5, threads);
-        wp.abort_callback = nullptr;
         const double tw = now_ms();
-        if (whisper_full(ctx, wp, silence.data(), (int) silence.size()) != 0) {
+        int rc;
+        if (parakeet) {
+            parakeet_full_params pp = parakeet_decode_params(threads);
+            pp.abort_callback = nullptr;
+            rc = parakeet_full(pctx, pp, silence.data(), (int) silence.size());
+        } else {
+            whisper_full_params wp = decode_params(5, threads);
+            wp.abort_callback = nullptr;
+            rc = whisper_full(ctx, wp, silence.data(), (int) silence.size());
+        }
+        if (rc != 0) {
             const std::string wlog = capture.snapshot();
             unload();
             return fail(id, classify(wlog, "backend"), "warm-up decode failed");
@@ -596,6 +639,7 @@ json handle_load(const json &req) {
 
     json out = {{"id", id},
                 {"ok", true},
+                {"engine", engine},
                 {"backendUsed", g_model.backend},
                 {"deviceName", g_model.device_name},
                 {"modelInitMs", (int64_t) load_ms},
@@ -611,11 +655,12 @@ json handle_load(const json &req) {
 
 json handle_transcribe(const json &req) {
     const json id = req["id"];
-    if (!g_model.ctx) return fail(id, "protocol", "no model loaded");
+    const bool parakeet = g_model.pctx != nullptr;
+    if (!g_model.ctx && !parakeet) return fail(id, "protocol", "no model loaded");
     if (req.value("sampleRateHz", kSampleRate) != kSampleRate) return fail(id, "protocol", "sampleRateHz must be 16000");
     if (!req.contains("audioPcm16B64") || !req["audioPcm16B64"].is_string()) return fail(id, "protocol", "audioPcm16B64 is required");
     const std::string language = req.value("language", "en");
-    if (language != "en") return fail(id, "protocol", "only language \"en\" is supported");
+    if (!parakeet && language != "en") return fail(id, "protocol", "only language \"en\" is supported");
     const int beam_size = req.value("beamSize", 5);
     if (beam_size < 1 || beam_size > 8) return fail(id, "protocol", "beamSize must be 1..8");
 
@@ -637,7 +682,7 @@ json handle_transcribe(const json &req) {
 
     whisper_full_params wp = decode_params(beam_size, g_model.threads);
     std::string prompt;
-    if (req.contains("initialPrompt") && req["initialPrompt"].is_string()) {
+    if (!parakeet && req.contains("initialPrompt") && req["initialPrompt"].is_string()) {
         prompt = req["initialPrompt"].get<std::string>();
         if (!prompt.empty()) wp.initial_prompt = prompt.c_str();
     }
@@ -652,7 +697,14 @@ json handle_transcribe(const json &req) {
     int rc = 0;
     std::string exception;
     try {
-        rc = whisper_full(g_model.ctx, wp, pcm.data(), (int) pcm.size());
+        if (parakeet) {
+            // parakeet_full encodes the whole clip in one graph (up to ~10 min
+            // before it switches to local attention), so long clips need no
+            // chunking here.
+            rc = parakeet_full(g_model.pctx, parakeet_decode_params(g_model.threads), pcm.data(), (int) pcm.size());
+        } else {
+            rc = whisper_full(g_model.ctx, wp, pcm.data(), (int) pcm.size());
+        }
     } catch (const std::exception &e) {
         rc = -1;
         exception = e.what();
@@ -677,22 +729,39 @@ json handle_transcribe(const json &req) {
     std::string text;
     double logprob_sum = 0, no_speech_sum = 0;
     int logprob_n = 0;
-    const int segments = whisper_full_n_segments(g_model.ctx);
-    const whisper_token eot = whisper_token_eot(g_model.ctx);
-    for (int s = 0; s < segments; s++) {
-        std::string seg = whisper_full_get_segment_text(g_model.ctx, s);
+    auto append_segment = [&text](const std::string &seg) {
         const size_t a = seg.find_first_not_of(" \t\n");
         const size_t b = seg.find_last_not_of(" \t\n");
         if (a != std::string::npos) {
             if (!text.empty()) text += ' ';
             text += seg.substr(a, b - a + 1);
         }
-        no_speech_sum += whisper_full_get_segment_no_speech_prob(g_model.ctx, s);
-        for (int t = 0; t < whisper_full_n_tokens(g_model.ctx, s); t++) {
-            const whisper_token_data td = whisper_full_get_token_data(g_model.ctx, s, t);
-            if (td.id >= eot) continue;  // special and timestamp tokens
-            logprob_sum += td.plog;
-            logprob_n++;
+    };
+    int segments;
+    if (parakeet) {
+        segments = parakeet_full_n_segments(g_model.pctx);
+        for (int s = 0; s < segments; s++) {
+            append_segment(parakeet_full_get_segment_text(g_model.pctx, s));
+            // Parakeet's own plog is not a log-probability; ln(p) of each
+            // emitted token is comparable to whisper's avg_logprob.
+            for (int t = 0; t < parakeet_full_n_tokens(g_model.pctx, s); t++) {
+                const float p = parakeet_full_get_token_p(g_model.pctx, s, t);
+                logprob_sum += std::log(std::max(p, 1e-6f));
+                logprob_n++;
+            }
+        }
+    } else {
+        segments = whisper_full_n_segments(g_model.ctx);
+        const whisper_token eot = whisper_token_eot(g_model.ctx);
+        for (int s = 0; s < segments; s++) {
+            append_segment(whisper_full_get_segment_text(g_model.ctx, s));
+            no_speech_sum += whisper_full_get_segment_no_speech_prob(g_model.ctx, s);
+            for (int t = 0; t < whisper_full_n_tokens(g_model.ctx, s); t++) {
+                const whisper_token_data td = whisper_full_get_token_data(g_model.ctx, s, t);
+                if (td.id >= eot) continue;  // special and timestamp tokens
+                logprob_sum += td.plog;
+                logprob_n++;
+            }
         }
     }
     out.update({{"ok", true},
@@ -769,6 +838,7 @@ int main(int argc, char **argv) {
     if (!g_out) return 2;
 
     whisper_log_set(log_callback, nullptr);
+    parakeet_log_set(log_callback, nullptr);
     ggml_log_set(log_callback, nullptr);
 
     if (argc > 1 && strcmp(argv[1], "--list-devices") == 0) {
@@ -779,7 +849,8 @@ int main(int argc, char **argv) {
     emit({{"ready", true},
           {"protocol", kProtocolVersion},
           {"variant", VOICEWAVE_ASR_VARIANT},
-          {"whisperVersion", whisper_version()}});
+          {"whisperVersion", whisper_version()},
+          {"engines", {"whisper", "parakeet"}}});
 
     std::thread(reader_thread).detach();
     for (;;) {

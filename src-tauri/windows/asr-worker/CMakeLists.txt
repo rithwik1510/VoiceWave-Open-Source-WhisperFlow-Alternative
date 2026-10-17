@@ -71,7 +71,9 @@ endif()
 add_executable(${worker_name} main.cpp)
 # nlohmann/json ships inside the pinned whisper.cpp tree (examples/json.hpp).
 target_include_directories(${worker_name} PRIVATE "${whisper_SOURCE_DIR}/examples")
-target_link_libraries(${worker_name} PRIVATE whisper ggml psapi)
+# parakeet: NVIDIA Parakeet TDT models via the same tree's parakeet.h (static,
+# shares the ggml build above).
+target_link_libraries(${worker_name} PRIVATE whisper parakeet ggml psapi)
 target_compile_definitions(${worker_name} PRIVATE
   NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS
   VOICEWAVE_ASR_VARIANT="$<IF:$<BOOL:${VOICEWAVE_ASR_VULKAN}>,vk,cpu>")
