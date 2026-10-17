@@ -1,5 +1,7 @@
 use crate::atomic_file;
-use crate::inference::gpu_select::{model_tier, HardwareProfile, ModelTier};
+use crate::inference::gpu_select::{
+    model_tier, CpuSupport, HardwareProfile, ModelTier, PARAKEET_MODEL_ID,
+};
 use base64::Engine;
 use directories::ProjectDirs;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -34,6 +36,11 @@ const BUILTIN_WCPP_SMALL_EN_SIGNATURE: &str =
     "R7gA3H6JW+GI+vJamDV53bLHKTS4/WMpyLphTSvAjjZIkyt1IYC/x61Uzc+MGo8QHgVA+b663bP6j8UHFvY4Dw==";
 const BUILTIN_WCPP_LARGE_TURBO_SIGNATURE: &str =
     "501QKU4taYPMqEXngLpXgowESdwCbDfZK5WQljaNXIsB0gIoy6plf/5CFp7tzGxAsr4L5XTnboz0rGC5918QCw==";
+/// huggingface.co/ggml-org/parakeet-GGUF commit the Parakeet model is pinned to.
+const PARAKEET_REPO_REVISION: &str = "35156454d1a39de06863303dd209fd2bed6ee079";
+// Same dev key and payload as the rows above; re-sign if any field changes.
+const BUILTIN_WCPP_PARAKEET_V3_SIGNATURE: &str =
+    "F5+YJ5jUKBTVItEwWLSWS1p+C68OrftCP24JKSrkve9b+2Wjuu2RSiEdiEhmgJdrenE5VNXMBsI2wy+dHaCACw==";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -561,7 +568,8 @@ impl ModelManager {
     /// "Large Turbo", from the machine's model family, plus any installed
     /// model of the other family (an upgrader's faster-whisper fallback, or
     /// a GGML model after the GPU went away) so it stays usable and
-    /// removable. `active_model` picks the copy for the row in use.
+    /// removable. `active_model` picks the copy for the row in use. Parakeet
+    /// is an extra, opt-in row on every PC that can run the speech workers.
     pub fn list_catalog(
         &self,
         hardware: &HardwareProfile,
@@ -571,11 +579,13 @@ impl ModelManager {
             hardware.model_id(ModelTier::Small),
             hardware.model_id(ModelTier::LargeTurbo),
         ];
+        let workers_run = hardware.cpu == CpuSupport::Full;
         self.catalog
             .iter()
             .filter(|manifest| {
                 primary.contains(&manifest.model_id.as_str())
                     || self.installed.contains_key(&manifest.model_id)
+                    || (workers_run && manifest.model_id == PARAKEET_MODEL_ID)
             })
             .filter_map(|manifest| {
                 let active = manifest.model_id == active_model;
@@ -1663,12 +1673,23 @@ fn model_fit(
     let name = match tier {
         ModelTier::Small => "Small",
         ModelTier::LargeTurbo => "Large Turbo",
+        ModelTier::Parakeet => "Parakeet v3",
     };
     let Some(hardware) = hardware else {
         return Some((name.to_string(), String::new()));
     };
     let recommended = hardware.recommended == tier;
     let (suffix, note) = match (hardware.gpu_path(), ggml, tier) {
+        // Parakeet has no initial_prompt: the dictionary only fixes words
+        // after transcription (stabilize_custom_terms), never steers the model.
+        (true, _, ModelTier::Parakeet) => (
+            "",
+            "NVIDIA's fast, accurate model, on your graphics card. English plus 24 European languages, with punctuation. Doesn't use your dictionary words as hints yet.",
+        ),
+        (false, _, ModelTier::Parakeet) => (
+            "",
+            "NVIDIA's fast, accurate model, on your processor. English plus 24 European languages, with punctuation. Doesn't use your dictionary words as hints yet.",
+        ),
         // GPU-path machine, its own rows.
         (true, true, ModelTier::Small) if recommended => ("", "Fast on your graphics card."),
         (true, true, ModelTier::Small) => (
@@ -1728,7 +1749,9 @@ fn manifest_to_catalog_item(
             .is_some_and(|hardware| manifest.model_id == hardware.recommended_model_id()),
         hardware_note,
         tier,
-        primary: hardware.is_some_and(|hardware| hardware.model_id(tier) == manifest.model_id),
+        // Parakeet is never one of the two rows setup offers.
+        primary: tier != ModelTier::Parakeet
+            && hardware.is_some_and(|hardware| hardware.model_id(tier) == manifest.model_id),
     })
 }
 
@@ -1915,6 +1938,21 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
         }
     }
 
+    // NVIDIA Parakeet TDT 0.6B v3 for the same speech workers (parakeet.h in
+    // the pinned whisper.cpp tree). q8_0: about half the f16 download.
+    manifests.push(SignedModelManifest {
+        model_id: PARAKEET_MODEL_ID.to_string(),
+        version: "parakeet-gguf-3515645".to_string(),
+        format: WCPP_FORMAT.to_string(),
+        size: 668_757_119,
+        sha256: "4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e".to_string(),
+        license: "CC-BY-4.0 (NVIDIA Parakeet TDT 0.6B v3; GGML conversion by ggml-org)".to_string(),
+        download_url: format!(
+            "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/{PARAKEET_REPO_REVISION}/ggml-parakeet-tdt-0.6b-v3-q8_0.bin"
+        ),
+        signature: BUILTIN_WCPP_PARAKEET_V3_SIGNATURE.to_string(),
+    });
+
     manifests
 }
 
@@ -2035,7 +2073,8 @@ mod tests {
                 "fw-small.en",
                 "fw-large-v3-turbo",
                 "wcpp-small.en",
-                "wcpp-large-v3-turbo"
+                "wcpp-large-v3-turbo",
+                "wcpp-parakeet-tdt-0.6b-v3"
             ],
             "fw-large-v3 is retired; both families stay in the catalog (plan 019)"
         );

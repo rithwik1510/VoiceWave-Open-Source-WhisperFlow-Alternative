@@ -169,3 +169,8 @@ The release build stages the Python runtime and the whisper.cpp workers; see
 ## License
 
 [Apache-2.0](LICENSE). Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Speech models are downloaded separately under their own licenses: OpenAI Whisper (MIT), and
+[NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), converted to GGML by
+[ggml-org](https://huggingface.co/ggml-org/parakeet-GGUF).

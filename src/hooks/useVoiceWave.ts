@@ -147,8 +147,14 @@ const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
 // Both model families are valid (plan 019): faster-whisper (fw-*) and
 // whisper.cpp GGML (wcpp-*). The backend's catalog shows each PC one family as
 // its two primary rows ("Small", "Large Turbo"), plus installed models of the
-// other family.
-const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo", "wcpp-small.en", "wcpp-large-v3-turbo"] as const;
+// other family, plus the opt-in Parakeet row (run by the same speech workers).
+const SUPPORTED_MODEL_IDS = [
+  "fw-small.en",
+  "fw-large-v3-turbo",
+  "wcpp-small.en",
+  "wcpp-large-v3-turbo",
+  "wcpp-parakeet-tdt-0.6b-v3"
+] as const;
 // Retired catalog models migrate to the closest surviving option (mirrors
 // normalize_active_model_id in src-tauri/src/settings/mod.rs).
 const RETIRED_LARGE_MODEL_IDS = ["fw-large-v3"] as const;

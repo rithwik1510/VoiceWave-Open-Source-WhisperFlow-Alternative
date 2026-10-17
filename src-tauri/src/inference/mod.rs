@@ -28,7 +28,7 @@ use std::{
     collections::HashSet,
     fs::OpenOptions,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration};
@@ -532,6 +532,13 @@ pub fn is_whisper_cpp_model(model_id: &str) -> bool {
     model_id.starts_with("wcpp-")
 }
 
+/// NVIDIA Parakeet, run by the same speech workers as the whisper.cpp models
+/// (so also `is_whisper_cpp_model`). It has no prompt and decodes greedily,
+/// so the pipeline skips the whisper-only prompt and confidence retry.
+pub fn is_parakeet_model(model_id: &str) -> bool {
+    model_id == gpu_select::PARAKEET_MODEL_ID
+}
+
 /// Models that go through the shared Whisper pipeline (full capture,
 /// conditioning, confidence retry, quality gates): faster-whisper and
 /// whisper.cpp via the speech workers.
@@ -678,7 +685,7 @@ enum WhisperEngine<'a> {
     },
     AsrWorker {
         rung: asr_worker::Rung,
-        model_path: &'a Path,
+        model: &'a AsrModel,
         /// None = the rung's default load deadline.
         load_deadline: Option<std::time::Duration>,
     },
@@ -690,6 +697,10 @@ impl WhisperEngine<'_> {
             WhisperEngine::FasterWhisper { .. } => "faster-whisper",
             WhisperEngine::AsrWorker { rung, .. } => rung.engine(),
         }
+    }
+
+    fn is_parakeet(&self) -> bool {
+        matches!(self, WhisperEngine::AsrWorker { model, .. } if model.is_parakeet())
     }
 
     async fn decode(
@@ -712,12 +723,12 @@ impl WhisperEngine<'_> {
             }
             WhisperEngine::AsrWorker {
                 rung,
-                model_path,
+                model,
                 load_deadline,
             } => {
                 asr_worker::transcribe(
                     *rung,
-                    model_path,
+                    model,
                     *load_deadline,
                     samples,
                     decode_mode,
@@ -768,14 +779,14 @@ async fn transcribe_with_asr_worker(
         },
         None => WhisperEngine::AsrWorker {
             rung: asr_worker::Rung::Cpu,
-            model_path: &model.path,
+            model,
             load_deadline: None,
         },
     };
     let primary_engine = match primary {
         asr_worker::Rung::Gpu => WhisperEngine::AsrWorker {
             rung: asr_worker::Rung::Gpu,
-            model_path: &model.path,
+            model,
             load_deadline: None,
         },
         asr_worker::Rung::Cpu => cpu_rung,
@@ -856,7 +867,7 @@ async fn transcribe_with_asr_worker(
         );
         let fresh_gpu = WhisperEngine::AsrWorker {
             rung: asr_worker::Rung::Gpu,
-            model_path: &model.path,
+            model,
             load_deadline: Some(asr_worker::GPU_RETRY_LOAD_DEADLINE),
         };
         match transcribe_with_whisper_pipeline(
@@ -1110,13 +1121,16 @@ async fn run_whisper_decode_with_conditioned(
         ],
     );
 
+    // Parakeet takes no prompt; dictionary terms reach its text only through
+    // the post-processing every engine shares.
+    let parakeet = engine.is_parakeet();
+    let primary_overrides = if parakeet {
+        FasterWhisperRequestOverrides::default()
+    } else {
+        fw_primary_overrides(primary_mode, terminology_hint, audio_duration_ms)
+    };
     let primary = engine
-        .decode(
-            conditioned_samples,
-            primary_mode,
-            fw_primary_overrides(primary_mode, terminology_hint, audio_duration_ms),
-            cancel_token,
-        )
+        .decode(conditioned_samples, primary_mode, primary_overrides, cancel_token)
         .await?;
     if cancel_token.is_cancelled() {
         return Err(InferenceError::Cancelled);
@@ -1128,8 +1142,11 @@ async fn run_whisper_decode_with_conditioned(
     let mut runtime_cache_hit = primary.runtime_cache_hit;
     let low_coherence = fw_decode_is_low_coherence(&primary, audio_duration_ms);
     let substitution_suspected = fw_decode_looks_common_substitution(&primary, audio_duration_ms);
-    let needs_retry = fw_decode_needs_retry(&primary, audio_duration_ms)
-        || (low_coherence && (primary.avg_logprob < -0.82 || substitution_suspected));
+    // Parakeet decodes greedily with no prompt or sampling to vary, so a
+    // second decode of the same audio returns the same text: never retried.
+    let needs_retry = !parakeet
+        && (fw_decode_needs_retry(&primary, audio_duration_ms)
+            || (low_coherence && (primary.avg_logprob < -0.82 || substitution_suspected)));
     let mut retry_used = false;
     let mut literal_retry_used = false;
 

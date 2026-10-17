@@ -210,6 +210,13 @@ pub struct AsrModel {
     pub sha256: String,
 }
 
+impl AsrModel {
+    /// NVIDIA Parakeet (the worker's "parakeet" engine) rather than whisper.
+    pub fn is_parakeet(&self) -> bool {
+        super::is_parakeet_model(&self.id)
+    }
+}
+
 /// Why a dictation did not decode on the GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDownKind {
@@ -989,14 +996,15 @@ fn note_report(model_path: &Path, reply: &Value) {
     lock(&SESSION).last_report = Some((model_path.to_path_buf(), RunningOn { device, name }));
 }
 
-/// Make sure the slot's worker is alive with `model_path` loaded. Returns
+/// Make sure the slot's worker is alive with `model` loaded. Returns
 /// (model_init_ms, already_loaded).
 fn ensure_loaded(
     guard: &mut Option<WorkerProcess>,
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     deadline: Duration,
 ) -> Result<(u64, bool), Fault> {
+    let model_path = model.path.as_path();
     // A short load deadline (the fresh-worker retry) shortens the start
     // too: a worker that hangs while starting must not cost the full 10 s.
     ensure_spawned(guard, rung, SPAWN_READY_DEADLINE.min(deadline / 3))?;
@@ -1013,6 +1021,9 @@ fn ensure_loaded(
         "device": "cpu",
         "warmup": true,
     });
+    if model.is_parakeet() {
+        body["engine"] = json!("parakeet");
+    }
     if rung == Rung::Gpu {
         let device = hardware_profile()
             .gpu
@@ -1068,7 +1079,7 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
         Rung::Cpu => LOAD_CPU_DEADLINE,
     };
     let started = Instant::now();
-    let result = ensure_loaded(&mut guard, rung, &model.path, deadline);
+    let result = ensure_loaded(&mut guard, rung, model, deadline);
     match &result {
         Ok((_, false)) => tracing::info!(
             "{} speech worker ready in {} ms",
@@ -1092,10 +1103,11 @@ struct TranscribeJob {
 
 fn transcribe_blocking(
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     job: TranscribeJob,
     cancel: &CancellationToken,
 ) -> Result<FasterWhisperDecodeOutput, Fault> {
+    let model_path = model.path.as_path();
     // A busy slot means a load is in flight (startup or dictation-start
     // prewarm). Wait for it when it can finish within a normal load.
     let Some(mut guard) = lock_slot(rung, SPAWN_READY_DEADLINE + load_deadline(rung)) else {
@@ -1108,7 +1120,7 @@ fn transcribe_blocking(
         return Err(Fault::Cancelled);
     }
 
-    let result = ensure_loaded(&mut guard, rung, model_path, job.load_deadline).and_then(
+    let result = ensure_loaded(&mut guard, rung, model, job.load_deadline).and_then(
         |(model_init_ms, cache_hit)| {
             let mut body = json!({
                 "command": "transcribe",
@@ -1320,7 +1332,7 @@ fn qualify_gpu_blocking(model: &AsrModel, clips: &[QualifyClip]) -> (Verdict, Qu
     // Start clean so the load (and any shader compile) is measured honestly.
     *guard = None;
     let started = Instant::now();
-    if let Err(fault) = ensure_loaded(&mut guard, Rung::Gpu, &model.path, LOAD_GPU_FIRST_USE_DEADLINE) {
+    if let Err(fault) = ensure_loaded(&mut guard, Rung::Gpu, model, LOAD_GPU_FIRST_USE_DEADLINE) {
         return (fault_verdict(fault, true), timings);
     }
     timings.load_ms = started.elapsed().as_millis() as u64;
@@ -1668,12 +1680,13 @@ pub(crate) async fn wait_for_gpu_check(
 }
 
 /// One decode on `rung`. `overrides` carries the shared pipeline's beam size
-/// and prompt; the worker always decodes at temperature 0 without previous
-/// text conditioning. `load_deadline` overrides the rung's default (the
-/// fresh-worker retry after a GPU fault uses a short one).
+/// and prompt (Parakeet ignores both); the worker always decodes at
+/// temperature 0 without previous text conditioning. `load_deadline`
+/// overrides the rung's default (the fresh-worker retry after a GPU fault
+/// uses a short one).
 pub(crate) async fn transcribe(
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     load_deadline: Option<Duration>,
     samples: &[f32],
     decode_mode: DecodeMode,
@@ -1700,9 +1713,9 @@ pub(crate) async fn transcribe(
             .filter(|prompt| !prompt.is_empty())
             .map(str::to_string),
     };
-    let model_path = model_path.to_path_buf();
+    let model = model.clone();
     let cancel = cancel.clone();
-    tokio::task::spawn_blocking(move || transcribe_blocking(rung, &model_path, job, &cancel))
+    tokio::task::spawn_blocking(move || transcribe_blocking(rung, &model, job, &cancel))
         .await
         .map_err(join_error)?
         .map_err(InferenceError::from)

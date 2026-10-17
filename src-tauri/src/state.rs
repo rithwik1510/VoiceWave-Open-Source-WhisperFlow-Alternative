@@ -31,7 +31,8 @@ use crate::{
         cancel_faster_whisper_download, download_faster_whisper_model, ensure_faster_whisper_ready,
         gpu_select::hardware_profile_async,
         faster_whisper_cache_hint, faster_whisper_counterpart, faster_whisper_runtime_model_id,
-        is_faster_whisper_model, is_whisper_cpp_model, note_audio_pipeline_decode_hard_failure,
+        is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model,
+        note_audio_pipeline_decode_hard_failure,
         note_audio_pipeline_decode_success, polish_gate::gate_polish_candidate,
         prefetch_faster_whisper_model, prewarm_asr_worker, release_idle_asr_workers,
         set_gpu_acceleration, uses_whisper_pipeline, warmup_faster_whisper_model,
@@ -1555,8 +1556,13 @@ impl VoiceWaveController {
 
     /// The installed faster-whisper model a whisper.cpp model uses as its CPU
     /// rung (faster than whisper.cpp on the CPU for short clips): its
-    /// same-size counterpart, else any installed one, Small first.
+    /// same-size counterpart, else any installed one, Small first. None for
+    /// Parakeet: its CPU rung is Parakeet on the CPU worker, so every
+    /// dictation's text comes from the model the user picked.
     async fn installed_fw_fallback(&self, model_id: &str) -> Option<String> {
+        if is_parakeet_model(model_id) {
+            return None;
+        }
         let manager = self.model_manager.lock().await;
         faster_whisper_counterpart(model_id)
             .into_iter()

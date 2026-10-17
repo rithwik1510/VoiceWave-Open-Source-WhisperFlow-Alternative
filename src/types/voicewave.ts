@@ -403,7 +403,8 @@ export interface ModelCatalogItem {
   recommended: boolean;
   /** One-line, hardware-specific note shown next to the model. */
   hardwareNote: string;
-  /** "Small" or "Large Turbo", whichever engine family the row belongs to. */
+  /** "Small" or "Large Turbo", whichever engine family the row belongs to, or
+   * the opt-in Parakeet model (never primary or recommended). */
   tier: ModelTier;
   /** One of the two rows offered on this PC. False for an installed model of
    * the other family (e.g. an upgrader's processor fallback), listed only so
@@ -411,7 +412,7 @@ export interface ModelCatalogItem {
   primary: boolean;
 }
 
-export type ModelTier = "small" | "largeTurbo";
+export type ModelTier = "small" | "largeTurbo" | "parakeet";
 
 /** A model the backend offers to download (GPU upgrade, or the processor model). */
 export interface ModelOffer {

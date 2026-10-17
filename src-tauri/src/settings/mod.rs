@@ -352,7 +352,11 @@ fn normalize_active_model_id(active_model: &str) -> String {
         // Both families are valid (plan 019): faster-whisper (fw-*) and
         // whisper.cpp GGML (wcpp-*). An active model is never rewritten to
         // the other family.
-        "fw-small.en" | "fw-large-v3-turbo" | "wcpp-small.en" | "wcpp-large-v3-turbo" => {
+        "fw-small.en"
+        | "fw-large-v3-turbo"
+        | "wcpp-small.en"
+        | "wcpp-large-v3-turbo"
+        | "wcpp-parakeet-tdt-0.6b-v3" => {
             active_model.trim().to_string()
         }
         // Retired catalog entries migrate to the closest surviving model.

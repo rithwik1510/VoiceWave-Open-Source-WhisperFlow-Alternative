@@ -133,18 +133,24 @@ impl GpuDevice {
     }
 }
 
-/// The two sizes users choose between. Each exists in both model families.
+/// The two sizes users choose between, each in both model families, plus
+/// Parakeet: an opt-in extra (one GGML file for every PC) that setup never
+/// offers and the hardware never recommends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelTier {
     Small,
     LargeTurbo,
+    Parakeet,
 }
+
+pub const PARAKEET_MODEL_ID: &str = "wcpp-parakeet-tdt-0.6b-v3";
 
 pub fn model_tier(model_id: &str) -> Option<ModelTier> {
     match model_id {
         "fw-small.en" | "wcpp-small.en" => Some(ModelTier::Small),
         "fw-large-v3-turbo" | "wcpp-large-v3-turbo" => Some(ModelTier::LargeTurbo),
+        PARAKEET_MODEL_ID => Some(ModelTier::Parakeet),
         _ => None,
     }
 }
@@ -174,6 +180,7 @@ impl HardwareProfile {
             (true, ModelTier::LargeTurbo) => "wcpp-large-v3-turbo",
             (false, ModelTier::Small) => "fw-small.en",
             (false, ModelTier::LargeTurbo) => "fw-large-v3-turbo",
+            (_, ModelTier::Parakeet) => PARAKEET_MODEL_ID,
         }
     }
 
@@ -588,9 +595,11 @@ pub fn consecutive_retries(key: &str) -> usize {
 
 /// The GPU path is off for this device: its driver is disabled, or a
 /// qualification failed on this device, driver and worker build and none
-/// passed there. Any model counts: a broken Vulkan path fails Small and
-/// Large Turbo alike, while a pass proves the path works (a model-specific
-/// fail is then handled per key at decode time). A driver or worker update
+/// passed there. Any whisper model counts: a broken Vulkan path fails Small
+/// and Large Turbo alike, while a pass proves the path works (a model-specific
+/// fail is then handled per key at decode time). Parakeet results are left
+/// out: it is a different engine, so its fail only keeps Parakeet itself on
+/// the CPU (per key). A driver or worker update
 /// opens the path again, like the driver disable. Matches the
 /// `identity|driver N|...|worker F|...` layout of
 /// `asr_worker::qualification_key`.
@@ -603,7 +612,11 @@ fn gpu_ruled_out(device: &GpuDevice) -> bool {
         store
             .qualifications
             .iter()
-            .filter(|record| record.outcome != QualOutcome::Retry && record.key.starts_with(&prefix))
+            .filter(|record| {
+                record.outcome != QualOutcome::Retry
+                    && record.key.starts_with(&prefix)
+                    && model_tier(&record.model_id) != Some(ModelTier::Parakeet)
+            })
             .map(|record| (record.key.clone(), record.outcome))
             .collect()
     });

@@ -11,7 +11,8 @@ use crate::inference::{
         answer_upgrade_offer, clear_pending_upgrade, driver_disabled, hardware_profile_async,
         model_tier, pending_upgrade, upgrade_offer_answered, CpuSupport, ModelTier, QualOutcome,
     },
-    is_faster_whisper_model, is_whisper_cpp_model, qualify_gpu, AsrRung, RunningOn,
+    is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model, qualify_gpu, AsrRung,
+    RunningOn,
 };
 use crate::model_manager::InstalledModel;
 use crate::settings::GpuAcceleration;
@@ -146,7 +147,10 @@ impl VoiceWaveController {
             None
         };
 
+        // Parakeet is meant to run on the processor too, so it gets no offer
+        // to switch to faster-whisper Small.
         let stuck_on_cpu = active_is_ggml
+            && !is_parakeet_model(&settings.active_model)
             && !preparing
             && hardware.cpu != CpuSupport::Unsupported
             && running_on
