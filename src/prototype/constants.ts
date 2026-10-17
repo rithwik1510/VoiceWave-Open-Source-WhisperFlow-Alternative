@@ -1,17 +1,16 @@
 import React from "react";
-import type { ThemeConfig } from "./types";
+import type { NavId, OverlayId, PageId, ThemeConfig } from "./types";
 import {
   BarChart3,
   Braces,
-  Crown,
   Cpu,
   FileText,
   HelpCircle,
   History,
   Home,
+  type LucideIcon,
   Palette,
-  Settings,
-  Zap
+  Settings
 } from "lucide-react";
 
 const BaseIcon = ({ children, ...props }: any) =>
@@ -102,18 +101,22 @@ export const THEMES: Record<string, ThemeConfig> = {
   harmonic: THEME
 };
 
-export const NAV_ITEMS_TOP = [
+export interface NavItem<Id extends NavId> {
+  id: Id;
+  label: string;
+  icon: LucideIcon;
+}
+
+export const NAV_ITEMS_TOP: NavItem<PageId>[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "models", label: "Models", icon: Cpu },
   { id: "dictionary", label: "Dictionary", icon: FileText },
   { id: "snippets", label: "Snippets", icon: Braces },
   { id: "sessions", label: "History", icon: History },
-  { id: "stats", label: "Stats", icon: BarChart3 },
-  { id: "pro", label: "Pro", icon: Crown },
-  { id: "pro-tools", label: "Pro Tools", icon: Zap }
+  { id: "stats", label: "Stats", icon: BarChart3 }
 ];
 
-export const NAV_ITEMS_BOTTOM = [
+export const NAV_ITEMS_BOTTOM: NavItem<OverlayId>[] = [
   { id: "style", label: "Style", icon: Palette },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "help", label: "Help", icon: HelpCircle }

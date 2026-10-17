@@ -1,19 +1,19 @@
 import type React from "react";
 import { LogIn, PanelLeftClose, PanelLeftOpen, Settings, UserCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { NAV_ITEMS_BOTTOM, NAV_ITEMS_TOP } from "../constants";
-import type { ThemeConfig } from "../types";
+import { NAV_ITEMS_BOTTOM, NAV_ITEMS_TOP, type NavItem } from "../constants";
+import type { NavId, OverlayId, PageId, ThemeConfig } from "../types";
 
 interface LayoutProps {
   theme: ThemeConfig;
   children: React.ReactNode;
-  activeNav: string;
-  activePopupNav?: string | null;
-  setActiveNav: (id: string) => void;
+  activeNav: PageId;
+  activePopupNav?: OverlayId | null;
+  setActiveNav: (id: NavId) => void;
   isRecording: boolean;
-  onUpgradeClick?: () => void;
-  isPro?: boolean;
-  showProTools?: boolean;
+  /** Builds with cloud sync configured get the header workspace menu
+   * (profile + sign-in). Release builds have no accounts, so it stays hidden. */
+  accountsEnabled?: boolean;
   profileDisplayName?: string;
   profileStatusLabel?: string;
   isProfileAuthenticated?: boolean;
@@ -26,9 +26,7 @@ export const Layout: React.FC<LayoutProps> = ({
   activePopupNav = null,
   setActiveNav,
   isRecording,
-  onUpgradeClick,
-  isPro = false,
-  showProTools = false,
+  accountsEnabled = false,
   profileDisplayName = "Workspace",
   profileStatusLabel = "Guest mode",
   isProfileAuthenticated = false
@@ -38,9 +36,6 @@ export const Layout: React.FC<LayoutProps> = ({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
-  const topNavItems = NAV_ITEMS_TOP.filter(
-    (item) => showProTools || item.id !== "pro-tools"
-  );
 
   useEffect(() => {
     if (!profileMenuOpen) {
@@ -70,7 +65,7 @@ export const Layout: React.FC<LayoutProps> = ({
     };
   }, [profileMenuOpen]);
 
-  const NavButton = ({ item }: { item: { id: string; label: string; icon: React.ComponentType<any> } }) => {
+  const NavButton = ({ item }: { item: NavItem<NavId> }) => {
     const isActive = activeNav === item.id || activePopupNav === item.id;
     const Icon = item.icon;
     const activate = () => setActiveNav(item.id);
@@ -106,7 +101,7 @@ export const Layout: React.FC<LayoutProps> = ({
     );
   };
 
-  const openWorkspacePanel = (panelId: string) => {
+  const openWorkspacePanel = (panelId: OverlayId) => {
     setProfileMenuOpen(false);
     setActiveNav(panelId);
   };
@@ -172,48 +167,12 @@ export const Layout: React.FC<LayoutProps> = ({
         </div>
 
         <nav className={`relative z-50 ${sidebarCollapsed ? "px-2" : "px-4"} space-y-1 flex-shrink-0`}>
-          {topNavItems.map((item) => (
+          {NAV_ITEMS_TOP.map((item) => (
             <NavButton key={item.id} item={item} />
           ))}
         </nav>
 
         <div className="flex-1" />
-
-        <div className={`vw-sidebar-pro-wrap ${sidebarCollapsed ? "is-collapsed" : ""}`}>
-          <div className="vw-sidebar-pro-wrap-inner">
-            <div className="vw-sidebar-pro-panel p-4">
-              <span
-                className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${
-                  isPro ? "vw-pro-badge-active" : "vw-pro-badge"
-                }`}
-              >
-                {isPro ? "PRO ACTIVE" : "PRO"}
-              </span>
-              <p className="mt-2.5 mb-3 text-xs leading-relaxed text-quiet">
-                {isPro
-                  ? "Format profiles, code mode, and power history are unlocked on this device."
-                  : "The release offer unlocks every Pro tool for coders and students."}
-              </p>
-              <button
-                className="vw-btn-primary vw-btn-sm w-full"
-                type="button"
-                onClick={() => {
-                  if (isPro) {
-                    setActiveNav("pro-tools");
-                    return;
-                  }
-                  if (onUpgradeClick) {
-                    onUpgradeClick();
-                    return;
-                  }
-                  setActiveNav("pro");
-                }}
-              >
-                {isPro ? "Open Pro Tools" : "View Release Offer"}
-              </button>
-            </div>
-          </div>
-        </div>
 
         <div className="vw-sidebar-divider-wrap">
           <div className={`h-px mx-1 border-t ${colors.divider}`} />
@@ -237,57 +196,59 @@ export const Layout: React.FC<LayoutProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-6">
-            <div ref={profileMenuRef} className="relative">
-              <button
-                type="button"
-                className="flex items-center gap-3 rounded-full px-1.5 py-1 transition hover:bg-surface-hover"
-                onClick={() => setProfileMenuOpen((prev) => !prev)}
-                aria-haspopup="menu"
-                aria-expanded={profileMenuOpen}
-                aria-label="Open workspace menu"
-              >
-                <div className={`w-9 h-9 flex items-center justify-center border ${colors.bg} border-transparent rounded-full shadow-sm`}>
-                  <UserCircle size={20} className="opacity-70" />
-                </div>
-                <div className="text-sm hidden sm:block text-left">
-                  <p className="leading-none font-medium text-ink-strong">{profileDisplayName}</p>
-                  <p className="mt-1 text-[11px] leading-none text-faint">{profileStatusLabel}</p>
-                </div>
-              </button>
-              {profileMenuOpen && (
-                <div className="vw-profile-menu" role="menu" aria-label="Workspace menu">
-                  <button
-                    type="button"
-                    className="vw-profile-menu-item"
-                    role="menuitem"
-                    onClick={() => openWorkspacePanel("profile")}
-                  >
-                    <UserCircle size={15} />
-                    Profile
-                  </button>
-                  <button
-                    type="button"
-                    className="vw-profile-menu-item"
-                    role="menuitem"
-                    onClick={() => openWorkspacePanel("settings")}
-                  >
-                    <Settings size={15} />
-                    Settings
-                  </button>
-                  <button
-                    type="button"
-                    className="vw-profile-menu-item"
-                    role="menuitem"
-                    onClick={() => openWorkspacePanel("auth")}
-                  >
-                    <LogIn size={15} />
-                    {isProfileAuthenticated ? "Account" : "Sign In"}
-                  </button>
-                </div>
-              )}
+          {accountsEnabled && (
+            <div className="flex items-center gap-6">
+              <div ref={profileMenuRef} className="relative">
+                <button
+                  type="button"
+                  className="flex items-center gap-3 rounded-full px-1.5 py-1 transition hover:bg-surface-hover"
+                  onClick={() => setProfileMenuOpen((prev) => !prev)}
+                  aria-haspopup="menu"
+                  aria-expanded={profileMenuOpen}
+                  aria-label="Open workspace menu"
+                >
+                  <div className={`w-9 h-9 flex items-center justify-center border ${colors.bg} border-transparent rounded-full shadow-sm`}>
+                    <UserCircle size={20} className="opacity-70" />
+                  </div>
+                  <div className="text-sm hidden sm:block text-left">
+                    <p className="leading-none font-medium text-ink-strong">{profileDisplayName}</p>
+                    <p className="mt-1 text-[11px] leading-none text-faint">{profileStatusLabel}</p>
+                  </div>
+                </button>
+                {profileMenuOpen && (
+                  <div className="vw-profile-menu" role="menu" aria-label="Workspace menu">
+                    <button
+                      type="button"
+                      className="vw-profile-menu-item"
+                      role="menuitem"
+                      onClick={() => openWorkspacePanel("profile")}
+                    >
+                      <UserCircle size={15} />
+                      Profile
+                    </button>
+                    <button
+                      type="button"
+                      className="vw-profile-menu-item"
+                      role="menuitem"
+                      onClick={() => openWorkspacePanel("settings")}
+                    >
+                      <Settings size={15} />
+                      Settings
+                    </button>
+                    <button
+                      type="button"
+                      className="vw-profile-menu-item"
+                      role="menuitem"
+                      onClick={() => openWorkspacePanel("auth")}
+                    >
+                      <LogIn size={15} />
+                      {isProfileAuthenticated ? "Account" : "Sign In"}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </header>
 
         <div className="flex-1 overflow-hidden relative pr-2 pb-2">

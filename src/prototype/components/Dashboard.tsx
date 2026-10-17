@@ -15,7 +15,6 @@ interface DashboardProps {
   pushToTalkHotkey: string;
   controlMode?: DictationControlMode | null;
   userName?: string;
-  isPro?: boolean;
   recentSentences?: Array<{
     id: string;
     text: string;

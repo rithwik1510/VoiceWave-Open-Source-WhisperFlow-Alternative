@@ -48,6 +48,7 @@ import type {
   SessionHistoryQuery,
   SessionHistoryRecord,
   StatsSummary,
+  SupportContext,
   TranscriptEvent,
   UndoResult,
   VoiceWaveSettings,
@@ -356,6 +357,21 @@ export async function setDiagnosticsOptIn(enabled: boolean): Promise<Diagnostics
 
 export async function exportDiagnosticsBundle(): Promise<DiagnosticsExportResult> {
   return invokeVoicewave<DiagnosticsExportResult>("export_diagnostics_bundle");
+}
+
+/** App version, Windows version, and the log folder, for "Report a problem". */
+export async function getSupportContext(): Promise<SupportContext> {
+  return invokeVoicewave<SupportContext>("get_support_context");
+}
+
+/** Opens a pre-filled GitHub issue form in the browser. `engine` is a short
+ * speech-engine summary (device, engine, model id) — never user text. */
+export async function openIssueReport(engine: string): Promise<void> {
+  await invokeVoicewave<void>("open_issue_report", { engine });
+}
+
+export async function openLogsFolder(): Promise<void> {
+  await invokeVoicewave<void>("open_logs_folder");
 }
 
 export async function loadHotkeyConfig(): Promise<HotkeySnapshot> {

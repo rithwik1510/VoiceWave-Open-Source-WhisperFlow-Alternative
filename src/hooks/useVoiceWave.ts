@@ -85,7 +85,13 @@ import {
 } from "../lib/tauri";
 import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
-import { ANALYTICS_CONSENT_VERSION, trackAnonymousUsage } from "../lib/telemetry";
+import {
+  ANALYTICS_CONSENT_VERSION,
+  classifyGpuStepDown,
+  speechModelKind,
+  trackAnonymousUsage,
+  trackFunnelEvent
+} from "../lib/telemetry";
 import type {
   AppProfileOverrides,
   CodeModeSettings,
@@ -570,6 +576,11 @@ export function useVoiceWave() {
       {}
     )
   );
+  const modelStatusesRef = useRef(modelStatuses);
+  modelStatusesRef.current = modelStatuses;
+  // Set by the first non-empty final transcript; the latency event that
+  // follows it says which engine actually decoded (funnel firstSuccess).
+  const firstSuccessPendingRef = useRef(false);
   const [speechEngine, setSpeechEngine] = useState<SpeechEngineStatus | null>(null);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkRun | null>(null);
   const [modelRecommendation, setModelRecommendation] = useState<ModelRecommendation | null>(null);
@@ -1399,6 +1410,12 @@ export function useVoiceWave() {
     let unlisten: (() => void) | undefined;
     void listenVoicewavePolishModelProgress((payload) => {
       setPolishModelProgress(payload);
+      if (payload.error) {
+        void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
+          type: "Model.downloadFailed",
+          model: "polish"
+        }).catch(() => undefined);
+      }
     }).then((fn) => {
       if (active) {
         unlisten = fn;
@@ -1635,6 +1652,16 @@ export function useVoiceWave() {
       } catch (modelErr) {
         const message = modelErr instanceof Error ? modelErr.message : "Model install failed";
         setError(message);
+        // The backend usually emitted "failed" already (counted by the model
+        // listener; the per-day dedupe absorbs the repeat). A rejected command
+        // after a cancel is not a failure.
+        const kind = speechModelKind(modelId);
+        if (kind && modelStatusesRef.current[modelId]?.state !== "cancelled") {
+          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
+            type: "Model.downloadFailed",
+            model: kind
+          }).catch(() => undefined);
+        }
         // Belt and braces: even if the backend never emitted a terminal status
         // (or the IPC call itself rejected), the row must leave "downloading"
         // so Retry/Cancel appear instead of a frozen progress bar. A terminal
@@ -2295,6 +2322,7 @@ export function useVoiceWave() {
         }));
         if (event.isFinal && event.text.trim()) {
           void trackAnonymousUsage(settingsRef.current.anonymousUsageOptIn).catch(() => undefined);
+          firstSuccessPendingRef.current = true;
         }
       }));
 
@@ -2348,6 +2376,13 @@ export function useVoiceWave() {
             resumable: payload.state !== "installed" && !isFasterWhisperModelId(payload.modelId)
           }
         }));
+        const failedKind = payload.state === "failed" ? speechModelKind(payload.modelId) : null;
+        if (failedKind) {
+          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
+            type: "Model.downloadFailed",
+            model: failedKind
+          }).catch(() => undefined);
+        }
       }));
 
       await keep(listenVoicewaveAudioQuality((payload: AudioQualityReport) => {
@@ -2356,6 +2391,24 @@ export function useVoiceWave() {
 
       await keep(listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
+        // Funnel: both are deduped in telemetry.ts (once per install / once
+        // per reason per session), so firing on every dictation is cheap.
+        const optedIn = settingsRef.current.anonymousUsageOptIn;
+        if (firstSuccessPendingRef.current) {
+          firstSuccessPendingRef.current = false;
+          void trackFunnelEvent(optedIn, {
+            type: "Dictation.firstSuccess",
+            engine: payload.backendUsed === "cpu" ? "cpu" : "gpu"
+          }).catch(() => undefined);
+        }
+        const stepDown = payload.asrStepDownReason
+          ? classifyGpuStepDown(payload.asrStepDownReason, payload.backendFallback)
+          : null;
+        if (stepDown) {
+          void trackFunnelEvent(optedIn, { type: "Speech.gpuStepDown", reason: stepDown }).catch(
+            () => undefined
+          );
+        }
       }));
 
       await keep(listenVoicewaveHistoryUpdated(() => {
