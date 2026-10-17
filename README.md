@@ -1,487 +1,171 @@
-# VoiceWave
+<div align="center">
 
-![VoiceWave hero](docs/assets/readme/hero-banner.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.svg">
+  <img alt="VoiceWave: private dictation for Windows. Hold Ctrl + Win, speak, and your words appear in any app." src="docs/readme/hero-light.svg" width="100%">
+</picture>
 
-> 🎙️ **Offline, privacy-first dictation for Windows** · no cloud · no subscription trap · Whisper accuracy · < 500 ms cold start
+<br><br>
 
-```powershell
-winget install VoiceWave.LocalCore
-```
+<a href="https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest"><img alt="Download for Windows" src="docs/readme/download.svg" width="300"></a>
 
-[![GitHub Stars](https://img.shields.io/github/stars/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative?style=flat-square&color=gold&label=⭐%20Stars)](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/stargazers)
-[![GitHub Downloads](https://img.shields.io/github/downloads/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/total?style=flat-square&color=blue&label=Downloads)](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases)
-[![Release](https://img.shields.io/github/v/release/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative?style=flat-square&label=Latest)](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest)
-[![License](https://img.shields.io/github/license/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest)
-[![winget](https://img.shields.io/badge/winget-VoiceWave.LocalCore-0078d4?style=flat-square&logo=windows)](https://winstall.app/apps/VoiceWave.LocalCore)
-
----
-
-## ![Overview](docs/assets/readme/section-overview.svg) Live Demo
-
-<p align="center">
-  <img src="docs/assets/readme/voicewave-demo.gif" alt="VoiceWave live demo" width="920" />
+<p>
+  <a href="https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative?style=flat-square&label=release&color=1B8EFF"></a>
+  <a href="https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/total?style=flat-square&label=downloads&color=0A2A8C"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0F5FD7?style=flat-square"></a>
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-7ED8FF?style=flat-square&logo=windows&logoColor=white">
 </p>
 
-<p align="center">
-  <em>VoiceWave in action: pill activation, live capture, and instant text insertion — all on-device.</em>
-</p>
+Free and open source · Works offline after a one-time model download · English
 
----
+</div>
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/demo-dark.svg">
+  <img alt="Hold Ctrl + Win and speak. VoiceWave types into the app you are using, and spoken commands like new paragraph become formatting." src="docs/readme/demo-light.svg" width="100%">
+</picture>
+
+1. **Hold Ctrl + Win and talk.** Double-tap the shortcut to go hands-free; Escape cancels.
+2. **Let go.** Your speech is transcribed on your PC: on the graphics card through Vulkan
+   when it qualifies, otherwise on the CPU.
+3. **The text lands at your cursor**, in whatever app you were using.
+
+## What you get
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/features-dark.svg">
+  <img alt="Features: never leaves your PC, fast on your GPU, works in any app, hold or hands-free, spoken commands, dictionary and snippets, on-device AI polish, free and open source." src="docs/readme/features-light.svg" width="100%">
+</picture>
+
+## Never leaves your PC
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/privacy-dark.svg">
+  <img alt="Audio and text stay on your PC: microphone, on-device speech engine, your app. Cloud speech services are never used." src="docs/readme/privacy-light.svg" width="100%">
+</picture>
+
+There is no VoiceWave server and no account. Audio stays in memory and is transcribed on your
+machine. VoiceWave goes online for three things only:
+
+- **Model downloads**, once: the speech model at setup, and the AI polish model if you turn it on.
+- **Update checks** against GitHub. Updates are signed and verified before they install.
+- **An anonymous usage count**, on by default, which you can turn off during setup or in
+  Settings → Diagnostics. [What it sends](#anonymous-usage-count)
+
+## AI polish, on your machine
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/polish-dark.svg">
+  <img alt="Optional AI polish runs on your PC: it removes filler words and fixes punctuation." src="docs/readme/polish-light.svg" width="100%">
+</picture>
+
+Optional and off by default. A small local model (Qwen2.5 1.5B through llama.cpp) tidies fillers,
+casing and punctuation, with profiles for Standard, Coding and Writing (Literal skips it). A
+fidelity check rejects rewrites that drift from what you said and keeps the plain transcript
+instead. It is a one-time download of about 1 GB and needs a CPU with AVX2.
 
 ## Install
 
-Via [Microsoft winget](https://learn.microsoft.com/windows/package-manager/) (one line, recommended):
-
-```powershell
-winget install VoiceWave.LocalCore
-```
-
-`winget upgrade VoiceWave.LocalCore` keeps you current on every future release.
-
-Or grab the [latest installer directly](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest) and run it. Once installed, VoiceWave keeps itself current via signed in-app auto-update.
-
----
-
-## Why VoiceWave?
-
-|                           |  **VoiceWave**   |   Wispr Flow Pro   | Dragon Professional | Windows Speech |
-| ------------------------- | :--------------: | :----------------: | :-----------------: | :------------: |
-| **Price**                 |     **Free**     |       $15/mo       |   ~$500 one-time    |      Free      |
-| **Works Offline**         |    ✅ Always     |   ❌ Cloud-only    |       ✅ Yes        |     ✅ Yes     |
-| **Audio stays on device** | ✅ Never leaves  | ❌ Sent to servers |      ✅ Local       |    ✅ Local    |
-| **Accuracy engine**       | Whisper (local)  |  Whisper (cloud)   |     Proprietary     |  Proprietary   |
-| **Open Source**           |        ✅        |         ❌         |         ❌          |       ❌       |
-| **Windows**               |        ✅        |         ✅         |         ✅          |       ✅       |
-| **Free tier**             | ✅ (open source) |  2,000 words/week  |         ❌          |  ✅ (limited)  |
-| **Latency**               |     < 500 ms     | Network-dependent  |        < 1 s        |     Varies     |
-| **Customizable**          |  ✅ Rust/React   |         ❌         |         ❌          |       ❌       |
-
-Wispr Flow Pro pricing source: [wisprflow.ai/pricing](https://wisprflow.ai/pricing) (April 2026 — $15/mo, $12/mo billed annually).
-
----
-
-## What's New in 0.6.1
-
-**First-run reliability and a faster first dictation**
-
-1. The speech-model download shows real progress, and Cancel keeps what was
-   fetched so Install resumes.
-1. No hidden download on first launch, and the first dictation after launch no
-   longer loads the model twice (previously 10–20 seconds).
-1. Setup recommends the model that suits your PC and notes when Large Turbo
-   will be slow on it.
-1. Safer storage: a briefly locked key file can no longer reset your history,
-   dictionary, or snippets.
-1. The anonymous usage count is on by default for new installs and can be
-   turned off during setup or in Settings. Existing users are asked once.
-
-## What's New in 0.6.0
-
-**Hands-free dictation, dark mode, and deeper insights**
-
-1. Double-tap the push-to-talk shortcut to dictate hands-free. Pause when you
-   are done or press the shortcut again; Escape cancels the active dictation.
-1. Hands-free capture keeps a short release tail when stopped manually, so
-   quiet final syllables are not clipped.
-1. VoiceWave now has complete Light, Dark, and System themes across the app
-   shell, dashboard, settings, and floating recording pill.
-1. Statistics now include insertion-success-aware totals, a GitHub-style
-   streak heatmap, and richer insight panels.
-
-## What's New in 0.5.9
-
-**Usage visibility and dashboard polish**
-
-1. Optional anonymous activated-install counting records one first successful
-   dictation and at most one active marker per day. It is off by default and
-   never sends audio, transcript text, account identity, filenames, or settings.
-1. Updates keep the same random installation identifier, so updating VoiceWave
-   does not inflate the active-install count.
-1. The Home greeting now uses the signed-in profile name or a general guest
-   welcome instead of a hardcoded name.
-1. The website now labels and counts installer transfers only, excluding updater
-   metadata checks and unrelated release assets.
-
-## What's New in 0.5.8
-
-**Crash safety**
-
-1. VoiceWave could refuse to launch after an unclean shutdown. If the machine
-   lost power or the app was force-killed while saving one of its data files,
-   that file could be left with its size recorded but no contents — and the app
-   would then fail to start, with no window and no message. Every store now
-   recovers: it finishes the interrupted save, falls back to a backup, and if
-   neither can be read, sets that file aside and starts from defaults.
-1. Saves are crash-safe. Data is written to a temporary file and flushed to disk
-   before replacing the original, so losing power mid-save can no longer destroy
-   your settings, dictionary, snippets, history, or stats.
-1. A damaged encryption key is set aside and regenerated instead of blocking
-   startup, and VoiceWave tells you once if anything had to be reset.
-
-## What's New in 0.5.7
-
-**First-run reliability**
-
-1. A failed speech-model download no longer traps setup. If the one-time
-   download fails — no connection, a captive network, a dropped link — VoiceWave
-   now says so and offers Retry instead of showing a progress bar that never
-   moves. Whatever downloaded before the failure is kept.
-1. Cancel actually cancels a model download, and keeps the bytes already
-   fetched so Install resumes rather than restarting. Pause and Resume, which
-   never applied to these models, are no longer shown.
-1. Quitting during a download no longer leaves a background helper process
-   running after the app is closed.
-1. Setup shows downloaded size ("213 MB of 465 MB") alongside the percentage,
-   so a slow connection reads as slow rather than stuck.
-
-## What's New in 0.5.6
-
-**Voice snippets**
-
-1. Say a phrase you choose and VoiceWave inserts your saved text exactly as you
-   wrote it — casing, punctuation, line breaks, and URLs preserved
-   byte-for-byte. Triggers work standalone or inline, and repeat within one
-   dictation.
-1. Saved expansions are protected through deterministic formatting and the
-   on-device polish pass, so neither the formatter nor the language model can
-   reword content you own.
-1. Encrypted on device, works signed out and offline, replicates across your
-   devices when signed in. Own page in the app with search, edit, and delete.
-
-**Dictionary fixes and local-first storage**
-
-1. Removed a plaintext dictionary backup file left on disk by an older
-   migration, and stopped unapproved suggestions from influencing
-   transcription before you approve them.
-1. Dictionary storage was rebuilt so the encrypted on-device store is the
-   single source of truth in every account state, with optional cloud storage
-   as replication on top — tombstoned deletes that propagate, and local writes
-   that never roll back on a remote failure. Groundwork rather than a
-   user-visible change: cloud sync ships disabled in release builds.
-
-## What's New in 0.5.5
-
-**Mode-aware polish profiles**
-
-1. Coding and Writing use separate, compact on-device prompts tuned for the
-   bundled Qwen2.5-1.5B model. A Rust fidelity gate accepts the result or falls
-   back to deterministic formatting when the model is slow or uncertain.
-1. Literal never calls the language model and keeps fillers and repeated words;
-   Standard preserves immediate insertion and can offer an optional polished
-   version afterward.
-1. Selecting an AI-shaped profile prepares the local model automatically, and
-   the active profile is warmed after launch. (The four-thread production CPU
-   cap was listed here in error — it landed after this build was cut and ships
-   in 0.5.6.)
-
-## What's New in 0.5.0
-
-**Zero-setup offline transcription**
-
-1. The installer now ships a self-contained CPU faster-whisper runtime — a fresh install transcribes the default model immediately, with no Python install and no manual setup, fully offline.
-
-**On-device AI polish (opt-in)**
-
-1. An optional local LLM pass cleans up filler, capitalization, and punctuation after dictation and offers the polished text on the pill. It runs entirely on-device and uses a fail-closed fidelity validator; rejected output falls back to deterministic text.
-
-**Productivity**
-
-1. Dictionary export / import — back up and move your custom-term dictionary between machines.
-1. Interactive pill actions — one-tap actions on pill notices (copy the transcript, add a term).
-1. Mic-volume guard — a Dynamic-Island-style pill notice warns when your input level is too low, so quiet-mic dictations don't silently fail.
-
-**Insertion**
-
-1. Terminals are now detected by process, not window title — dictation pastes correctly into the Codex and Claude desktop apps (previously misread as CLIs and forced to clipboard-only).
-1. The "Polished version ready" pill surfaces occasionally rather than after every dictation; fallback and error notices still show every time.
-
-## What's New in 0.4.0
-
-**Updates**
-
-1. In-app auto-update — VoiceWave checks GitHub on launch and offers a one-click "Install & Restart" when a newer signed release is available. Updates are cryptographically signed and verified before install.
-
-## What's New in 0.3.1
-
-**Audio pipeline**
-
-1. Soft word endings ("s", "th", "f", drifted "e") no longer clipped — post-release capture window lifted to 300 ms, with a matching 300 ms trim pad on both capture and inference layers.
-1. Volume-adaptive trim thresholds — quiet speakers and post-pause resumptions now land fully instead of being truncated as silence.
-1. All aggressive DSP (pre-emphasis, gain normalization, noise attenuation, hum notch, soft limiter) defaults to off. Whisper receives audio as captured.
-
-**Inference**
-
-1. Cold-start prewarm at app launch — first dictation drops from 2–5 s to ~500 ms.
-1. Extra hallucination guard: `log_prob_threshold = -1.0` on the primary decode alongside the existing `no_speech` and `compression_ratio` floors.
-1. Opt-in `whisper.cpp` models: `wcpp-small.en` (~466 MB) and `wcpp-large-v3-turbo` (~1.6 GB). `Vulkan` backend available behind the `whisper-vulkan` cargo feature.
-
-**Reliability**
-
-1. Push-to-talk release no longer drops silently on key bounce.
-1. Clipboard paste keeps the dictated text — no more "old content pasted" after delayed Ctrl+V.
-1. SendInput refuses to type into Windows security dialogs (UAC, Credential Manager, PIN prompts).
-1. Worker stdout drained between requests to prevent ID-mismatch stalls after cancel/retry.
-1. Decode threads reserve one CPU core for the UI to stop taskbar stutter during transcription.
-
----
-
-## ![Overview](docs/assets/readme/section-overview.svg) Product At A Glance
-
-| Area                  | Summary                                                                                                                                           |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime               | `Tauri 2` shell + `Rust` core + `React/Tailwind` frontend                                                                                         |
-| ASR (default)         | `faster-whisper` via a bundled CPU Python runtime (`fw-small.en` / `fw-large-v3`), CUDA auto-detected when present — works offline out of the box |
-| ASR (opt-in)          | `whisper.cpp` speech worker processes (`wcpp-small.en` / `wcpp-large-v3-turbo`), Vulkan GPU with CPU step-down                                    |
-| Privacy Path          | No outbound audio transport, no cloud transcription path in v1                                                                                    |
-| UX Contract           | Explicit state model: `idle -> listening -> transcribing -> inserted/error`                                                                       |
-| Insertion Reliability | Direct insert -> clipboard fallback -> history fallback (blocked on Windows security dialogs)                                                     |
-| Platform Scope        | Windows implementation/validation active since `2026-02-10`                                                                                       |
-
-## ![Capabilities](docs/assets/readme/section-capabilities.svg) Core Capabilities
-
-| Icon                                                  | Capability                 | Technical Detail                                                                                                              |
-| ----------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| ![Local-only](docs/assets/readme/icon-local-only.svg) | Local-Only Privacy         | Production path has no outbound audio transport and no cloud transcription rewrite path for v1.                               |
-| ![Runtime](docs/assets/readme/icon-runtime.svg)       | Deterministic Runtime Flow | Audio capture, inference orchestration, insertion, and persistence are handled in Rust services behind Tauri commands/events. |
-| ![Insertion](docs/assets/readme/icon-insertion.svg)   | Fallback-Safe Insertion    | Insertion engine prioritizes direct insertion and degrades to clipboard/history fallback to preserve user text.               |
-| ![Models](docs/assets/readme/icon-models.svg)         | Verified Model Lifecycle   | Model install/switch includes cataloging, completeness checks (all model files present), and recommendation logic.            |
-
-## ![Architecture](docs/assets/readme/section-architecture.svg) Runtime Architecture
-
-![VoiceWave runtime pipeline](docs/assets/readme/runtime-pipeline.svg)
-
-Primary architecture boundary is defined in [docs/rfc/0001-system-architecture.md](docs/rfc/0001-system-architecture.md).
-
-Core modules:
-
-1. `desktop-shell` (Tauri host)
-1. `audio-pipeline` (capture, resample, buffering, VAD)
-1. `inference-worker` (whisper.cpp integration + cancellable jobs)
-1. `insertion-engine` (direct/clipboard/history reliability chain)
-1. `hotkey-manager` (global binding lifecycle)
-1. `model-manager` (catalog/download/completeness check/health)
-1. `persistence` (local settings/history/stats)
-1. `diagnostics` (redacted export, opt-in)
-1. `experience-state` (shared state contract for UX)
-
-## ![Status](docs/assets/readme/section-status.svg) Status Snapshot (Repository Baseline)
-
-As documented in this branch:
-
-1. Phase 0 complete.
-1. Phase 1 complete for Windows runtime integration.
-1. Phase 2 implemented and validated in Windows execution scope.
-1. Phase 3 implemented and validated for Windows rescue baseline.
-1. Phase 4 and Phase 5 gate automation is implemented (`phase4`, `phase5`, and reliability checks).
-1. Release gate automation is implemented (`npm run release:gate`).
-1. Phase 6 not started.
-
-Open release blockers called out in current docs:
-
-1. Artifact freshness policy now requires fresh evidence (`<= 7` days) for release-candidate decisions.
-1. Reliability exit thresholds are stricter (`insertion >= 98%`, `correction <= 12%`, `crash-free >= 99.5%`, `TTFSD <= 3`).
-1. Legal/compliance checklist and risk register are now release-gate inputs and must stay current.
-
-References:
-
-1. [docs/PHASE3_IMPLEMENTATION.md](docs/PHASE3_IMPLEMENTATION.md)
-1. [docs/PHASE4_READINESS.md](docs/PHASE4_READINESS.md)
-1. [docs/PHASE5_READINESS.md](docs/PHASE5_READINESS.md)
-1. [docs/phase3/artifacts/windows-manual-acceptance-2026-02-11.md](docs/phase3/artifacts/windows-manual-acceptance-2026-02-11.md)
-
-## ![Stack](docs/assets/readme/section-stack.svg) Stack
-
-1. Frontend: `React 18` + `Tailwind` + `Vite`
-1. Desktop shell: `Tauri 2`
-1. Core runtime: `Rust`
-1. ASR (default): `faster-whisper` (CTranslate2) via Python subprocess; CUDA auto-detected
-1. ASR (opt-in): `whisper.cpp` in separate speech worker processes (`voicewave-asr-vk.exe` / `voicewave-asr-cpu.exe`); Vulkan GPU with CPU step-down
-1. Local storage/ops: encrypted billing files + local runtime state/history artifacts
-
-## ![Quick Start](docs/assets/readme/section-quickstart.svg) Quick Start
-
-1. Install dependencies:
+1. Download `VoiceWave.Local.Core_<version>_x64-setup.exe` from the
+   [latest release](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/releases/latest)
+   and run it.
+2. **Windows may warn "Windows protected your PC" (Unknown publisher).** The installer is not
+   code-signed yet, so SmartScreen does not recognise it. Choose **More info → Run anyway**. Every
+   installer is built in public by [GitHub Actions](.github/workflows/release.yml) from this
+   repository, and in-app updates are signed and verified before they install.
+3. **First launch** checks your microphone and downloads one speech model, chosen for your PC:
+   about 488 MB (Small) up to 1.6 GB (Large Turbo). After that, dictation works offline.
+
+> [!NOTE]
+> `winget install VoiceWave.LocalCore` also works, but the winget listing currently trails the
+> latest release. Use the installer above to get the newest version.
+
+### Requirements
+
+|                    | Needs                                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Windows**        | 10 or 11, 64-bit                                                                                                             |
+| **CPU**            | x64 with SSE4.1. AVX2 is needed for the GPU engine and AI polish.                                                            |
+| **GPU** (optional) | A discrete NVIDIA, AMD or Intel graphics card with Vulkan 1.2. PCs with only integrated graphics use the CPU engine for now. |
+| **Language**       | English                                                                                                                      |
+
+## Compared with cloud dictation
+
+|                             |           **VoiceWave**           |                       Wispr Flow                        |
+| --------------------------- | :-------------------------------: | :-----------------------------------------------------: |
+| Price                       |             **Free**              | $15/month for Pro; free tier capped at 2,000 words/week |
+| Where speech is transcribed |          **On your PC**           |                    On their servers                     |
+| Works offline               | **Yes**, after the model download |                           No                            |
+| Account required            |              **No**               |                           Yes                           |
+| Open source                 |       **Yes** (Apache-2.0)        |                           No                            |
+
+Wispr Flow details from [wisprflow.ai/pricing](https://wisprflow.ai/pricing), April 2026.
+
+## Anonymous usage count
+
+On by default for new installs since 0.6.1 (existing users were asked once). It helps show whether
+people get through setup and whether dictation works for them. Turn it off during setup or in
+**Settings → Diagnostics**. It is sent through [TelemetryDeck](https://telemetrydeck.com) with a
+random installation ID, the app version and the download channel, and counts only:
+
+- your first successful dictation, and whether it ran on the GPU or the CPU;
+- one "active today" marker per day;
+- which setup step you reached, and whether setup finished or was skipped;
+- a speech or AI polish model download failing;
+- the GPU engine falling back to the CPU, with a reason category.
+
+It never sends audio, transcript text, dictionary or snippet content, account details, file names
+or settings.
+
+## What's new in 0.7.0
+
+- **GPU dictation on any vendor.** whisper.cpp runs on discrete NVIDIA, AMD and Intel graphics
+  cards through Vulkan, in its own worker process. No CUDA download.
+- **Picked per PC.** A one-time check confirms the GPU works before VoiceWave switches to it, and
+  dictation steps down to the CPU automatically if the GPU misbehaves.
+- **Verified GPU models.** whisper.cpp models are checked against pinned SHA-256 hashes before
+  they replace anything.
+
+Full history in the [changelog](CHANGELOG.md).
+
+## Support
+
+Something not working? In the app, **Help → Report a problem** opens a pre-filled GitHub issue
+with your app version, Windows version and speech engine. You can also
+[open an issue](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/issues/new/choose)
+directly. Logs never contain what you dictated.
+
+## Build from source
+
+<details>
+<summary>Tauri 2 · Rust · React 18 · whisper.cpp · faster-whisper</summary>
+
+<br>
+
+| Layer      | What it is                                                                           |
+| ---------- | ------------------------------------------------------------------------------------ |
+| App shell  | Tauri 2, Rust core (audio capture, hotkeys, insertion, storage)                      |
+| Interface  | React 18, TypeScript, Tailwind                                                       |
+| GPU speech | whisper.cpp 1.9.5 worker processes (`voicewave-asr-vk.exe`, `voicewave-asr-cpu.exe`) |
+| CPU speech | faster-whisper in a bundled Python runtime                                           |
+| AI polish  | Qwen2.5 1.5B through llama-cpp-python, on the CPU                                    |
 
 ```powershell
 npm install
+npm run tauri:dev     # desktop app (needs the Rust + Tauri prerequisites)
+npm run dev           # interface only, in a browser
+npm test              # frontend tests
+npm run build         # type-check and build the interface
 ```
 
-1. Run frontend dev mode:
+The release build stages the Python runtime and the whisper.cpp workers; see
+[`release.yml`](.github/workflows/release.yml) and the scripts under
+[`scripts/`](scripts/). More in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```powershell
-npm run dev
-```
+</details>
 
-1. Optional: enable cloud auth + sentence sync (Firebase):
+## License
 
-```powershell
-Copy-Item .env.example .env
-```
-
-Then fill the `VITE_FIREBASE_*` keys in `.env` from your Firebase project settings.
-When configured, VoiceWave enables:
-
-1. Email/password sign-up + sign-in
-1. Per-user cloud storage of only the latest 5 sentences
-1. Per-user synced approved dictionary terms
-1. Recent sentence list in Home and Dictionary views
-
-Firestore rules template is provided at:
-
-1. `docs/firebase/firestore.rules`
-
-1. Run tests:
-
-```powershell
-npm run test -- --run
-```
-
-1. Build frontend:
-
-```powershell
-npm run build
-```
-
-1. Run desktop app (requires Rust/Tauri prerequisites):
-
-```powershell
-npm run tauri:dev
-```
-
-1. In app: open `Models`, install `fw-small.en` (recommended default, ~466 MB) or `fw-large-v3` for highest accuracy. Optional: `wcpp-*` whisper.cpp variants live alongside them. Then run dictation from `Home`.
-
-## ![Validation](docs/assets/readme/section-validation.svg) Validation and Gates
-
-| Command                                        | Purpose                                                              |
-| ---------------------------------------------- | -------------------------------------------------------------------- |
-| `npm run phase1:validate`                      | Phase I validation suite                                             |
-| `npm run phase1:battery`                       | Phase I battery/thermal run                                          |
-| `npm run phase2:validate`                      | Phase II validation suite                                            |
-| `npm run phase3:validate`                      | Phase III validation suite                                           |
-| `npm run phase4:prep`                          | Phase IV readiness report                                            |
-| `npm run phase4:gate`                          | Phase IV blocking gate                                               |
-| `npm run phase5:prep`                          | Phase V readiness report                                             |
-| `npm run phase5:gate`                          | Phase V blocking readiness gate                                      |
-| `npm run phase5:reliability`                   | Phase V reliability evidence report                                  |
-| `npm run phase5:reliability:gate`              | Phase V blocking reliability gate                                    |
-| `npm run release:gate`                         | End-to-end release blocking gate (phase4 + phase5 + risk/compliance) |
-| `npm run test:coverage`                        | Frontend test + coverage thresholds gate                             |
-| `npm run security:secrets -- -Enforce`         | Enforced secret leakage scan                                         |
-| `npm run security:deps -- -Enforce`            | Enforced dependency vulnerability gate                               |
-| `npm run security:firestore-rules -- -Enforce` | Firestore rules schema/policy contract gate                          |
-| `npm run quality:frontend:gate`                | Frontend quality gate (coverage + build)                             |
-| `npm run quality:backend:gate`                 | Backend quality gate (tests + inventory threshold)                   |
-| `npm run phaseB:gpu:check`                     | GPU readiness check                                                  |
-
-## ![Contract](docs/assets/readme/section-contract.svg) Runtime Contract Surface (High-Level)
-
-Phase I baseline commands:
-
-1. `start_dictation(mode)`
-1. `cancel_dictation()`
-1. `load_settings()`
-1. `update_settings(settings)`
-1. `get_voicewave_snapshot()`
-
-Phase II additions include hotkey, permission, and insertion command surfaces.
-
-Phase III additions include model manager, benchmark/recommendation, history, and dictionary command surfaces.
-
-Phase V additions include diagnostics status and export command surfaces.
-
-See full contract list in [docs/rfc/0001-system-architecture.md](docs/rfc/0001-system-architecture.md).
-
-## ![Monetization](docs/assets/readme/section-monetization.svg) Monetization and Entitlements
-
-VoiceWave is free to use. Download, install, and run — no subscription required.
-
-Reference: [docs/monetization.md](docs/monetization.md)
-
-## ![Security](docs/assets/readme/section-security.svg) Privacy and Security Guardrails
-
-1. No outbound audio transport in production path.
-1. Local-only ASR and deterministic local post-processing in current monetization architecture.
-1. Model/update verification paths are documented in phase evidence.
-1. Diagnostics export is user-triggered and revocable.
-1. Anonymous activated-install analytics is **on by default** and can be turned off in onboarding or
-   Settings → Diagnostics. Existing installs are asked once before anything is sent. VoiceWave sends only a
-   random installation ID, app version, distribution channel, a first-success marker, and a once-per-day
-   active marker via TelemetryDeck — never audio, transcript text, account identity, filenames, or settings.
-
-References:
-
-1. [docs/security/threat-model-v1.md](docs/security/threat-model-v1.md)
-1. [docs/risk/risk-register.md](docs/risk/risk-register.md)
-1. [docs/phase4/evidence/update-signing-verification.md](docs/phase4/evidence/update-signing-verification.md)
-
-## ![Evidence](docs/assets/readme/section-evidence.svg) Latest Recorded Validation Evidence
-
-Latest recorded run: `2026-07` (against `0.4.0` baseline).
-
-1. Rust library test suite: **218 pass / 0 fail**.
-1. Frontend test suite (`npx vitest run`): **34 pass / 0 fail**.
-1. `npm run build`: recorded pass.
-1. `cargo check --no-default-features --release`: recorded pass.
-
-Reference artifact trail:
-
-1. [docs/phase3/artifacts](docs/phase3/artifacts)
-1. [docs/phase4/artifacts](docs/phase4/artifacts)
-1. [docs/phase5/artifacts](docs/phase5/artifacts)
-1. [docs/testing/hardware-tier-recommendation-windows.json](docs/testing/hardware-tier-recommendation-windows.json)
-
-## ![CI](docs/assets/readme/section-ci.svg) CI
-
-Workflow: [.github/workflows/ci.yml](.github/workflows/ci.yml)
-
-Current CI baseline includes:
-
-1. Docs formatting checks
-1. Markdown lint
-1. Secrets scan
-1. Phase 0 artifact integrity checks
-1. Frontend tests and build
-1. Rust tests and compile paths
-1. Release gate job (`npm run release:gate`) on Windows runner
-
-Local pre-commit guard (recommended):
-
-1. `git config core.hooksPath .githooks`
-1. `chmod +x .githooks/pre-commit` (macOS/Linux only)
-
-## ![Repo](docs/assets/readme/section-repo.svg) Repository Map
-
-```text
-src/                   # React app and UI runtime bridge
-src-tauri/             # Rust core runtime + Tauri shell
-voicewave-website/     # Marketing website
-docs/                  # RFCs, phase plans, evidence, security, testing
-scripts/               # Validation, readiness, benchmark, tauri utilities
-```
-
-## ![Docs](docs/assets/readme/section-docs.svg) Source of Truth Docs
-
-1. Product requirements: [docs/prd/v1-prd.md](docs/prd/v1-prd.md)
-1. Architecture RFC: [docs/rfc/0001-system-architecture.md](docs/rfc/0001-system-architecture.md)
-1. Test strategy: [docs/testing/test-strategy.md](docs/testing/test-strategy.md)
-1. Hardware tiers: [docs/testing/hardware-tiers.md](docs/testing/hardware-tiers.md)
-1. Release thresholds: [docs/testing/release-thresholds-windows.json](docs/testing/release-thresholds-windows.json)
-1. Legal/compliance checklist: [docs/testing/legal-compliance-checklist.md](docs/testing/legal-compliance-checklist.md)
-1. Phase recovery plan: [docs/PHASE_RECOVERY_PLAN.md](docs/PHASE_RECOVERY_PLAN.md)
-1. Implementation ledger: [Idea.md](Idea.md)
-1. Phase I implementation: [docs/PHASE1_IMPLEMENTATION.md](docs/PHASE1_IMPLEMENTATION.md)
-1. Phase II implementation: [docs/PHASE2_IMPLEMENTATION.md](docs/PHASE2_IMPLEMENTATION.md)
-1. Phase III implementation: [docs/PHASE3_IMPLEMENTATION.md](docs/PHASE3_IMPLEMENTATION.md)
-1. Phase III remaining: [docs/PHASE3_REMAINING.md](docs/PHASE3_REMAINING.md)
-1. Phase IV readiness: [docs/PHASE4_READINESS.md](docs/PHASE4_READINESS.md)
-1. Phase V readiness: [docs/PHASE5_READINESS.md](docs/PHASE5_READINESS.md)
-1. Changelog: [CHANGELOG.md](CHANGELOG.md)
-1. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
-
-## ![Verify](docs/assets/readme/section-verify.svg) Local Verification Utility
-
-```powershell
-# Phase 0 artifact checks
-& "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -File .\scripts\ci\check-phase0-artifacts.ps1
-```
+[Apache-2.0](LICENSE). Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
