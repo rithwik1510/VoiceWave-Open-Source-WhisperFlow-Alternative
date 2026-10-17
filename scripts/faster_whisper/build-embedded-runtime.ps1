@@ -59,6 +59,8 @@ if ($Clean -and (Test-Path $pythonDir)) {
 }
 if (Test-Path (Join-Path $pythonDir "python.exe")) {
   Write-Host "Runtime already present at $pythonDir. Use -Clean to rebuild."
+  # Still prune: the tree may predate the current prune rules (idempotent).
+  & (Join-Path $PSScriptRoot "prune-embedded-runtime.ps1") -PythonDir $pythonDir
   return
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -165,14 +167,16 @@ if ($cudaDll) {
 }
 
 Write-Host "Trimming runtime to reduce installer size..."
-# Byte-caches and the stdlib test suite are dead weight in a shipped runtime.
-Get-ChildItem -Path $pythonDir -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-  ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
-$stdlibTest = Join-Path $pythonDir "Lib\test"
-if (Test-Path $stdlibTest) { Remove-Item -Recurse -Force $stdlibTest -ErrorAction SilentlyContinue }
+# Drops symbols, import libs, tcl/tk, pip/setuptools, the unused Silero VAD
+# stack (onnxruntime + sympy...), duplicate llama DLLs, and test suites. A
+# separate idempotent script so the bundle step can re-run it on runtimes that
+# were staged (or cached in CI) before a prune rule existed.
+& (Join-Path $PSScriptRoot "prune-embedded-runtime.ps1") -PythonDir $pythonDir
 
 Write-Host "Verifying runtime imports..."
-$check = 'import faster_whisper, ctranslate2, numpy, av, onnxruntime, tokenizers, huggingface_hub, llama_cpp; from faster_whisper import WhisperModel; from llama_cpp import Llama; print("embedded runtime OK:", faster_whisper.__version__, ctranslate2.__version__, "llama_cpp", llama_cpp.__version__)'
+# onnxruntime is deliberately absent: prune-embedded-runtime.ps1 removes it
+# (Silero VAD is unused), and faster_whisper imports it only lazily.
+$check = 'import faster_whisper, ctranslate2, numpy, av, tokenizers, huggingface_hub, llama_cpp; from faster_whisper import WhisperModel; from llama_cpp import Llama; print("embedded runtime OK:", faster_whisper.__version__, ctranslate2.__version__, "llama_cpp", llama_cpp.__version__)'
 & $py -c $check
 if ($LASTEXITCODE -ne 0) { throw "Runtime import self-check failed" }
 
