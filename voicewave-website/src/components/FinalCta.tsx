@@ -3,8 +3,10 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { windowsDownloadUrl } from '../config/download'
 import { WINGET_COMMAND } from '../config/site'
+import { useGitHubStats } from '../lib/useGitHubStats'
 
 export default function FinalCta() {
+  const { installerUrl } = useGitHubStats()
   const [copied, setCopied] = useState(false)
 
   const copyCommand = async () => {
@@ -51,7 +53,7 @@ export default function FinalCta() {
             </p>
 
             <a
-              href={windowsDownloadUrl}
+              href={installerUrl ?? windowsDownloadUrl}
               target="_blank"
               rel="noreferrer"
               download

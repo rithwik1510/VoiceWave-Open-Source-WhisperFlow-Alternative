@@ -5,12 +5,14 @@ export type GitHubStats = {
   stars: number | null
   installerTransfers: number | null
   latestVersion: string | null
+  /** Installer of the newest published release that has one. */
+  installerUrl: string | null
 }
 
-const CACHE_KEY = 'vw-github-stats-v2'
+const CACHE_KEY = 'vw-github-stats-v3'
 const CACHE_TTL_MS = 30 * 60 * 1000
 
-const EMPTY: GitHubStats = { stars: null, installerTransfers: null, latestVersion: null }
+const EMPTY: GitHubStats = { stars: null, installerTransfers: null, latestVersion: null, installerUrl: null }
 
 let inFlight: Promise<GitHubStats> | null = null
 
@@ -51,27 +53,33 @@ const fetchStats = async (): Promise<GitHubStats> => {
 
   let installerTransfers: number | null = null
   let latestVersion: string | null = null
+  let installerUrl: string | null = null
   if (Array.isArray(releases)) {
     installerTransfers = 0
+    // Releases come newest first.
     for (const release of releases) {
-      if (!latestVersion && typeof release?.tag_name === 'string' && !release.prerelease && !release.draft) {
+      const published = !release?.prerelease && !release?.draft
+      if (!latestVersion && published && typeof release?.tag_name === 'string') {
         latestVersion = release.tag_name
       }
       if (Array.isArray(release?.assets)) {
         for (const asset of release.assets) {
-          if (
-            typeof asset?.name === 'string' &&
-            asset.name.toLowerCase().endsWith('.exe') &&
-            typeof asset?.download_count === 'number'
-          ) {
+          if (typeof asset?.name !== 'string' || !asset.name.toLowerCase().endsWith('.exe')) {
+            continue
+          }
+          if (typeof asset?.download_count === 'number') {
             installerTransfers += asset.download_count
+          }
+          // Skips a release whose installer is mid re-upload.
+          if (!installerUrl && published && typeof asset?.browser_download_url === 'string') {
+            installerUrl = asset.browser_download_url
           }
         }
       }
     }
   }
 
-  return { stars, installerTransfers, latestVersion }
+  return { stars, installerTransfers, latestVersion, installerUrl }
 }
 
 /**

@@ -13,7 +13,7 @@ const topLinks = [
 ]
 
 export default function Header() {
-  const { stars } = useGitHubStats()
+  const { stars, installerUrl } = useGitHubStats()
 
   return (
     <header className="relative z-40 px-0 pt-4 sm:pt-5">
@@ -55,7 +55,7 @@ export default function Header() {
             </a>
 
             <a
-              href={windowsDownloadUrl}
+              href={installerUrl ?? windowsDownloadUrl}
               target="_blank"
               rel="noreferrer"
               download

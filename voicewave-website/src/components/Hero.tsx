@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Check, Copy } from 'lucide-react'
 import { windowsDownloadUrl } from '../config/download'
+import { useGitHubStats } from '../lib/useGitHubStats'
 import HeroDottedField, { type HeroSafeZone } from './HeroDottedField'
 
 const WINGET_COMMAND = 'winget install VoiceWave.LocalCore'
@@ -18,6 +19,7 @@ const HERO_SUBTEXTS = [
 const HERO_POINTS = ['Windows', 'Free preview', 'Offline-first']
 
 export default function Hero() {
+  const { installerUrl } = useGitHubStats()
   const [subtextIdx, setSubtextIdx] = useState(0)
   const heroSectionRef = useRef<HTMLElement | null>(null)
   const copyStackRef = useRef<HTMLDivElement | null>(null)
@@ -170,7 +172,7 @@ export default function Hero() {
           </ul>
 
           <a
-            href={windowsDownloadUrl}
+            href={installerUrl ?? windowsDownloadUrl}
             target="_blank"
             rel="noreferrer"
             download
