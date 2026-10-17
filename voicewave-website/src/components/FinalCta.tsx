@@ -1,23 +1,10 @@
-import { ArrowRight, Check, Copy } from 'lucide-react'
-import { useState } from 'react'
+import { ArrowRight } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { windowsDownloadUrl } from '../config/download'
-import { WINGET_COMMAND } from '../config/site'
 import { useGitHubStats } from '../lib/useGitHubStats'
 
 export default function FinalCta() {
   const { installerUrl } = useGitHubStats()
-  const [copied, setCopied] = useState(false)
-
-  const copyCommand = async () => {
-    try {
-      await navigator.clipboard.writeText(WINGET_COMMAND)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1800)
-    } catch {
-      // Clipboard unavailable — visible text can still be selected.
-    }
-  }
 
   return (
     <section className="px-0 pb-16 pt-8 sm:pb-24 sm:pt-12">
@@ -40,7 +27,7 @@ export default function FinalCta() {
 
           <div className="relative z-10 mx-auto flex max-w-2xl flex-col items-center">
             <p className="font-mono text-[11px] font-bold uppercase tracking-[0.22em] text-[#7ed8ff]">
-              Free · Open source · Offline
+              Free · Open source · Private
             </p>
             <h2 className="mt-4 text-balance font-display text-[clamp(2.2rem,6vw,4rem)] font-bold leading-[0.98] tracking-tight">
               Stop typing.
@@ -48,8 +35,9 @@ export default function FinalCta() {
               Start talking.
             </h2>
             <p className="mt-5 max-w-lg text-pretty text-base leading-relaxed text-[#b8c9de]">
-              One installer, no account, no cloud. In two minutes you'll be dictating
-              into whatever app you're using right now.
+              One installer, no account, no cloud. Setup downloads a speech model once
+              (about 0.5 to 1.6 GB, picked for your PC). After that it works offline in
+              whatever app you're using.
             </p>
 
             <a
@@ -64,22 +52,13 @@ export default function FinalCta() {
               <ArrowRight className="ml-2 h-3.5 w-3.5" />
             </a>
 
-            <button
-              type="button"
-              onClick={copyCommand}
-              aria-label={copied ? 'winget command copied' : `Copy winget install command: ${WINGET_COMMAND}`}
-              className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 transition-colors hover:border-white/30 hover:bg-white/[0.1]"
-            >
-              <code className="font-mono text-[11px] font-medium text-[#e6f1ff] sm:text-xs">{WINGET_COMMAND}</code>
-              {copied ? (
-                <Check className="h-3 w-3 text-[#7ed8ff]" aria-hidden="true" />
-              ) : (
-                <Copy className="h-3 w-3 text-[#9fbedd]" aria-hidden="true" />
-              )}
-            </button>
-
             <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.16em] text-[#6d87a8]">
               Windows 10/11 · 64-bit · no account required
+            </p>
+            <p className="mt-3 max-w-md text-pretty text-xs leading-relaxed text-[#8aa3c2]">
+              Windows may show &quot;Unknown publisher&quot; the first time, because the installer
+              isn&apos;t code-signed yet. Choose More info, then Run anyway. It&apos;s built in
+              public from this repo.
             </p>
           </div>
         </motion.div>

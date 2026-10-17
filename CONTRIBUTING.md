@@ -38,18 +38,16 @@ cd VoiceWave-Open-Source-WhisperFlow-Alternative
 # 2. Install JS dependencies
 npm install
 
-# 3. (Optional) Firebase cloud features
-Copy-Item .env.example .env
-# Fill VITE_FIREBASE_* keys in .env
-
-# 4. Run dev mode (frontend only)
+# 3. Run dev mode (frontend only)
 npm run dev
 
-# 5. Run full desktop app (requires Rust/Tauri setup above)
+# 4. Run full desktop app (requires Rust/Tauri setup above)
 npm run tauri:dev
 ```
 
-On first launch, open **Models** and install `fw-small.en` (~466 MB). Dictation will not work until a model is installed.
+No speech model is bundled. On first launch, first-run setup downloads one (about 488 MB for Small up to 1.6 GB for Large Turbo, chosen for your PC). Dictation will not work until a model is installed.
+
+> **Cloud sign-in and sync are dormant, developer-only code.** They are compiled out of release builds, and the release workflow injects no `VITE_FIREBASE_*` values, so shipped installers contain no Firebase. You do not need them to work on VoiceWave. If you are developing that code path, copy `.env.example` to `.env` and fill the `VITE_FIREBASE_*` keys.
 
 ---
 
@@ -85,14 +83,10 @@ Releases are gated by `npm run release:gate`, which runs phase 4 + phase 5 check
 2. Bump the version in `src-tauri/tauri.conf.json` and `package.json`.
 3. Commit: `chore(release): bump version to X.Y.Z`
 4. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
-5. Build the Windows installer:
-   ```powershell
-   npm run tauri:build
-   ```
-6. Upload the `.exe` to the GitHub release as an asset named `VoiceWave.Local.Core_X.Y.Z_x64-setup.exe`.
-7. Update the winget manifest in the `winget-pkgs` upstream repo.
-8. Update the download URL on the marketing site (env var on Render).
-9. Add an entry to [CHANGELOG.md](CHANGELOG.md).
+5. Publish a GitHub Release for the tag. `.github/workflows/release.yml` builds and signs the installer, then uploads `VoiceWave.Local.Core_X.Y.Z_x64-setup.exe` and `latest.json` to the release (see [docs/auto-update.md](docs/auto-update.md)). To build locally instead, run `npm run tauri:build`.
+6. Winget is submitted by the `publish-winget` job in the same workflow. It currently fails because the `WINGET` token is invalid, so there is no manual step. Fix it with [docs/winget-pat-setup.md](docs/winget-pat-setup.md).
+7. The marketing site's download buttons follow the newest release automatically. No env var change is needed.
+8. Add an entry to [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -144,7 +138,7 @@ The primary boundary document is [docs/rfc/0001-system-architecture.md](docs/rfc
 - Audio never leaves the device in the production path.
 - The UX state machine must stay deterministic: `idle → listening → transcribing → inserted/error`.
 - Insertion fallback order is `direct → clipboard → history` — do not reorder or skip levels.
-- Model downloads are checksum-verified before activation.
+- Model downloads are verified before activation. The whisper.cpp GGML models are checked against pinned SHA-256 hashes; faster-whisper and AI polish models are checked for completeness and size over HTTPS. Do not describe the latter as checksum-verified.
 
 ---
 

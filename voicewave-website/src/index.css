@@ -318,17 +318,16 @@ section[id] {
   text-shadow: 0 5px 16px rgba(3, 17, 58, 0.34), 0 1px 2px rgba(3, 17, 58, 0.22);
 }
 
-/* Secondary install pill under the hero CTA — surfaces the winget command
-   for users who'd rather paste a one-liner than download the .exe. Uses a
+/* Secondary link pill under the hero CTA (source on GitHub). Uses a
    glass-pill aesthetic to read as supplementary, never competes with the
    lime-cta button above it. */
-.hero-winget-strip {
+.hero-secondary-strip {
   text-shadow: 0 2px 8px rgba(3, 17, 58, 0.42);
   cursor: pointer;
   user-select: none;
 }
 
-.hero-winget-strip:focus-visible {
+.hero-secondary-strip:focus-visible {
   outline: 2px solid rgba(190, 242, 100, 0.7);
   outline-offset: 3px;
 }

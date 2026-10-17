@@ -29,7 +29,7 @@ export default function Footer() {
                 <VoiceWaveLogo size={14} strokeWidth={2.6} tone="adaptive" adaptiveOn="light" />
               </span>
               <span className="font-mono text-xs font-semibold uppercase tracking-[0.2em] text-[#0d2b58]">
-                Open-source · Offline · Windows
+                Open source · Private · Windows
               </span>
             </div>
 
