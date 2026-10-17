@@ -190,6 +190,8 @@ impl InsertionEngine {
         &mut self,
         request: InsertTextRequest,
     ) -> Result<InsertResult, InsertionError> {
+        // A submit may only follow the insertion it belongs to.
+        self.last_landed_window = None;
         if request.text.trim().is_empty() {
             return Err(InsertionError::EmptyText);
         }
@@ -327,8 +329,11 @@ impl InsertionEngine {
             None
         };
         self.record_history(&result, &text);
-        if let Some(token) = success_undo {
-            self.last_successful = Some(UndoRecord {
+        // Undo always refers to the latest landed insertion. One that can't be
+        // undone (a terminal paste, clipboard only) clears the older record,
+        // so Ctrl+Z is never sent on behalf of text from an earlier app.
+        if result.success {
+            self.last_successful = success_undo.map(|token| UndoRecord {
                 transaction_id: transaction_id.clone(),
                 token,
             });

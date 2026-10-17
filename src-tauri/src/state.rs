@@ -3,7 +3,7 @@ use crate::{
         analyze_captured_segments,
         input_volume::{self, MicGuardPlan},
         AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureEndPolicy,
-        CaptureOptions, VadConfig,
+        CaptureOptions, HandsFreeLimits, HandsFreeSwitch, VadConfig,
     },
     benchmark::{
         self, BenchmarkRequest, BenchmarkRun, ModelRecommendation, RecommendationConstraints,
@@ -40,7 +40,7 @@ use crate::{
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
-        RecentInsertion, UndoResult,
+        RecentInsertion, SubmitError, UndoResult,
     },
     model_manager::{
         InstalledModel, ModelCatalogItem, ModelDownloadRequest, ModelError, ModelEvent,
@@ -62,7 +62,7 @@ use crate::{
     stats::{StatsManager, StatsSummary},
     transcript::{
         finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
-        ProTranscriptOptions,
+        split_trailing_submit_command, ProTranscriptOptions,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -163,7 +163,8 @@ pub struct PillNoticePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PillAction {
-    /// "copyTranscript" | "addDictionaryTerm" — selects the frontend handler.
+    /// "copyTranscript" | "addDictionaryTerm" | "retryDictation" — selects the
+    /// frontend handler.
     pub kind: String,
     /// Button label, e.g. "Copy" or "Add \"foo\"".
     pub label: String,
@@ -222,6 +223,63 @@ fn emit_pill_rescue(
             recovery: true,
         },
     );
+}
+
+/// Failure notice with a Try again button (plan 020): the capture's audio is
+/// still in memory, so the user can rerun transcription on it.
+fn emit_pill_retry(app: &AppHandle, title: &str, detail: String) {
+    let _ = app.emit(
+        "voicewave://pill-notice",
+        PillNoticePayload {
+            id: now_utc_ms(),
+            severity: "error".to_string(),
+            title: title.to_string(),
+            detail: Some(detail),
+            // The pill holds retry notices up to 30 s (others 12 s) and
+            // pauses on hover: the audio may be a long dictation.
+            duration_ms: 30_000,
+            transcript: None,
+            action: Some(PillAction {
+                kind: "retryDictation".to_string(),
+                label: "Try again".to_string(),
+                value: None,
+            }),
+            recovery: true,
+        },
+    );
+}
+
+/// A retry is clicked from the pill, which may hold the foreground by the
+/// time text is ready; give focus back to the app the user dictated into,
+/// and let it settle before any keystroke. No-op for live dictations.
+async fn return_focus_for_retry(retry_audio: Option<&RetainedAudio>) {
+    if let Some(target) = retry_audio.and_then(|audio| audio.target_window) {
+        if crate::insertion::return_focus_from_voicewave(target) {
+            sleep(Duration::from_millis(80)).await;
+        }
+    }
+}
+
+/// Pill copy when a spoken "press enter" was not carried out (plan 020).
+/// NotDelivered is covered by the clipboard pill, which already says to
+/// press Enter after pasting.
+fn emit_submit_notice(app: &AppHandle, err: &SubmitError) {
+    let (title, detail) = match err {
+        SubmitError::NotDelivered => return,
+        SubmitError::FocusMoved => (
+            "Didn't press Enter",
+            "The window changed after your text went in.",
+        ),
+        SubmitError::Elevated => (
+            "This app runs as administrator",
+            "VoiceWave can't press Enter in it.",
+        ),
+        SubmitError::Failed(reason) => {
+            tracing::warn!("spoken submit failed: {reason}");
+            ("Couldn't press Enter", "Press it yourself to send.")
+        }
+    };
+    emit_pill_notice(app, "info", title, Some(detail.to_string()), 4_500);
 }
 
 /// Emits an actionable notice carrying a typed [`PillAction`] (and no rescue
@@ -605,7 +663,20 @@ const ENGINE_WAIT_NOTICE_GRACE_MS: u64 = 1_500;
 const FW_MIN_DECODE_AUDIO_MS_DEFAULT: u64 = 280;
 const FINAL_DECODE_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 const FINAL_DECODE_TIMEOUT_MS_MIN: u64 = 8_000;
-const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 240_000;
+// Long hands-free captures (up to HANDS_FREE_MAX_CAPTURE_MS) can decode for
+// minutes on a CPU; this is a ceiling for a hung worker, not a target.
+const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 900_000;
+/// Hands-free limits (plan 020). Hands-free ends on the second press or Esc;
+/// the silence timeout only catches a forgotten open mic (it is also the wait
+/// for first speech), and the cap bounds decode time and memory.
+const HANDS_FREE_MAX_CAPTURE_MS: u64 = 300_000;
+const HANDS_FREE_SILENCE_TIMEOUT_MS: u64 = 30_000;
+/// Pause before a spoken-submit Enter (plan 020). Windows Terminal reads the
+/// clipboard asynchronously after its paste chord, so an immediate Enter
+/// could overtake the pasted text; typed text is already ordered in the input
+/// queue.
+const SUBMIT_DELAY_AFTER_PASTE_MS: u64 = 250;
+const SUBMIT_DELAY_AFTER_TYPING_MS: u64 = 40;
 const BENCHMARK_RELIABILITY_WINDOW: usize = 40;
 const CORRECTION_SESSION_WINDOW_MS: u64 = 15_000;
 const CORRECTION_MIN_SHARED_RATIO: f32 = 0.72;
@@ -1255,22 +1326,8 @@ fn dictation_retry_instruction(control_mode: DictationControlMode) -> &'static s
             "Hold push-to-talk while speaking, then release when done."
         }
         DictationControlMode::HandsFree => {
-            "Press the hands-free shortcut, speak, then pause or press it again to finish."
+            "Press the hands-free shortcut, speak, then press it again to finish."
         }
-    }
-}
-
-fn capture_end_policy(
-    control_mode: DictationControlMode,
-    trailing_silence: Duration,
-    release_tail: Duration,
-) -> CaptureEndPolicy {
-    match control_mode {
-        DictationControlMode::HoldToTalk => CaptureEndPolicy::ExplicitStop { release_tail },
-        DictationControlMode::HandsFree => CaptureEndPolicy::EndOnSilence {
-            trailing_silence,
-            release_tail,
-        },
     }
 }
 
@@ -1291,6 +1348,25 @@ struct DictationSession {
     pending_push_release: bool,
     release_requested_at: Option<Instant>,
     release_requested_at_utc_ms: Option<u64>,
+    /// Shared with the capture loop, which switches to hands-free limits the
+    /// moment this flips (at start, or when a double-tap locks the session).
+    hands_free: Arc<AtomicBool>,
+}
+
+/// Audio from a capture whose transcription failed, kept in memory (never on
+/// disk) so the user can retry it (plan 020).
+#[derive(Debug, Clone)]
+struct RetainedAudio {
+    samples: Arc<Vec<f32>>,
+    /// The window the user dictated into, so a retry clicked from the pill
+    /// can hand focus back to it.
+    target_window: Option<isize>,
+}
+
+#[derive(Debug)]
+struct RetainedCapture {
+    session_id: u64,
+    audio: RetainedAudio,
 }
 
 #[derive(Debug, Clone)]
@@ -1346,6 +1422,9 @@ pub struct VoiceWaveController {
     mic_profile_notice_sent: AtomicBool,
     // At most one GPU step-down pill per app session (plan 019).
     gpu_notice_sent: AtomicBool,
+    // The last capture's audio while its transcription has failed; cleared
+    // when a dictation succeeds and replaced by the next capture (plan 020).
+    retained_capture: Mutex<Option<RetainedCapture>>,
 }
 
 impl VoiceWaveController {
@@ -1478,6 +1557,7 @@ impl VoiceWaveController {
             poor_audio_notice_last_at: Arc::new(StdMutex::new(None)),
             mic_profile_notice_sent: AtomicBool::new(false),
             gpu_notice_sent: AtomicBool::new(false),
+            retained_capture: Mutex::new(None),
         })
     }
 
@@ -1812,19 +1892,51 @@ impl VoiceWaveController {
         mode: DictationMode,
         control_mode: DictationControlMode,
     ) -> Result<(), ControllerError> {
-        self.start_dictation_with_trigger(app, mode, DictationStartTrigger::Manual, control_mode)
-            .await
+        self.start_dictation_with_trigger(
+            app,
+            mode,
+            DictationStartTrigger::Manual,
+            control_mode,
+            None,
+        )
+        .await
     }
 
+    /// Rerun transcription on the audio kept from a failed dictation (plan
+    /// 020). It is an ordinary session that skips capture, so formatting,
+    /// polish, insertion, history and Esc-to-cancel all behave as usual.
+    pub async fn retry_last_dictation(self: &Arc<Self>, app: AppHandle) -> Result<(), ControllerError> {
+        let audio = self
+            .retained_capture
+            .lock()
+            .await
+            .as_ref()
+            .map(|retained| retained.audio.clone())
+            .ok_or_else(|| {
+                ControllerError::Runtime("There is no failed dictation to retry.".to_string())
+            })?;
+        self.start_dictation_with_trigger(
+            app,
+            DictationMode::Microphone,
+            DictationStartTrigger::Manual,
+            DictationControlMode::HoldToTalk,
+            Some(audio),
+        )
+        .await
+    }
+
+    /// `retry_audio` replaces capture with audio kept from a failed run.
     async fn start_dictation_with_trigger(
         self: &Arc<Self>,
         app: AppHandle,
         mode: DictationMode,
         trigger: DictationStartTrigger,
         control_mode: DictationControlMode,
+        retry_audio: Option<RetainedAudio>,
     ) -> Result<(), ControllerError> {
+        let retrying = retry_audio.is_some();
         tracing::info!(
-            "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
+            "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?}, retry={retrying})",
             trigger, control_mode, mode
         );
         // Snapshot the lifecycle state before touching the token: nothing in
@@ -1862,12 +1974,16 @@ impl VoiceWaveController {
 
         // Instant audible feedback on the user's physical action: play the
         // open cue the moment the press is accepted, before mic-stream setup
-        // adds 50-200 ms. (Fixture runs stay silent.)
-        if mode == DictationMode::Microphone {
+        // adds 50-200 ms. (Fixture runs and retries, which open no mic, stay
+        // silent.)
+        if mode == DictationMode::Microphone && !retrying {
             play_cue_without_blocking(crate::cue::CueSound::Open);
         }
 
         let session_id = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let hands_free = Arc::new(AtomicBool::new(
+            control_mode == DictationControlMode::HandsFree,
+        ));
         {
             let mut active = self.active_session.lock().await;
             *active = Some(DictationSession {
@@ -1875,10 +1991,17 @@ impl VoiceWaveController {
                 trigger,
                 control_mode,
                 started_at: Instant::now(),
-                state: DictationLifecycleState::Listening,
+                // A retry has its audio already; it starts at transcription,
+                // where the hotkey and finish paths leave it alone.
+                state: if retrying {
+                    DictationLifecycleState::Transcribing
+                } else {
+                    DictationLifecycleState::Listening
+                },
                 pending_push_release: false,
                 release_requested_at: None,
                 release_requested_at_utc_ms: None,
+                hands_free: Arc::clone(&hands_free),
             });
         }
         self.set_hotkey_dictation_active(true).await;
@@ -1894,7 +2017,14 @@ impl VoiceWaveController {
         // successfully opening the microphone. Publishing Listening here
         // guarantees the pill appears alongside the cue even when device
         // setup is slow; a later setup failure transitions it to Error.
-        if mode == DictationMode::Microphone {
+        if retrying {
+            self.update_state(
+                &app,
+                VoiceWaveHudState::Transcribing,
+                Some("Transcribing your last recording again...".to_string()),
+            )
+            .await;
+        } else if mode == DictationMode::Microphone {
             self.update_state(
                 &app,
                 VoiceWaveHudState::Listening,
@@ -1918,6 +2048,8 @@ impl VoiceWaveController {
                     control_mode,
                     cancel_token,
                     stop_flag,
+                    hands_free,
+                    retry_audio,
                 )
                 .await;
             let still_owns_session = {
@@ -1942,6 +2074,21 @@ impl VoiceWaveController {
                 let mut stop_slot = controller.stop_flag.lock().await;
                 *stop_slot = None;
             }
+            // Plan 020: captured audio stays in memory only while this
+            // session's transcription has failed. Success (or nothing heard,
+            // or a cancel) clears it, and so does any later dictation.
+            let can_retry = if still_owns_session {
+                let mut retained = controller.retained_capture.lock().await;
+                let kept_for_this_session = retained
+                    .as_ref()
+                    .is_some_and(|capture| capture.session_id == session_id);
+                if run_result.is_ok() || !kept_for_this_session {
+                    *retained = None;
+                }
+                run_result.is_err() && kept_for_this_session
+            } else {
+                false
+            };
             if let Err(err) = run_result {
                 if !still_owns_session {
                     tracing::warn!(
@@ -1951,7 +2098,8 @@ impl VoiceWaveController {
                 }
                 // The pill's error color-flash carries no text; the notice is
                 // the only place the user actually learns what went wrong.
-                let (notice_title, notice_detail) = controller.dictation_failure_notice(&err).await;
+                let (notice_title, notice_detail) =
+                    controller.dictation_failure_notice(&err, can_retry).await;
                 controller
                     .set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
@@ -1962,7 +2110,11 @@ impl VoiceWaveController {
                         Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
-                emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                if can_retry {
+                    emit_pill_retry(&app, notice_title, notice_detail);
+                } else {
+                    emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                }
                 // No model and nothing downloading: the fix lives in the main
                 // window (onboarding or the model gate), and the compact pill
                 // takes no clicks, so bring the window to the user.
@@ -1980,8 +2132,13 @@ impl VoiceWaveController {
 
     /// Pill copy for a failed dictation. Setup problems (no model, model
     /// still downloading, microphone unavailable, speech engine down) say what
-    /// to do next; anything unexpected keeps the raw error.
-    async fn dictation_failure_notice(&self, err: &ControllerError) -> (&'static str, String) {
+    /// to do next. A failed transcription whose audio is kept (`can_retry`)
+    /// says so; anything else unexpected keeps the raw error.
+    async fn dictation_failure_notice(
+        &self,
+        err: &ControllerError,
+        can_retry: bool,
+    ) -> (&'static str, String) {
         let (title, detail) = match err {
             ControllerError::MissingModel(_) => {
                 if self.model_download_cancels.lock().await.is_empty() {
@@ -2021,6 +2178,14 @@ impl VoiceWaveController {
                     "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
                 )
             }
+            ControllerError::Runtime(message) if can_retry => (
+                if message.contains("timed out") {
+                    "Transcription took too long"
+                } else {
+                    "Couldn't transcribe that"
+                },
+                "Your recording is kept until your next dictation.",
+            ),
             _ => return ("Dictation failed", err.to_string()),
         };
         (title, detail.to_string())
@@ -2485,7 +2650,15 @@ impl VoiceWaveController {
         // failure branch below still waits, because its message depends on
         // whether the History record was written.
         if result.success {
-            self.update_state(&app, VoiceWaveHudState::Inserted, result.message.clone())
+            // Only text that reached the app shows as inserted. A
+            // clipboard-only result (elevated app, paste refused) says what
+            // happened instead (plan 020).
+            let hud_state = if result.method == InsertionMethod::ClipboardOnly {
+                VoiceWaveHudState::Idle
+            } else {
+                VoiceWaveHudState::Inserted
+            };
+            self.update_state(&app, hud_state, result.message.clone())
                 .await;
             let _ = app.emit("voicewave://insertion", result.clone());
         }
@@ -2580,6 +2753,7 @@ impl VoiceWaveController {
                             DictationMode::Microphone,
                             trigger,
                             trigger.default_control_mode(),
+                            None,
                         )
                         .await
                     }
@@ -2593,6 +2767,7 @@ impl VoiceWaveController {
                             DictationMode::Microphone,
                             DictationStartTrigger::PushToTalk,
                             DictationControlMode::HoldToTalk,
+                            None,
                         )
                         .await
                     }
@@ -2601,7 +2776,7 @@ impl VoiceWaveController {
                             &app,
                             VoiceWaveHudState::Listening,
                             Some(
-                                "Hands-free listening. Pause when you're done, or press the shortcut again."
+                                "Hands-free listening. Press the shortcut again when you're done."
                                     .to_string(),
                             ),
                         )
@@ -3765,6 +3940,8 @@ impl VoiceWaveController {
         control_mode: DictationControlMode,
         cancel_token: CancellationToken,
         stop_flag: Arc<AtomicBool>,
+        hands_free: Arc<AtomicBool>,
+        retry_audio: Option<RetainedAudio>,
     ) -> Result<(), ControllerError> {
         let flow_started = Instant::now();
         if mode == DictationMode::Fixture {
@@ -3777,8 +3954,10 @@ impl VoiceWaveController {
             )
             .await;
         }
-        self.set_session_state(session_id, DictationLifecycleState::Listening, None, None)
-            .await;
+        if retry_audio.is_none() {
+            self.set_session_state(session_id, DictationLifecycleState::Listening, None, None)
+                .await;
+        }
 
         let settings = self.settings.lock().await.clone();
         let max_capture_ms = clamp_max_utterance_ms(settings.max_utterance_ms);
@@ -3786,6 +3965,8 @@ impl VoiceWaveController {
             clamp_release_tail_ms(settings.release_tail_ms),
             max_capture_ms,
         );
+        // Hold-to-talk's wait for first speech. Hands-free uses its own long
+        // limits (HANDS_FREE_SILENCE_TIMEOUT_MS) via the capture switch.
         let silence_timeout_ms = ((max_capture_ms as f32) * 0.22).round() as u64;
         let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
         let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
@@ -3836,7 +4017,7 @@ impl VoiceWaveController {
         // never adds latency to listening start; result lands in the pill as
         // a Dynamic Island notice and in diagnostics for later triage.
         let mic_input_volume_slot: Arc<StdMutex<Option<u8>>> = Arc::new(StdMutex::new(None));
-        if mode == DictationMode::Microphone {
+        if mode == DictationMode::Microphone && retry_audio.is_none() {
             let guard_mode = settings.mic_volume_guard;
             let guard_app = app.clone();
             let volume_slot = Arc::clone(&mic_input_volume_slot);
@@ -3918,9 +4099,10 @@ impl VoiceWaveController {
         }
 
         let capture_started = Instant::now();
-        let segments = match mode {
-            DictationMode::Fixture => phase1::build_fixture_segments(settings.vad_threshold),
-            DictationMode::Microphone => {
+        let segments = match (mode, retry_audio.as_ref()) {
+            (_, Some(retained)) => vec![retained.samples.to_vec()],
+            (DictationMode::Fixture, None) => phase1::build_fixture_segments(settings.vad_threshold),
+            (DictationMode::Microphone, None) => {
                 let audio = self.audio.clone();
                 let input_device = settings.input_device.clone();
                 let mut threshold = clamp_vad_threshold(settings.vad_threshold);
@@ -3941,11 +4123,19 @@ impl VoiceWaveController {
                     },
                     max_capture_duration: Duration::from_millis(max_capture_ms),
                     initial_speech_timeout: Duration::from_millis(silence_timeout_ms),
-                    end_policy: capture_end_policy(
-                        control_mode,
-                        Duration::from_millis(silence_timeout_ms),
-                        Duration::from_millis(release_tail_ms),
-                    ),
+                    // Hold-to-talk ends on release and hands-free on the
+                    // second press; while hands-free, the switch below adds
+                    // the long safety limits.
+                    end_policy: CaptureEndPolicy::ExplicitStop {
+                        release_tail: Duration::from_millis(release_tail_ms),
+                    },
+                    hands_free: Some(HandsFreeSwitch {
+                        active: Arc::clone(&hands_free),
+                        limits: HandsFreeLimits {
+                            max_capture_duration: Duration::from_millis(HANDS_FREE_MAX_CAPTURE_MS),
+                            silence_timeout: Duration::from_millis(HANDS_FREE_SILENCE_TIMEOUT_MS),
+                        },
+                    }),
                     preserve_full_capture: whisper_pipeline,
                     // Adaptive VAD warmup: for the first 2 seconds, use a
                     // lower threshold (60% of normal) so quiet speakers and
@@ -4107,6 +4297,31 @@ impl VoiceWaveController {
             return Ok(());
         }
 
+        // Merged right after capture so the audio is kept for a retry before
+        // any later step can fail (plan 020).
+        let mut merged_samples = Vec::new();
+        let inter_segment_gap = (self.audio.target_sample_rate as usize / 20).max(1); // 50 ms gap
+        for (idx, segment) in segments.iter().enumerate() {
+            if idx > 0 {
+                merged_samples.extend(vec![0.0_f32; inter_segment_gap]);
+            }
+            merged_samples.extend_from_slice(segment);
+        }
+        let source_samples = Arc::new(merged_samples);
+        if mode == DictationMode::Microphone {
+            let target_window = match &retry_audio {
+                Some(retained) => retained.target_window,
+                None => crate::insertion::foreground_window_id(),
+            };
+            *self.retained_capture.lock().await = Some(RetainedCapture {
+                session_id,
+                audio: RetainedAudio {
+                    samples: Arc::clone(&source_samples),
+                    target_window,
+                },
+            });
+        }
+
         let audio_quality = analyze_captured_segments(
             &segments,
             self.audio.target_sample_rate,
@@ -4114,7 +4329,8 @@ impl VoiceWaveController {
         );
         let _ = app.emit("voicewave://audio-quality", audio_quality.clone());
 
-        if mode == DictationMode::Microphone {
+        // A retry already showed these for its original capture.
+        if mode == DictationMode::Microphone && retry_audio.is_none() {
             if audio_quality.quality == AudioQualityBand::Poor
                 && take_notice_cooldown(&self.poor_audio_notice_last_at)
             {
@@ -4261,17 +4477,37 @@ impl VoiceWaveController {
                 fw_runtime_ready,
             )
             .await?;
+        let hands_free_capture = hands_free.load(Ordering::Relaxed);
+        let capture_cap_ms = if hands_free_capture {
+            HANDS_FREE_MAX_CAPTURE_MS
+        } else {
+            max_capture_ms
+        };
         let cap_hit = mode == DictationMode::Microphone
+            && retry_audio.is_none()
             && !stop_flag.load(Ordering::Relaxed)
-            && captured_audio_ms.saturating_add(150) >= max_capture_ms;
+            && captured_audio_ms.saturating_add(150) >= capture_cap_ms;
         let transcribing_message = if cap_hit {
             format!(
                 "Transcribing locally (max utterance {}s reached)...",
-                max_capture_ms / 1000
+                capture_cap_ms / 1000
             )
         } else {
             "Transcribing locally...".to_string()
         };
+        // Hands-free users may still be talking when the cap stops capture.
+        if cap_hit && hands_free_capture {
+            emit_pill_notice(
+                &app,
+                "info",
+                format!(
+                    "Reached the {}-minute limit",
+                    HANDS_FREE_MAX_CAPTURE_MS / 60_000
+                ),
+                Some("Transcribing what you said so far.".to_string()),
+                4_500,
+            );
+        }
 
         let transcribing_started = Instant::now();
         let release_to_transcribing_ms = self
@@ -4307,17 +4543,7 @@ impl VoiceWaveController {
         )
         .await;
 
-        let mut merged_samples = Vec::new();
-        let inter_segment_gap = (self.audio.target_sample_rate as usize / 20).max(1); // 50 ms gap
-        for (idx, segment) in segments.iter().enumerate() {
-            if idx > 0 {
-                merged_samples.extend(vec![0.0_f32; inter_segment_gap]);
-            }
-            merged_samples.extend_from_slice(segment);
-        }
-
         let decode_started = Instant::now();
-        let source_samples = merged_samples;
         if mode == DictationMode::Microphone && whisper_pipeline {
             let finalize_audio_ms =
                 sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
@@ -4340,7 +4566,7 @@ impl VoiceWaveController {
         let finalize_tail_audio_ms =
             sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
         let finalize_started = Instant::now();
-        let finalize_samples_ref: &[f32] = &source_samples;
+        let finalize_samples_ref: &[f32] = source_samples.as_slice();
         let default_finalize_timeout =
             final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
         // During the one-time GPU check, a whisper.cpp model with no
@@ -4486,7 +4712,51 @@ impl VoiceWaveController {
         let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
         let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
         let merged_transcript = finalize_text.clone();
+        // Spoken submit (plan 020): a trailing "press enter" is a command, not
+        // text. It rides the spoken edit commands toggle like "new line".
+        let (merged_transcript, submit_requested) = if settings.spoken_edit_commands {
+            split_trailing_submit_command(&merged_transcript)
+        } else {
+            (merged_transcript, false)
+        };
         let baseline_transcript = sanitize_user_transcript(&merged_transcript);
+        if submit_requested && baseline_transcript.is_empty() {
+            // "press enter" on its own: no text, just the key. The no-speech
+            // gate still runs on what was heard, so noise can't press Enter.
+            let unheard = mode == DictationMode::Microphone
+                && should_reject_low_confidence_transcript_as_no_speech(
+                    whisper_pipeline,
+                    captured_audio_ms,
+                    &finalize_text,
+                    decode_telemetry.fw_no_speech_prob,
+                );
+            let outcome = if unheard {
+                None
+            } else {
+                return_focus_for_retry(retry_audio.as_ref()).await;
+                Some(self.insertion_engine.lock().await.press_enter_now())
+            };
+            self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
+                .await;
+            let message = match &outcome {
+                Some(Ok(())) => "Pressed Enter.".to_string(),
+                Some(Err(_)) => "Didn't press Enter.".to_string(),
+                None => format!(
+                    "No speech detected. {}",
+                    dictation_retry_instruction(control_mode)
+                ),
+            };
+            let hud_state = if matches!(outcome, Some(Ok(()))) {
+                VoiceWaveHudState::Inserted
+            } else {
+                VoiceWaveHudState::Idle
+            };
+            self.update_state(&app, hud_state, Some(message)).await;
+            if let Some(Err(err)) = &outcome {
+                emit_submit_notice(&app, err);
+            }
+            return Ok(());
+        }
         // Plan 010: the persisted polish profile is the single delivery
         // authority for this dictation. Resolve it once against the settings
         // snapshot taken at flow start so a mid-flight profile switch cannot
@@ -4775,6 +5045,8 @@ impl VoiceWaveController {
         }
         let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
 
+        return_focus_for_retry(retry_audio.as_ref()).await;
+
         let insert_payload = InsertTextRequest {
             text: inserted_text.clone(),
             target_app: None,
@@ -4789,6 +5061,7 @@ impl VoiceWaveController {
             insertion_target_class,
             insertion_history_recorded,
             insertion_record_id,
+            insertion_blocked_by_elevation,
         ) = match self
             .insert_text_with_polish_meta(app.clone(), insert_payload, Some(&polish_meta))
             .await
@@ -4803,6 +5076,7 @@ impl VoiceWaveController {
                 // not duplicate it.
                 true,
                 record_id,
+                result.blocked_by_elevation,
             ),
             Err(err) => {
                 self.update_state(
@@ -4819,10 +5093,24 @@ impl VoiceWaveController {
                     "unknown".to_string(),
                     false,
                     None,
+                    false,
                 )
             }
         };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
+        // Spoken submit: Enter goes only into the window that received the
+        // text, after the paste has had time to land (see the delay consts).
+        let submit_outcome = if submit_requested {
+            let delay_ms = match insertion_method.as_str() {
+                "clipboardPaste" => SUBMIT_DELAY_AFTER_PASTE_MS,
+                "direct" => SUBMIT_DELAY_AFTER_TYPING_MS,
+                _ => 0,
+            };
+            sleep(Duration::from_millis(delay_ms)).await;
+            Some(self.insertion_engine.lock().await.press_enter_after_insert())
+        } else {
+            None
+        };
         let inserted_at_utc_ms = now_utc_ms();
         let previous_correction_session = { self.correction_session.lock().await.clone() };
         let correction_candidates = if insertion_success {
@@ -5011,14 +5299,34 @@ impl VoiceWaveController {
                     Some("copyTranscript"),
                 );
             } else if insertion_method == "clipboardOnly" {
-                emit_pill_rescue(
-                    &app,
-                    "info",
-                    "Copied to clipboard",
-                    Some("Press Ctrl+V to paste it here.".to_string()),
-                    inserted_text.clone(),
-                    None,
-                );
+                let paste_hint = if submit_requested {
+                    "Press Ctrl+V to paste it, then Enter."
+                } else {
+                    "Press Ctrl+V to paste it here."
+                };
+                if insertion_blocked_by_elevation {
+                    emit_pill_rescue(
+                        &app,
+                        "info",
+                        "This app runs as administrator",
+                        Some(format!(
+                            "VoiceWave can't type into it, so your text is on the clipboard. {paste_hint}"
+                        )),
+                        inserted_text.clone(),
+                        None,
+                    );
+                } else {
+                    emit_pill_rescue(
+                        &app,
+                        "info",
+                        "Copied to clipboard",
+                        Some(paste_hint.to_string()),
+                        inserted_text.clone(),
+                        None,
+                    );
+                }
+            } else if let Some(Err(err)) = &submit_outcome {
+                emit_submit_notice(&app, err);
             } else if asr_final_word_count >= 30 {
                 // Success stays quiet for everyday dictations (Wispr-style
                 // restraint); only big ones earn a word-count confirmation.
@@ -5347,6 +5655,7 @@ impl VoiceWaveController {
             PushPressDecision::LockHandsFree => {
                 session.pending_push_release = false;
                 session.control_mode = DictationControlMode::HandsFree;
+                session.hands_free.store(true, Ordering::Relaxed);
             }
             // The only decision arm that used to be silent, and the one that
             // looks identical to a dead hotkey from the user's side.
@@ -5622,7 +5931,7 @@ pub use gpu_engine::SpeechEngineStatus;
 #[cfg(test)]
 mod tests {
     use super::{
-        asr_integrity_metrics, build_terminology_hint_from_texts, capture_end_policy,
+        asr_integrity_metrics, build_terminology_hint_from_texts,
         clamp_vad_threshold, classify_insertion_target, decode_mode_key, decode_mode_rank,
         derive_correction_candidates, effective_release_watchdog_threshold_ms,
         faster_whisper_download_percent, floor_decode_mode, hands_free_toggle_decision,
@@ -5634,7 +5943,7 @@ mod tests {
         PillNoticePayload, PushPressDecision, PushReleaseDecision, MAX_VAD_THRESHOLD,
         MIN_VAD_THRESHOLD, RECOMMENDED_VAD_THRESHOLD,
     };
-    use crate::audio::{AudioQualityBand, CaptureEndPolicy};
+    use crate::audio::AudioQualityBand;
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
@@ -5862,32 +6171,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DictationControlMode::HoldToTalk).unwrap(),
             "\"holdToTalk\""
-        );
-    }
-
-    #[test]
-    fn hands_free_capture_auto_finishes_without_dropping_manual_release_tail() {
-        let trailing_silence = Duration::from_millis(1_500);
-        let release_tail = Duration::from_millis(300);
-
-        assert_eq!(
-            capture_end_policy(
-                DictationControlMode::HoldToTalk,
-                trailing_silence,
-                release_tail,
-            ),
-            CaptureEndPolicy::ExplicitStop { release_tail }
-        );
-        assert_eq!(
-            capture_end_policy(
-                DictationControlMode::HandsFree,
-                trailing_silence,
-                release_tail,
-            ),
-            CaptureEndPolicy::EndOnSilence {
-                trailing_silence,
-                release_tail,
-            }
         );
     }
 

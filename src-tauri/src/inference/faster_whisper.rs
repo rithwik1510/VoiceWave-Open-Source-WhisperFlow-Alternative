@@ -649,7 +649,7 @@ fn exchange_with_worker(
     let timeout = if request.allow_download {
         worker_prefetch_timeout()
     } else {
-        worker_response_timeout()
+        worker_response_timeout().max(transcribe_timeout_for_audio(request))
     };
     let line = match read_worker_response_line_with_timeout(worker, timeout) {
         Ok(value) => value,
@@ -725,6 +725,20 @@ fn worker_response_timeout() -> Duration {
         })
         .unwrap_or(FW_WORKER_RESPONSE_TIMEOUT_MS_DEFAULT);
     Duration::from_millis(timeout_ms)
+}
+
+/// Decode deadline that grows with the request's audio (plan 020): a long
+/// hands-free capture can legitimately take minutes on a CPU, where the flat
+/// response timeout would kill a healthy worker. 30 s plus twice the audio
+/// length leaves room for machines several times slower than real time.
+fn transcribe_timeout_for_audio(request: &WorkerRequest) -> Duration {
+    let Some(pcm_b64) = request.audio_pcm16_b64.as_deref() else {
+        return Duration::ZERO;
+    };
+    // Base64 packs 3 bytes into 4 characters; PCM16 is 2 bytes per sample.
+    let samples = (pcm_b64.len() as u64 * 3 / 4) / 2;
+    let audio_ms = samples * 1_000 / u64::from(request.sample_rate_hz.max(1));
+    Duration::from_millis(30_000 + audio_ms.saturating_mul(2))
 }
 
 fn worker_prefetch_timeout() -> Duration {

@@ -6,7 +6,11 @@ use cpal::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -91,7 +95,26 @@ pub enum CaptureEndPolicy {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Limits that replace the base ones while a capture is hands-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandsFreeLimits {
+    pub max_capture_duration: Duration,
+    /// Both the wait for first speech and the trailing silence that ends the
+    /// capture. Long on purpose: hands-free ends on the user's second press,
+    /// and this only catches a forgotten open mic.
+    pub silence_timeout: Duration,
+}
+
+/// Hands-free switch for a capture (plan 020). The flag can flip mid-capture
+/// (a double-tap locks a hold-to-talk session), so the loop reads it on every
+/// pass instead of fixing the limits at start.
+#[derive(Debug, Clone)]
+pub struct HandsFreeSwitch {
+    pub active: Arc<AtomicBool>,
+    pub limits: HandsFreeLimits,
+}
+
+#[derive(Debug, Clone)]
 pub struct CaptureOptions {
     pub vad_config: VadConfig,
     pub max_capture_duration: Duration,
@@ -99,6 +122,8 @@ pub struct CaptureOptions {
     /// capture. This is independent of how a capture ends after speech.
     pub initial_speech_timeout: Duration,
     pub end_policy: CaptureEndPolicy,
+    /// While active, overrides the three limits above (see HandsFreeLimits).
+    pub hands_free: Option<HandsFreeSwitch>,
     pub preserve_full_capture: bool,
     /// During the first `vad_warmup_duration` of capture, use this lower
     /// threshold instead of `vad_config.threshold`. Prevents the system
@@ -118,10 +143,21 @@ impl Default for CaptureOptions {
                 trailing_silence: Duration::from_millis(750),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: false,
             vad_warmup_threshold: None,
             vad_warmup_duration: Duration::from_millis(0),
         }
+    }
+}
+
+impl CaptureOptions {
+    /// Hands-free limits when the switch is on right now.
+    fn active_hands_free(&self) -> Option<HandsFreeLimits> {
+        self.hands_free
+            .as_ref()
+            .filter(|switch| switch.active.load(Ordering::Relaxed))
+            .map(|switch| switch.limits)
     }
 }
 
@@ -378,7 +414,15 @@ impl AudioCaptureService {
             | CaptureEndPolicy::EndOnSilence { release_tail, .. } => release_tail,
         };
 
-        while started.elapsed() <= options.max_capture_duration {
+        loop {
+            let hands_free = options.active_hands_free();
+            let max_capture_duration =
+                hands_free.map_or(options.max_capture_duration, |limits| {
+                    limits.max_capture_duration
+                });
+            if started.elapsed() > max_capture_duration {
+                break;
+            }
             if should_cancel() {
                 return Err(AudioError::Cancelled);
             }
@@ -464,20 +508,28 @@ impl AudioCaptureService {
                         continue;
                     }
                     if !speech_detected {
-                        if started.elapsed() >= options.initial_speech_timeout {
+                        let initial_speech_timeout = hands_free
+                            .map_or(options.initial_speech_timeout, |limits| {
+                                limits.silence_timeout
+                            });
+                        if started.elapsed() >= initial_speech_timeout {
                             break;
                         }
                         continue;
                     }
 
-                    if let CaptureEndPolicy::EndOnSilence {
-                        trailing_silence, ..
-                    } = options.end_policy
+                    let trailing_silence = match (hands_free, options.end_policy) {
+                        (Some(limits), _) => Some(limits.silence_timeout),
+                        (None, CaptureEndPolicy::EndOnSilence { trailing_silence, .. }) => {
+                            Some(trailing_silence)
+                        }
+                        (None, CaptureEndPolicy::ExplicitStop { .. }) => None,
+                    };
+                    if let (Some(trailing_silence), Some(last_voice_at)) =
+                        (trailing_silence, last_voice_at)
                     {
-                        if let Some(last_voice_at) = last_voice_at {
-                            if last_voice_at.elapsed() >= trailing_silence {
-                                break;
-                            }
+                        if last_voice_at.elapsed() >= trailing_silence {
+                            break;
                         }
                     }
                 }
@@ -1418,6 +1470,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(120),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1464,6 +1517,7 @@ mod tests {
                 trailing_silence,
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1512,6 +1566,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(700),
                 release_tail,
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1562,6 +1617,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(600),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1616,6 +1672,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(600),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1675,6 +1732,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(40),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };
@@ -1716,6 +1774,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(40),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };
