@@ -912,7 +912,7 @@ fn sanitize_stored_records(mut store: SnippetStore) -> SnippetStore {
     }
     if dropped > 0 {
         // Count only — never trigger or expansion content.
-        eprintln!("voicewave: dropped {dropped} invalid stored snippet record(s) at load");
+        tracing::warn!("dropped {dropped} invalid stored snippet record(s) at load");
     }
     store.snippets = order
         .into_iter()

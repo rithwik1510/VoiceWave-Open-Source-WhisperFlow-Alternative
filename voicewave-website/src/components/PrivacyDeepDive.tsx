@@ -236,11 +236,11 @@ export default function PrivacyDeepDive() {
             >
               <div className="bg-[#FFFFFF]/92 border border-[#d7e5f7] p-4 vw-radius-tab shadow-sm max-w-xs">
                 <span className="block font-mono text-xs text-[#64748B] uppercase mb-1">The only network calls</span>
-                <span className="block font-bold text-sm">Model downloads &amp; signed update checks — both from GitHub, both visible in the source.</span>
+                <span className="block font-bold text-sm">One-time model downloads, signed update checks, and the anonymous usage count. All visible in the source.</span>
               </div>
               <div className="bg-[#FFFFFF]/92 border border-[#d7e5f7] p-4 vw-radius-tab shadow-sm max-w-xs">
                 <span className="block font-mono text-xs text-[#64748B] uppercase mb-1">Anonymous usage count</span>
-                <span className="block font-bold text-sm">On by default, one switch to turn off. A random install ID, app version, and a once-a-day active marker via TelemetryDeck. Never audio or text.</span>
+                <span className="block font-bold text-sm">On by default; turn it off in setup or Settings → Diagnostics. Sent via TelemetryDeck with a random install ID, app version and channel, for a few events: first dictation (GPU or CPU), daily active, setup steps, failed model downloads, GPU fallbacks. Never audio, text, or settings.</span>
               </div>
             </motion.div>
           </div>
@@ -262,8 +262,8 @@ export default function PrivacyDeepDive() {
             </div>
             <h3 className="font-display text-3xl sm:text-4xl font-bold text-[#09090B] mb-4">One Tight Loop</h3>
             <p className="text-base sm:text-lg text-[#475569] font-medium leading-relaxed max-w-sm mb-8">
-              Capture, decode, and insertion run as one on-device pipeline — release the
-              key and text lands in about a second on typical hardware.
+              Capture, decode, and insertion run as one on-device pipeline. Release the
+              key and the text lands at your cursor, fast on a discrete GPU.
             </p>
             <div className="w-full h-16 bg-[#f7fbff] vw-radius-tab border border-[#d8e4f2] p-2 flex items-end gap-[2px] overflow-hidden relative">
               {LATENCY_BAR_LEVELS.map((height, i) => {
@@ -288,16 +288,17 @@ export default function PrivacyDeepDive() {
               <div className="w-14 h-14 sm:w-16 sm:h-16 vw-radius-tab bg-[#FFFFFF] border border-[#d8e5f5] flex items-center justify-center shadow-sm transition-colors duration-300 group-hover:border-[#7ed8ff] group-hover:bg-[#ebf6ff]">
                 <Bot className="w-7 h-7 sm:w-8 sm:h-8 text-[#1b8eff]" />
               </div>
-              <span className="font-mono text-xs sm:text-sm font-bold bg-[#e5f3ff] text-[#0b3f98] px-3 py-1 rounded-full">Models / Verified</span>
+              <span className="font-mono text-xs sm:text-sm font-bold bg-[#e5f3ff] text-[#0b3f98] px-3 py-1 rounded-full">Models / Sized to your PC</span>
             </div>
             <h3 className="font-display text-3xl sm:text-4xl font-bold text-[#09090B] mb-4">Your Hardware, Your Model</h3>
             <p className="text-base sm:text-lg text-[#475569] font-medium leading-relaxed max-w-sm mb-8">
-              Ships with a fast default model that runs on any modern CPU. Want more
-              accuracy? Install larger Whisper models with checksum verification.
+              First-run setup downloads one model, picked for your PC: Small (about
+              488 MB) up to Large Turbo (1.6 GB). A discrete GPU runs it through Vulkan
+              with no extra download. GPU models are SHA-256 verified.
             </p>
             <div className="space-y-3 font-mono text-sm border-t border-[#d7e4f3] pt-6">
-              <div className="flex justify-between items-center bg-[#FFFFFF] p-3 vw-radius-tab border border-[#d8e5f5]"><span>fw-small.en</span><span className="font-bold">LOADED</span></div>
-              <div className="flex justify-between items-center bg-[#e7f0f9] p-3 vw-radius-tab text-[#6c7f96]"><span>fw-large-v3</span><span>STANDBY</span></div>
+              <div className="flex justify-between items-center bg-[#FFFFFF] p-3 vw-radius-tab border border-[#d8e5f5]"><span>Small · CPU</span><span className="font-bold">LOADED</span></div>
+              <div className="flex justify-between items-center bg-[#e7f0f9] p-3 vw-radius-tab text-[#6c7f96]"><span>Large Turbo · GPU</span><span>AVAILABLE</span></div>
             </div>
           </motion.div>
 
@@ -317,8 +318,9 @@ export default function PrivacyDeepDive() {
             <h3 className="font-display text-3xl sm:text-4xl font-bold text-[#FFFFFF] mb-4">No Cloud Transcription. Ever.</h3>
             <p className="text-base sm:text-lg text-[#b8c9de] font-medium leading-relaxed max-w-sm mb-6">
               Your audio is captured, decoded, and discarded on your machine. Diagnostics
-              stay local and encrypted — exported only if you choose to. Optional anonymous
-              usage counting is off by default and never includes audio or transcript text.
+              stay local and encrypted — exported only if you choose to. An anonymous
+              usage count is on by default, can be turned off, and never includes audio or
+              transcript text.
             </p>
 
             <PrivacyFlowDiagram />

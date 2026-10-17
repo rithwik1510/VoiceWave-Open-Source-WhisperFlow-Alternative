@@ -229,8 +229,8 @@ fn detect_profile() -> HardwareProfile {
         }
         _ => ModelTier::Small,
     };
-    eprintln!(
-        "voicewave: hardware profile cpu={cpu:?} ram={} MB gpu={} recommended={recommended:?}",
+    tracing::info!(
+        "hardware profile cpu={cpu:?} ram={} MB gpu={} recommended={recommended:?}",
         total_ram_bytes / 1_048_576,
         gpu.as_ref()
             .map(|device| format!("'{}' ({} MB)", device.name, device.memory_bytes / 1_048_576))
@@ -258,13 +258,13 @@ fn pick_gpu() -> Option<GpuDevice> {
         return None;
     }
     if dxgi::any_hardware_adapter() == Some(false) {
-        eprintln!("voicewave: no hardware display adapter; speech runs on the CPU");
+        tracing::info!("no hardware display adapter; speech runs on the CPU");
         return None;
     }
     let devices = match asr_worker::list_devices() {
         Ok(devices) => devices,
         Err(err) => {
-            eprintln!("voicewave: GPU list unavailable, speech runs on the CPU: {err}");
+            tracing::warn!("GPU list unavailable, speech runs on the CPU: {err}");
             return None;
         }
     };
@@ -537,7 +537,7 @@ fn update_store(f: impl FnOnce(&mut EngineStore)) {
             .map_err(std::io::Error::other)
             .and_then(|raw| atomic_file::atomic_write(&path, &raw));
         if let Err(err) = written {
-            eprintln!("voicewave: could not save the gpu engine store: {err}");
+            tracing::warn!("could not save the gpu engine store: {err}");
         }
     });
 }

@@ -4,7 +4,6 @@ import {
   ChevronDown,
   CircleHelp,
   Copy,
-  Crown,
   Download,
   Keyboard,
   Mic,
@@ -33,11 +32,11 @@ import {
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
 import { applyTheme } from "./lib/theme";
-import { copyTextToClipboard } from "./lib/tauri";
-import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
+import { copyTextToClipboard, getSupportContext, openIssueReport, openLogsFolder } from "./lib/tauri";
+import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
-import { GpuPreparingNote, Onboarding } from "./components/Onboarding";
+import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
@@ -45,7 +44,7 @@ import { useVoiceWave } from "./hooks/useVoiceWave";
 import { THEMES } from "./prototype/constants";
 import { Dashboard } from "./prototype/components/Dashboard";
 import { Layout } from "./prototype/components/Layout";
-import type { DictationState } from "./prototype/types";
+import type { DictationState, NavId, OverlayId, PageId } from "./prototype/types";
 import type {
   AppProfileOverrides,
   CodeModeSettings,
@@ -60,11 +59,11 @@ import type {
   RetentionPolicy,
   SessionHistoryRecord,
   SpeechEngineStatus,
+  SupportContext,
   ThemePreference,
   VoiceWaveSettings
 } from "./types/voicewave";
 
-type OverlayPanel = "style" | "settings" | "help" | "profile" | "auth";
 /** @deprecated Pre-plan-010 mode identity, kept only so the legacy multi-write
  * fallback can address `buildProToolsPreset` on backends without
  * `set_dictation_profile`. New code speaks `PolishProfile`. */
@@ -101,7 +100,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeo
   { id: "general", label: "General", icon: Palette },
   { id: "audio", label: "Audio", icon: Mic },
   { id: "dictation", label: "Dictation", icon: Keyboard },
-  { id: "polish", label: "AI Polish", icon: Sparkles },
+  { id: "polish", label: "Polish", icon: Sparkles },
   { id: "diagnostics", label: "Diagnostics", icon: Activity },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
   { id: "updates", label: "Updates", icon: Download }
@@ -171,7 +170,7 @@ const POLISH_PROFILE_CARDS: PolishProfileCard[] = [
     description: "Light cleanup — grammar and fillers fixed, nothing rephrased.",
     example:
       "So I think we should refactor getUserById to not throw when the user doesn't exist and instead return null.",
-    note: "Inserts instantly. AI suggestions stay in the pill."
+    note: "Inserts instantly, no AI model needed. With AI polish on, a cleaner version is offered in the pill."
   },
   {
     id: "coding",
@@ -249,32 +248,6 @@ const LEGACY_PROFILE_TO_MODE: Record<PolishProfile, ProToolsMode> = {
   casual: "study",
   literal: "default"
 };
-
-const PRO_HIGHLIGHT_CARDS: Array<{
-  id: string;
-  icon: typeof Sparkles;
-  title: string;
-  subtitle: string;
-}> = [
-  {
-    id: "output",
-    icon: Sparkles,
-    title: "Better Output",
-    subtitle: "Profiles + polish"
-  },
-  {
-    id: "workflow",
-    icon: Crown,
-    title: "Workflow Packs",
-    subtitle: "Domain + code mode"
-  },
-  {
-    id: "history",
-    icon: Search,
-    title: "Power History",
-    subtitle: "Search, tag, export"
-  }
-];
 
 /** @deprecated Pre-plan-010 inference: derives a mode from four independently
  * editable settings. Only consulted (via `detectLegacyPolishProfile`) when the
@@ -431,6 +404,32 @@ function buildProToolsPreset(mode: ProToolsMode, settings: VoiceWaveSettings): P
   }
 }
 
+/** One-line speech engine summary for a bug report, e.g.
+ * "GPU · NVIDIA GeForce RTX 3060 · wcpp-large-v3-turbo" or
+ * "CPU · faster-whisper · fw-small.en". Hardware and model ids only. */
+function describeSpeechEngine(engine: SpeechEngineStatus | null, activeModel: string): string {
+  const device = engine?.runningOn?.device;
+  const family = activeModel.startsWith("wcpp-")
+    ? "whisper.cpp"
+    : activeModel.startsWith("fw-")
+      ? "faster-whisper"
+      : null;
+  const parts =
+    device === "gpu"
+      ? ["GPU", engine?.runningOn?.name ?? engine?.gpuName ?? null]
+      : device === "cpu"
+        ? ["CPU", family]
+        : [engine?.preparing ? "GPU check running" : "engine unknown", family];
+  parts.push(activeModel);
+  if (engine?.qualification === "failed") {
+    parts.push("GPU check failed");
+  }
+  if (engine && engine.cpuSupport !== "full") {
+    parts.push(`CPU support: ${engine.cpuSupport}`);
+  }
+  return parts.filter((part): part is string => Boolean(part)).join(" · ");
+}
+
 interface OverlayModalProps {
   title: string;
   subtitle: string;
@@ -562,8 +561,8 @@ function ModelEngineStatus({
 
 function App() {
   const theme = THEMES.A;
-  const [activeNav, setActiveNav] = useState("home");
-  const [activeOverlay, setActiveOverlay] = useState<OverlayPanel | null>(null);
+  const [activeNav, setActiveNav] = useState<PageId>("home");
+  const [activeOverlay, setActiveOverlay] = useState<OverlayId | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyTag, setHistoryTag] = useState("");
@@ -584,8 +583,6 @@ function App() {
   const [snippetNotice, setSnippetNotice] = useState<string | null>(null);
   const snippetSearchRef = useRef<HTMLInputElement | null>(null);
   const snippetTriggerRef = useRef<HTMLInputElement | null>(null);
-  const [ownerTapCount, setOwnerTapCount] = useState(0);
-  const [ownerPassphrase, setOwnerPassphrase] = useState("");
   const [profileApplyPending, setProfileApplyPending] = useState<PolishProfile | null>(null);
   const [profileResetConfirming, setProfileResetConfirming] = useState(false);
   const [expandedCompareId, setExpandedCompareId] = useState<string | null>(null);
@@ -615,6 +612,11 @@ function App() {
   const [cpuNoticeDismissed, setCpuNoticeDismissed] = useState(false);
   // Models page: the row whose Remove is waiting for a second click.
   const [confirmRemoveModelId, setConfirmRemoveModelId] = useState<string | null>(null);
+  // Report a problem (Help, Settings → Diagnostics): what the issue gets
+  // pre-filled with, fetched when either row shows, and the last
+  // "couldn't open" message.
+  const [supportContext, setSupportContext] = useState<SupportContext | null>(null);
+  const [supportError, setSupportError] = useState<string | null>(null);
   const {
     activeState,
     approveDictionaryQueueEntry,
@@ -625,12 +627,9 @@ function App() {
     deleteDictionaryTerm,
     dictionaryQueue,
     dictionaryTerms,
-    entitlement,
     error,
     exportHistoryPreset,
     exportDiagnosticsBundle,
-    isOwnerOverride,
-    isPro,
     historyPolicy,
     inputDevices,
     installModel,
@@ -645,7 +644,6 @@ function App() {
     lastDiagnosticsExport,
     lastLatency,
     permissions,
-    proRequiredFeature,
     audioQualityReport,
     micQualityWarning,
     pauseModelInstall,
@@ -669,7 +667,6 @@ function App() {
     setFormatProfile,
     setInputDevice,
     setMaxUtteranceMs,
-    setOwnerOverride,
     setReleaseTailMs,
     setPreferClipboardFallback,
     setSpokenEditCommands,
@@ -704,26 +701,15 @@ function App() {
     snapshot,
     stopDictation,
     tauriAvailable,
-    updateRetentionPolicy,
-    refreshEntitlement
+    updateRetentionPolicy
   } = useVoiceWave();
 
   const status = useMemo<DictationState>(() => activeState, [activeState]);
-  const displayError = useMemo(() => {
-    if (!error) {
-      return null;
-    }
-    if (proRequiredFeature) {
-      return "This feature is included in the release offer. Please retry in a moment.";
-    }
-    return error;
-  }, [error, proRequiredFeature]);
   const isRecording = status === "listening" || status === "transcribing";
   const installedModelSet = useMemo(
     () => new Set(installedModels.map((row) => row.modelId)),
     [installedModels]
   );
-  const showOwnerUnlock = ownerTapCount >= 5;
   const pressActiveRef = useRef(false);
   const profileApplyInFlightRef = useRef(false);
   const lastCloudSentenceRef = useRef<string | null>(null);
@@ -739,20 +725,15 @@ function App() {
   // "Customized" only exists on profile-aware backends.
   const profileCustomized =
     settings.polishProfile != null && (settings.polishProfileCustomized ?? false);
-  const proStatusLabel = isOwnerOverride ? "Owner Pro (Device Override)" : "Release Offer Active";
-  const releaseOfferHeadline = "Pro is unlocked for every workspace during this initial release.";
-  const releaseOfferLine = entitlement.plan.offerCopy || "Initial release offer: Pro is included for everyone.";
-  const releaseOfferStateLine = useMemo(() => {
-    if (isOwnerOverride) {
-      return "Owner override is enabled on this machine for internal access.";
-    }
-    return "Release offer is active. No subscription purchase is required right now.";
-  }, [isOwnerOverride]);
+  // Accounts only exist in builds with cloud sync configured (`firebaseEnabled`);
+  // release builds never set `demoProfile`, so these read as guest.
   const isDemoAuthenticated = Boolean(demoProfile);
   const profileDisplayName = demoProfile?.name ?? "Workspace";
-  const profileStatusLabel = demoProfile
-    ? `${isPro ? "Pro" : "Free"} workspace${cloudUserId ? " (cloud)" : ""}`
-    : "Guest mode";
+  const profileStatusLabel = demoProfile ? "Signed in · cloud sync" : "Guest mode";
+  const speechEngineSummary = useMemo(
+    () => describeSpeechEngine(speechEngine, settings.activeModel),
+    [settings.activeModel, speechEngine]
+  );
   const recentSentences = useMemo(
     () =>
       cloudUserId
@@ -824,18 +805,6 @@ function App() {
     selectedSetupStatus?.state === "downloading" ||
     selectedSetupStatus?.state === "failed" ||
     selectedSetupStatus?.state === "cancelled";
-
-  useEffect(() => {
-    if (proRequiredFeature) {
-      setActiveNav("pro");
-    }
-  }, [proRequiredFeature]);
-
-  useEffect(() => {
-    if (!isPro && activeNav === "pro-tools") {
-      setActiveNav("pro");
-    }
-  }, [activeNav, isPro]);
 
   const reconcileCloudDictionary = useCallback(async (uid: string) => {
     setDictionarySyncStatus("syncing");
@@ -965,7 +934,7 @@ function App() {
     applyTheme(settings.theme ?? "system");
   }, [settings.theme]);
 
-  const isOverlayNav = (value: string): value is OverlayPanel =>
+  const isOverlayNav = (value: NavId): value is OverlayId =>
     value === "style" || value === "settings" || value === "help" || value === "profile" || value === "auth";
 
   const closeOverlay = () => {
@@ -973,7 +942,12 @@ function App() {
     setSettingsSection("general");
   };
 
-  const openOverlay = (panel: OverlayPanel) => {
+  const openOverlay = (panel: OverlayId) => {
+    // Profile and sign-in only exist when cloud sync is configured; release
+    // builds must never reach the account UI.
+    if (!firebaseEnabled && (panel === "profile" || panel === "auth")) {
+      return;
+    }
     pressActiveRef.current = false;
     if (panel !== "settings") {
       setSettingsSection("general");
@@ -997,14 +971,9 @@ function App() {
     void stopDictation();
   };
 
-  const handleNavChange = (nextNav: string) => {
+  const handleNavChange = (nextNav: NavId) => {
     if (isOverlayNav(nextNav)) {
       openOverlay(nextNav);
-      return;
-    }
-
-    if (nextNav === "pro-tools" && !isPro) {
-      setActiveNav("pro");
       return;
     }
 
@@ -1029,6 +998,10 @@ function App() {
 
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // Cloud auth is the only sign-in; there is no local account mode.
+    if (!firebaseEnabled) {
+      return;
+    }
     setAuthError(null);
     setAuthNotice(null);
     const normalizedEmail = authEmail.trim();
@@ -1051,62 +1024,41 @@ function App() {
       }
     }
 
-    if (firebaseEnabled) {
-      setAuthPending(true);
-      try {
-        const profile =
-          authMode === "signup"
-            ? await signUpCloud({
-                email: normalizedEmail,
-                password: authPassword,
-                name: authName,
-                workspaceRole: authWorkspaceRole
-              })
-            : await signInCloud(normalizedEmail, authPassword);
-        const recent = await listRecentCloudSentences(profile.uid);
-        setDemoProfile({
-          name: profile.name,
-          email: profile.email,
-          workspaceRole: profile.workspaceRole
-        });
-        if (activeCloudUidRef.current !== profile.uid) {
-          cloudAuthGenerationRef.current += 1;
-          activeCloudUidRef.current = profile.uid;
-        }
-        setCloudUserId(profile.uid);
-        setCloudRecentSentences(recent);
-        await Promise.all([
-          reconcileCloudDictionary(profile.uid),
-          reconcileCloudSnippets(profile.uid)
-        ]);
-        setAuthPassword("");
-        setAuthConfirmPassword("");
-        setActiveOverlay("profile");
-      } catch (cloudErr) {
-        setAuthError(getCloudErrorMessage(cloudErr));
-      } finally {
-        setAuthPending(false);
+    setAuthPending(true);
+    try {
+      const profile =
+        authMode === "signup"
+          ? await signUpCloud({
+              email: normalizedEmail,
+              password: authPassword,
+              name: authName,
+              workspaceRole: authWorkspaceRole
+            })
+          : await signInCloud(normalizedEmail, authPassword);
+      const recent = await listRecentCloudSentences(profile.uid);
+      setDemoProfile({
+        name: profile.name,
+        email: profile.email,
+        workspaceRole: profile.workspaceRole
+      });
+      if (activeCloudUidRef.current !== profile.uid) {
+        cloudAuthGenerationRef.current += 1;
+        activeCloudUidRef.current = profile.uid;
       }
-      return;
+      setCloudUserId(profile.uid);
+      setCloudRecentSentences(recent);
+      await Promise.all([
+        reconcileCloudDictionary(profile.uid),
+        reconcileCloudSnippets(profile.uid)
+      ]);
+      setAuthPassword("");
+      setAuthConfirmPassword("");
+      setActiveOverlay("profile");
+    } catch (cloudErr) {
+      setAuthError(getCloudErrorMessage(cloudErr));
+    } finally {
+      setAuthPending(false);
     }
-
-    const derivedName =
-      authMode === "signup"
-        ? authName.trim() || normalizedEmail.split("@")[0] || "VoiceWave User"
-        : demoProfile?.name || normalizedEmail.split("@")[0] || "VoiceWave User";
-    setDemoProfile({
-      name: derivedName,
-      email: normalizedEmail,
-      workspaceRole: authWorkspaceRole.trim() || "Personal Workspace"
-    });
-    setCloudUserId(null);
-    setCloudRecentSentences([]);
-    setDictionarySyncStatus("device-local");
-    setSnippetSyncStatus("device-local");
-    setSnippetSyncError(null);
-    setAuthPassword("");
-    setAuthConfirmPassword("");
-    setActiveOverlay("profile");
   };
 
   const continueAsGuest = () => {
@@ -1127,36 +1079,27 @@ function App() {
   const handleSignOut = async () => {
     setAuthError(null);
     setAuthNotice(null);
-    if (firebaseEnabled && cloudUserId) {
-      setAuthPending(true);
-      try {
-        await signOutCloud();
-        cloudAuthGenerationRef.current += 1;
-        activeCloudUidRef.current = null;
-        setDemoProfile(null);
-        setCloudUserId(null);
-        setCloudRecentSentences([]);
-        setDictionarySyncStatus("device-local");
-        setSnippetSyncStatus("device-local");
-        setSnippetSyncError(null);
-        openAuthOverlay("signin");
-      } catch (cloudErr) {
-        setAuthError(getCloudErrorMessage(cloudErr));
-      } finally {
-        setAuthPending(false);
-      }
+    // Only a cloud account can be signed in (see handleAuthSubmit).
+    if (!firebaseEnabled || !cloudUserId) {
       return;
     }
-
-    setDemoProfile(null);
-    cloudAuthGenerationRef.current += 1;
-    activeCloudUidRef.current = null;
-    setCloudUserId(null);
-    setCloudRecentSentences([]);
-    setDictionarySyncStatus("device-local");
-    setSnippetSyncStatus("device-local");
-    setSnippetSyncError(null);
-    openAuthOverlay("signin");
+    setAuthPending(true);
+    try {
+      await signOutCloud();
+      cloudAuthGenerationRef.current += 1;
+      activeCloudUidRef.current = null;
+      setDemoProfile(null);
+      setCloudUserId(null);
+      setCloudRecentSentences([]);
+      setDictionarySyncStatus("device-local");
+      setSnippetSyncStatus("device-local");
+      setSnippetSyncError(null);
+      openAuthOverlay("signin");
+    } catch (cloudErr) {
+      setAuthError(getCloudErrorMessage(cloudErr));
+    } finally {
+      setAuthPending(false);
+    }
   };
 
   const handleForgotPassword = async () => {
@@ -1165,10 +1108,6 @@ function App() {
     const normalizedEmail = authEmail.trim();
     if (!normalizedEmail) {
       setAuthError("Enter your email, then tap Forgot Password.");
-      return;
-    }
-    if (!firebaseEnabled) {
-      setAuthError("Password reset requires Firebase cloud auth to be enabled.");
       return;
     }
 
@@ -1196,10 +1135,6 @@ function App() {
   };
 
   const applyPolishProfile = async (profile: PolishProfile) => {
-    if (!isPro) {
-      setActiveNav("pro");
-      return;
-    }
     if (profileApplyInFlightRef.current || profileApplyPending) {
       return;
     }
@@ -1293,11 +1228,36 @@ function App() {
     };
   }, [activeOverlay]);
 
+  const reportRowVisible =
+    activeOverlay === "help" || (activeOverlay === "settings" && settingsSection === "diagnostics");
   useEffect(() => {
-    if (activeNav === "pro") {
-      void refreshEntitlement();
+    if (!reportRowVisible || !tauriAvailable || supportContext) {
+      return;
     }
-  }, [activeNav, refreshEntitlement]);
+    void getSupportContext()
+      .then(setSupportContext)
+      .catch(() => undefined);
+  }, [reportRowVisible, supportContext, tauriAvailable]);
+
+  // Report a problem: Rust builds the GitHub issue URL (version, OS, engine)
+  // and opens the browser; nothing is sent until the user submits on GitHub.
+  const reportProblem = () => {
+    setSupportError(null);
+    void openIssueReport(speechEngineSummary).catch(() =>
+      setSupportError("Couldn't open your browser. Report the problem on VoiceWave's GitHub Issues page instead.")
+    );
+  };
+
+  const showLogsFolder = () => {
+    setSupportError(null);
+    void openLogsFolder().catch(() =>
+      setSupportError(
+        supportContext
+          ? `Couldn't open the logs folder. It's at ${supportContext.logDir}`
+          : "Couldn't open the logs folder."
+      )
+    );
+  };
 
   const retentionOptions: RetentionPolicy[] = ["off", "days7", "days30", "forever"];
   const domainPackOptions: DomainPackId[] = ["coding", "student", "productivity"];
@@ -1568,14 +1528,12 @@ function App() {
         activePopupNav={activeOverlay}
         setActiveNav={handleNavChange}
         isRecording={isRecording}
-        isPro={isPro}
-        showProTools={isPro}
+        accountsEnabled={firebaseEnabled}
         profileDisplayName={profileDisplayName}
         profileStatusLabel={profileStatusLabel}
         isProfileAuthenticated={isDemoAuthenticated}
-        onUpgradeClick={() => setActiveNav("pro")}
       >
-        <div key={activeNav} className={`vw-page-shell ${isPro ? "vw-pro-ui" : ""}`}>
+        <div key={activeNav} className="vw-page-shell">
           {activeNav === "home" && (
             <>
               {!tauriAvailable && (
@@ -1607,95 +1565,9 @@ function App() {
                 pushToTalkHotkey={settings.pushToTalkHotkey}
                 controlMode={snapshot.controlMode}
                 userName={demoProfile?.name}
-                isPro={isPro}
                 historyOff={historyPolicy === "off"}
               />
             </>
-          )}
-
-          {activeNav === "pro" && (
-            <section className="vw-panel vw-panel-soft">
-              <p className="vw-kicker">VoiceWave Pro</p>
-              <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">
-                Power features for coders and students
-              </h3>
-              <p className="mt-1 max-w-2xl text-sm text-faint">
-                Advanced formatting, domain packs, code mode, and power history tools.
-              </p>
-
-              <div className="vw-ring-shell vw-ring-shell-lg mt-6">
-                <div className="vw-ring-inner px-6 py-6">
-                  <div className="flex flex-wrap items-start justify-between gap-6">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="vw-chip vw-chip-ink">Release Offer</span>
-                        <span className="vw-chip vw-chip-accent">{proStatusLabel}</span>
-                      </div>
-                      <p className="vw-section-heading mt-3 text-2xl font-semibold text-ink-strong">
-                        {releaseOfferHeadline}
-                      </p>
-                      <p className="mt-2 text-sm text-label">{releaseOfferLine}</p>
-                      <p className="mt-1 text-xs text-faint">{releaseOfferStateLine}</p>
-                    </div>
-                    <button type="button" className="vw-btn-primary" onClick={() => setActiveNav("pro-tools")}>
-                      Open Pro Tools
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {isPro && (
-                <div className="vw-pro-minimal-grid mt-4">
-                  {PRO_HIGHLIGHT_CARDS.map((item) => {
-                    const Icon = item.icon;
-                    return (
-                      <article key={item.id} className="vw-pro-minimal-card">
-                        <div className="vw-pro-minimal-icon">
-                          <Icon size={15} />
-                        </div>
-                        <p className="text-sm font-semibold text-ink-strong">{item.title}</p>
-                        <p className="mt-1 text-xs text-faint">{item.subtitle}</p>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className="mt-8 border-t border-hairline pt-4">
-                <button
-                  type="button"
-                  className="text-xs font-semibold text-hint transition-colors hover:text-quiet"
-                  onClick={() => setOwnerTapCount((count) => Math.min(count + 1, 5))}
-                >
-                  Owner tools
-                </button>
-                {showOwnerUnlock ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <input
-                      type="password"
-                      value={ownerPassphrase}
-                      onChange={(event) => setOwnerPassphrase(event.target.value)}
-                      placeholder="Owner passphrase"
-                      className="vw-field"
-                    />
-                    <button
-                      type="button"
-                      className="vw-btn-primary vw-btn-sm"
-                      onClick={() => void setOwnerOverride(true, ownerPassphrase)}
-                    >
-                      Enable Owner Pro
-                    </button>
-                    <button
-                      type="button"
-                      className="vw-btn-secondary vw-btn-sm"
-                      onClick={() => void setOwnerOverride(false, ownerPassphrase)}
-                    >
-                      Disable
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </section>
           )}
 
           {activeNav === "models" && (
@@ -2033,10 +1905,7 @@ function App() {
               </p>
 
               <div className="vw-surface-base mt-5 px-5 py-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-ink-strong">Search &amp; Export</p>
-                  <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>{isPro ? "Pro Unlocked" : "Pro"}</span>
-                </div>
+                <p className="text-sm font-semibold text-ink-strong">Search &amp; Export</p>
                 <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_200px_auto]">
                   <input
                     value={historyQuery}
@@ -2054,15 +1923,11 @@ function App() {
                     type="button"
                     className="vw-btn-primary"
                     onClick={() => {
-                      if (!isPro) {
-                        setActiveNav("pro");
-                        return;
-                      }
                       const tags = historyTag.trim() ? [historyTag.trim()] : null;
                       void searchHistory(historyQuery, tags, null);
                     }}
                   >
-                    {isPro ? "Search" : "Open Pro Offer"}
+                    Search
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -2072,23 +1937,12 @@ function App() {
                       key={preset}
                       type="button"
                       className="vw-btn-secondary vw-btn-sm"
-                      onClick={() => {
-                        if (!isPro) {
-                          setActiveNav("pro");
-                          return;
-                        }
-                        void exportHistoryPreset(preset);
-                      }}
+                      onClick={() => void exportHistoryPreset(preset)}
                     >
                       {preset === "plain" ? "Plain text" : preset === "markdownNotes" ? "Markdown notes" : "Study summary"}
                     </button>
                   ))}
                 </div>
-                {!isPro && (
-                  <p className="mt-2 text-xs text-faint">
-                    Search, tagging, starring, and exports are Pro features. Free keeps the full timeline and retention controls.
-                  </p>
-                )}
                 {lastHistoryExport && (
                   <div className="mt-3 rounded-xl border border-hairline bg-inset px-3 py-2">
                     <p className="text-xs font-semibold text-ink-strong">
@@ -2214,13 +2068,7 @@ function App() {
                             className="vw-icon-btn"
                             aria-label={record.starred ? "Unstar session" : "Star session"}
                             title={record.starred ? "Unstar" : "Star"}
-                            onClick={() => {
-                              if (!isPro) {
-                                setActiveNav("pro");
-                                return;
-                              }
-                              void setSessionStarred(record.recordId, !record.starred);
-                            }}
+                            onClick={() => void setSessionStarred(record.recordId, !record.starred)}
                           >
                             <Star
                               size={15}
@@ -2232,10 +2080,6 @@ function App() {
                             className="vw-btn-secondary vw-btn-sm"
                             title="Apply the tag from the tag filter box"
                             onClick={() => {
-                              if (!isPro) {
-                                setActiveNav("pro");
-                                return;
-                              }
                               if (!historyTag.trim()) {
                                 return;
                               }
@@ -2292,7 +2136,7 @@ function App() {
                       ? "Synced"
                       : dictionarySyncStatus === "pending"
                         ? "Sync pending"
-                        : "Device local"}
+                        : "On this device"}
                 </p>
                 {dictionarySyncStatus === "pending" && cloudUserId && (
                   <button
@@ -2332,7 +2176,9 @@ function App() {
                 <p className="mt-2 text-xs text-faint">
                   {cloudUserId
                     ? "Terms take effect on this device immediately and sync to your account when online."
-                    : "Sign in to sync dictionary terms across devices."}
+                    : firebaseEnabled
+                      ? "Sign in to sync dictionary terms across devices."
+                      : "Terms take effect immediately and stay on this PC."}
                 </p>
               </div>
 
@@ -2344,7 +2190,6 @@ function App() {
                       Curated vocabulary for your field, applied on top of your own terms.
                     </p>
                   </div>
-                  <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>{isPro ? "Pro Unlocked" : "Pro"}</span>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {domainPackOptions.map((pack) => {
@@ -2356,10 +2201,6 @@ function App() {
                         className={`vw-seg-btn ${active ? "vw-seg-btn-active" : ""} border border-edge capitalize`}
                         aria-pressed={active}
                         onClick={() => {
-                          if (!isPro) {
-                            setActiveNav("pro");
-                            return;
-                          }
                           const next = active
                             ? settings.activeDomainPacks.filter((value) => value !== pack)
                             : [...settings.activeDomainPacks, pack];
@@ -2666,7 +2507,9 @@ function App() {
                       </div>
                       {snippetDeleteConfirmId === snippet.snippetId && (
                         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3">
-                          <p className="text-xs text-faint">Delete this snippet from every synced device?</p>
+                          <p className="text-xs text-faint">
+                            {cloudUserId ? "Delete this snippet from every synced device?" : "Delete this snippet?"}
+                          </p>
                           <div className="flex gap-2">
                             <button
                               type="button"
@@ -2696,157 +2539,20 @@ function App() {
                 {snippetSyncError && (
                   <p className="text-xs text-status-danger-text">{snippetSyncError}</p>
                 )}
-                {!cloudUserId && !snippetSyncError && (
+                {firebaseEnabled && !cloudUserId && !snippetSyncError && (
                   <p className="text-xs text-hint">Sign in to sync snippets across devices. Local snippets remain available offline.</p>
                 )}
               </div>
             </section>
           )}
-
-          {activeNav === "pro-tools" && (
-            <>
-              <section className="vw-panel vw-panel-soft">
-                <div className="flex flex-wrap items-end justify-between gap-2">
-                  <div>
-                    <p className="vw-kicker">Dictation Style</p>
-                    <h3 className="vw-section-heading mt-1 text-2xl font-semibold text-ink-strong">Polish Profiles</h3>
-                    <p className="mt-1 text-sm text-faint">
-                      One dictation, four intentional shapes. Every card below uses the same sentence.
-                    </p>
-                  </div>
-                  <span className="vw-chip vw-chip-ink">Pro Active</span>
-                </div>
-
-                <div className="mt-5 rounded-2xl border border-edge bg-inset px-4 py-3">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-hint">You say</p>
-                  <p className="mt-1 text-sm italic text-quiet">"{POLISH_PROFILE_RAW_EXAMPLE}"</p>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-                  {POLISH_PROFILE_CARDS.map((card) => {
-                    const isActiveCard = displayedPolishProfile === card.id;
-                    const isApplying = profileApplyPending === card.id;
-                    const isAiProfile = card.id === "coding" || card.id === "writing";
-                    const isPreparingAi = Boolean(
-                      isActiveCard &&
-                        isAiProfile &&
-                        polishModelProgress &&
-                        !polishModelProgress.done &&
-                        !polishModelProgress.error
-                    );
-                    return (
-                      <button
-                        key={card.id}
-                        type="button"
-                        className={`vw-mode-card rounded-2xl border px-4 py-4 text-left ${
-                          isActiveCard ? "vw-pro-mode-card-active" : ""
-                        }`}
-                        onClick={() => void applyPolishProfile(card.id)}
-                        aria-pressed={isActiveCard}
-                        aria-disabled={profileApplyPending ? "true" : "false"}
-                        aria-busy={isApplying ? "true" : "false"}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-base font-semibold text-ink-strong">
-                            {card.title}
-                            {isActiveCard && profileCustomized && (
-                              <span className="font-normal text-faint"> · Customized</span>
-                            )}
-                          </p>
-                          <span className={`vw-chip vw-mode-status-chip ${isActiveCard ? "vw-mode-status-chip-active" : ""}`}>
-                            {isApplying
-                              ? "Applying…"
-                              : isPreparingAi
-                                ? "Preparing AI…"
-                                : isActiveCard
-                                  ? "Active"
-                                  : "Select"}
-                          </span>
-                        </div>
-                        <p className="mt-2 text-sm text-label">{card.description}</p>
-                        <p className="mt-3 border-l-2 border-accent-rule pl-3 text-sm leading-relaxed text-ink-strong">
-                          {card.example}
-                        </p>
-                        <p className="mt-2 text-xs text-faint">
-                          {isPreparingAi
-                            ? "Downloading the local polish model. Deterministic formatting stays available."
-                            : card.note}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {profileCustomized && (
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-edge bg-surface px-4 py-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-ink-strong">
-                        {POLISH_PROFILE_LABELS[activePolishProfile]} · Customized
-                      </p>
-                      <p className="mt-0.5 text-xs text-faint">
-                        Advanced settings differ from this profile's defaults. Resetting discards those edits.
-                      </p>
-                    </div>
-                    {profileResetConfirming ? (
-                      <div className="flex shrink-0 gap-2">
-                        <button
-                          type="button"
-                          className="vw-btn-primary vw-btn-sm"
-                          onClick={() => void confirmProfileReset()}
-                        >
-                          Confirm reset
-                        </button>
-                        <button
-                          type="button"
-                          className="vw-btn-secondary vw-btn-sm"
-                          onClick={() => setProfileResetConfirming(false)}
-                        >
-                          Keep changes
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className="vw-btn-secondary vw-btn-sm"
-                        onClick={() => setProfileResetConfirming(true)}
-                      >
-                        Reset to profile defaults
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {displayedPolishProfile === "coding" && (
-                  <div className="vw-surface-elevated mt-4 rounded-2xl border border-edge bg-surface px-4 py-3">
-                    <p className="text-sm font-semibold text-ink-strong">How To Speak In Coding Profile</p>
-                    <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-quiet md:grid-cols-2">
-                      <p><span className="font-semibold">Symbols:</span> open paren, open parenthesis, close paren, underscore, arrow, equals.</p>
-                      <p><span className="font-semibold">Casing:</span> say plain words, then choose camelCase or snake_case in mode settings.</p>
-                      <p><span className="font-semibold">Example speech:</span> open paren user id close paren arrow result</p>
-                      <p><span className="font-semibold">Expected output:</span> (user id)-&gt;result</p>
-                    </div>
-                  </div>
-                )}
-              </section>
-            </>
-          )}
         </div>
 
-        {displayError && (
+        {error && (
           <div className="mt-6 rounded-2xl border border-status-danger-border bg-status-danger-bg px-4 py-3 text-sm text-status-danger-text">
-            <p>{displayError}</p>
-            {proRequiredFeature && (
-              <button
-                type="button"
-                className="vw-btn-primary vw-action-button mt-3"
-                onClick={() => setActiveNav("pro")}
-              >
-                Open Pro Offer
-              </button>
-            )}
+            <p>{error}</p>
           </div>
         )}
-        {cloudSyncError && (
+        {firebaseEnabled && cloudSyncError && (
           <div className="mt-3 rounded-2xl border border-status-warn-border bg-status-warn-bg px-4 py-3 text-sm text-status-warn-text">
             <p>Cloud sync warning: {cloudSyncError}</p>
           </div>
@@ -3065,6 +2771,121 @@ function App() {
 
               {settingsSection === "polish" && (
                 <div>
+                  <div className="vw-set-row vw-set-row-stack">
+                    <p className="vw-set-title">Polish profile</p>
+                    <p className="vw-set-desc">
+                      How VoiceWave shapes what you say. Standard and Literal work instantly on any PC; Coding and
+                      Writing rewrite with the on-device AI model below.
+                    </p>
+                    <p className="mt-3 text-xs text-hint">
+                      You say: <span className="italic text-quiet">"{POLISH_PROFILE_RAW_EXAMPLE}"</span>
+                    </p>
+
+                    <div className="vw-row-list mt-3" role="group" aria-label="Polish profile">
+                      {POLISH_PROFILE_CARDS.map((card) => {
+                        const isActiveCard = displayedPolishProfile === card.id;
+                        const isApplying = profileApplyPending === card.id;
+                        const isAiProfile = card.id === "coding" || card.id === "writing";
+                        const isPreparingAi = Boolean(
+                          isActiveCard &&
+                            isAiProfile &&
+                            polishModelProgress &&
+                            !polishModelProgress.done &&
+                            !polishModelProgress.error
+                        );
+                        return (
+                          <button
+                            key={card.id}
+                            type="button"
+                            className="vw-interactive-row flex w-full items-start justify-between gap-4 px-4 py-3 text-left"
+                            onClick={() => void applyPolishProfile(card.id)}
+                            aria-pressed={isActiveCard}
+                            aria-disabled={profileApplyPending ? "true" : "false"}
+                            aria-busy={isApplying ? "true" : "false"}
+                          >
+                            <span className="min-w-0">
+                              <span className="block text-sm font-semibold text-ink-strong">
+                                {card.title}
+                                {isActiveCard && profileCustomized && (
+                                  <span className="font-normal text-faint"> · Customized</span>
+                                )}
+                              </span>
+                              <span className="mt-0.5 block text-xs text-label">{card.description}</span>
+                              <span className="mt-2 block border-l-2 border-accent-rule pl-3 text-xs leading-relaxed text-ink-strong">
+                                {card.example}
+                              </span>
+                              <span className="mt-1.5 block text-[11px] text-faint">
+                                {isPreparingAi
+                                  ? "Downloading the local polish model. Deterministic formatting stays available."
+                                  : card.note}
+                              </span>
+                            </span>
+                            <span
+                              className={`vw-chip vw-mode-status-chip shrink-0 ${isActiveCard ? "vw-mode-status-chip-active" : ""}`}
+                            >
+                              {isApplying
+                                ? "Applying…"
+                                : isPreparingAi
+                                  ? "Preparing AI…"
+                                  : isActiveCard
+                                    ? "Active"
+                                    : "Select"}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {profileCustomized && (
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                        <p className="min-w-0 text-xs text-faint">
+                          <span className="font-semibold text-ink-strong">
+                            {POLISH_PROFILE_LABELS[activePolishProfile]} · Customized.
+                          </span>{" "}
+                          Advanced settings differ from this profile's defaults. Resetting discards those edits.
+                        </p>
+                        {profileResetConfirming ? (
+                          <div className="flex shrink-0 gap-2">
+                            <button
+                              type="button"
+                              className="vw-btn-primary vw-btn-sm"
+                              onClick={() => void confirmProfileReset()}
+                            >
+                              Confirm reset
+                            </button>
+                            <button
+                              type="button"
+                              className="vw-btn-secondary vw-btn-sm"
+                              onClick={() => setProfileResetConfirming(false)}
+                            >
+                              Keep changes
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="vw-btn-secondary vw-btn-sm"
+                            onClick={() => setProfileResetConfirming(true)}
+                          >
+                            Reset to profile defaults
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {displayedPolishProfile === "coding" && (
+                      <div className="mt-3 text-xs text-quiet">
+                        <p className="font-semibold text-ink-strong">Speaking in Coding</p>
+                        <ul className="mt-1 space-y-0.5">
+                          <li><span className="font-semibold">Symbols:</span> open paren, open parenthesis, close paren, underscore, arrow, equals.</li>
+                          <li><span className="font-semibold">Casing:</span> say plain words, then choose camelCase or snake_case in mode settings.</li>
+                          <li><span className="font-semibold">Example speech:</span> open paren user id close paren arrow result</li>
+                          <li><span className="font-semibold">Expected output:</span> (user id)-&gt;result</li>
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">On-device AI polish</p>
@@ -3127,10 +2948,10 @@ function App() {
                     <div>
                       <p className="vw-set-title">Anonymous usage count (on by default)</p>
                       <p className="vw-set-desc">
-                        Helps us count real activated installations. After a successful dictation, VoiceWave
-                        shares only a random installation ID, app version, and a once-per-day active marker.
-                        No audio, transcript, account, filename, or settings data is sent. Turn off anytime.
+                        Helps us count real installs and spot where setup goes wrong. Never audio, transcripts,
+                        or settings. Turn off anytime.
                       </p>
+                      <UsageCountDetails />
                     </div>
                     <span className="vw-switch">
                       <input
@@ -3186,6 +3007,35 @@ function App() {
                       <p className="mt-1 break-all font-mono">{lastDiagnosticsExport.filePath}</p>
                     </div>
                   )}
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Report a problem</p>
+                      <p className="vw-set-desc">
+                        Opens a pre-filled GitHub issue. Attach the bundle above and the latest log file; logs
+                        never contain what you dictated.
+                      </p>
+                      {supportError && <p className="mt-1 text-xs text-status-danger-text">{supportError}</p>}
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        className="vw-btn-secondary vw-btn-sm"
+                        onClick={showLogsFolder}
+                        disabled={!tauriAvailable}
+                      >
+                        Open logs folder
+                      </button>
+                      <button
+                        type="button"
+                        className="vw-btn-secondary vw-btn-sm"
+                        onClick={reportProblem}
+                        disabled={!tauriAvailable}
+                      >
+                        Report a problem
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -3303,54 +3153,37 @@ function App() {
         </OverlayModal>
       )}
 
-      {activeOverlay === "profile" && (
+      {firebaseEnabled && activeOverlay === "profile" && (
         <OverlayModal
           title="Profile"
-          subtitle="Your workspace identity and release-offer shortcuts."
+          subtitle="Your account and cloud sync."
           onClose={closeOverlay}
         >
           <div className="space-y-4">
             <section className="rounded-2xl border border-edge bg-surface px-4 py-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="vw-profile-avatar">
-                    {(demoProfile?.name ?? "Guest").slice(0, 1).toUpperCase()}
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-ink-strong">
-                      {demoProfile?.name ?? "Guest Workspace"}
-                    </p>
-                    <p className="mt-1 text-xs text-faint">
-                      {demoProfile?.email ?? "No sign-in required yet"}
-                    </p>
-                  </div>
+              <div className="flex items-center gap-3">
+                <div className="vw-profile-avatar">
+                  {(demoProfile?.name ?? "Guest").slice(0, 1).toUpperCase()}
                 </div>
-                <span className={`vw-chip ${isPro ? "vw-chip-ink" : ""}`}>
-                  {isPro ? "Pro Active" : "Free Plan"}
-                </span>
+                <div>
+                  <p className="text-sm font-semibold text-ink-strong">
+                    {demoProfile?.name ?? "Guest Workspace"}
+                  </p>
+                  <p className="mt-1 text-xs text-faint">
+                    {demoProfile?.email ?? "Not signed in"}
+                  </p>
+                </div>
               </div>
               <p className="mt-3 text-xs text-faint">
                 {isDemoAuthenticated
-                  ? cloudUserId
-                    ? "Cloud account is active. Recent sentences and dictionary terms sync automatically."
-                    : "Local account mode is active on this device."
-                  : "Guest mode is enabled. You can keep using all core flows without signing in."}
+                  ? "Cloud account is active. Recent sentences, dictionary terms, and snippets sync automatically."
+                  : "Everything works without signing in. Sign in to sync across devices."}
               </p>
             </section>
 
             <section className="vw-profile-quick-grid">
               <button type="button" className="vw-profile-quick-action" onClick={() => openOverlay("settings")}>
                 Open Settings
-              </button>
-              <button
-                type="button"
-                className="vw-profile-quick-action"
-                onClick={() => {
-                  closeOverlay();
-                  setActiveNav("pro");
-                }}
-              >
-                View Pro Offer
               </button>
               <button
                 type="button"
@@ -3379,14 +3212,10 @@ function App() {
         </OverlayModal>
       )}
 
-      {activeOverlay === "auth" && (
+      {firebaseEnabled && activeOverlay === "auth" && (
         <OverlayModal
           title={isDemoAuthenticated ? "Account Access" : "Sign In / Sign Up"}
-          subtitle={
-            firebaseEnabled
-              ? "Cloud sync is active."
-              : "Firebase is not configured. Authentication runs in local demo mode."
-          }
+          subtitle="Sync your dictionary, snippets, and recent sentences across devices."
           onClose={closeOverlay}
           maxWidthClassName="max-w-5xl"
         >
@@ -3543,8 +3372,8 @@ function App() {
               {isDemoAuthenticated && demoProfile && (
                 <section className="rounded-2xl border border-edge bg-inset px-4 py-3 text-sm text-label">
                   <p>
-                    Signed in as <span className="font-semibold text-ink-strong">{demoProfile.email}</span>
-                    {cloudUserId ? " with cloud sync enabled." : " on local demo mode."}
+                    Signed in as <span className="font-semibold text-ink-strong">{demoProfile.email}</span> with
+                    cloud sync enabled.
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
@@ -3653,6 +3482,42 @@ function App() {
                 </button>
               </div>
             </section>
+            <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
+              <p className="text-sm font-semibold text-ink-strong">Report a problem</p>
+              <p className="mt-1 text-sm text-faint">
+                Opens a pre-filled GitHub issue with your app version, Windows version and speech engine. Nothing
+                is sent until you submit it on GitHub.
+              </p>
+              {supportContext && (
+                <p className="mt-2 text-xs text-hint">
+                  VoiceWave {supportContext.appVersion} · {supportContext.osVersion} · {speechEngineSummary}
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="vw-btn-primary vw-btn-sm"
+                  onClick={reportProblem}
+                  disabled={!tauriAvailable}
+                >
+                  Report a problem
+                </button>
+                <button
+                  type="button"
+                  className="vw-btn-secondary vw-btn-sm"
+                  onClick={showLogsFolder}
+                  disabled={!tauriAvailable}
+                  title={supportContext?.logDir}
+                >
+                  Open logs folder
+                </button>
+              </div>
+              {supportError && <p className="mt-2 text-xs text-status-danger-text">{supportError}</p>}
+              <p className="mt-3 text-xs text-faint">
+                Attach a diagnostics export (Settings → Diagnostics) and the latest log file if you can. Logs never
+                contain what you dictated.
+              </p>
+            </section>
           </div>
         </OverlayModal>
       )}
@@ -3690,13 +3555,12 @@ function App() {
                 Anonymous usage count
               </h3>
               <p className="mt-1 text-sm text-faint">
-                VoiceWave now counts active installs by default, so we know how many people use it.
+                VoiceWave now counts active installs by default, so we know how many people use it and where
+                setup goes wrong.
               </p>
             </header>
             <p className="mt-4 text-sm leading-relaxed text-label">
-              After a successful dictation it sends a random installation ID, the app version, and a
-              once-per-day active marker. Never audio, transcripts, account details, filenames, or
-              settings. You can change this anytime in Settings → Diagnostics.
+              It sends: {ANONYMOUS_USAGE_DETAILS} You can change this anytime in Settings → Diagnostics.
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <button type="button" className="vw-btn-primary" onClick={() => void resolveAnalyticsConsent(true)}>

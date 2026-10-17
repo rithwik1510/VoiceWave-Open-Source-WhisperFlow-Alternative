@@ -1,14 +1,21 @@
-# Pinned dependency set for the CPU-only faster-whisper runtime that ships
-# INSIDE the VoiceWave installer (see build-embedded-runtime.ps1). These
-# versions match the dev .venv-faster-whisper that current builds are tested
-# against, so a shipped install behaves identically to local development.
+# Pinned dependency set for the CPU faster-whisper runtime that ships INSIDE
+# the VoiceWave installer (see build-embedded-runtime.ps1). These versions
+# match the dev .venv-faster-whisper that current builds are tested against,
+# so a shipped install behaves identically to local development.
 #
-# CPU only on purpose: GPU users still get CUDA acceleration through the
-# nvidia-* wheels resolved at runtime from a separate install, but the bundled
-# runtime must stay small and dependency-light so every fresh install can
-# transcribe offline with zero setup. Do NOT add nvidia-cuda-*, llama_cpp_python
-# (LLM polish ships its own runtime), or the sounddevice/pycaw/comtypes packages
-# here — none are imported by worker.py.
+# This one interpreter also runs the AI-polish worker: build-embedded-runtime.ps1
+# installs the committed AVX2 llama-cpp-python wheel into it after this file.
+# Do NOT list llama_cpp_python here (the stock PyPI wheel is AVX-512 and crashes
+# on older CPUs).
+#
+# CPU only on purpose. GPU transcription does not come from this runtime: it is
+# the bundled whisper.cpp Vulkan worker (asr-worker/vk). So no nvidia-* / CUDA
+# wheels, and no sounddevice/pycaw/comtypes (none are imported by worker.py).
+#
+# onnxruntime is pinned only because faster-whisper declares it as a hard
+# dependency. It is only used by Silero VAD, which VoiceWave never enables, so
+# prune-embedded-runtime.ps1 deletes it (and sympy/mpmath/flatbuffers/protobuf)
+# from the shipped tree.
 faster-whisper==1.2.1
 ctranslate2==4.7.1
 numpy==2.5.0

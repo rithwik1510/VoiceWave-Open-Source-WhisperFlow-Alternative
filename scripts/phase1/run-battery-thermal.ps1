@@ -65,7 +65,7 @@ $startTime = Get-Date
 
 Push-Location (Join-Path $root "src-tauri")
 try {
-  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --bin phase1_harness -- sustained --minutes $Minutes --out $sustainedReportPath
+  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --example phase1_harness -- sustained --minutes $Minutes --out $sustainedReportPath
   if ($LASTEXITCODE -ne 0) { throw "sustained harness run failed" }
 }
 finally {

@@ -70,7 +70,7 @@ const GUARANTEES = [
     title: 'Never changes your meaning',
     body: 'A validator checks every polish. If it drifts, you get the raw transcript.'
   },
-  { icon: ToggleLeft, title: 'Off by default', body: 'Opt in from Settings.' }
+  { icon: ToggleLeft, title: 'Off by default', body: 'Opt in from Settings. About a 1 GB download; needs a CPU with AVX2.' }
 ]
 
 type Phase = 'heard' | 'polishing' | 'polished'

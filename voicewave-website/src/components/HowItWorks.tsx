@@ -380,7 +380,7 @@ export default function HowItWorks() {
             Hold. Speak. Release.
           </h2>
           <p className="mt-4 text-pretty text-base leading-relaxed text-[#475569] sm:text-lg">
-            It types wherever you are. No account, no setup wizard, no Python.
+            It types wherever you are. No account, no Python. One short setup downloads a speech model once, then it works offline.
           </p>
         </div>
 

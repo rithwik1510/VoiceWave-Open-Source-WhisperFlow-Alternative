@@ -93,17 +93,17 @@ pub(crate) fn load_or_create_key(
     if let Some(reason) = unusable {
         crate::atomic_file::note_store_reset(label);
         match crate::atomic_file::quarantine_corrupt(path) {
-            Ok(Some(target)) => eprintln!(
-                "voicewave: {label} key is unusable ({reason}); kept it at '{}' and regenerating",
+            Ok(Some(target)) => tracing::warn!(
+                "{label} key is unusable ({reason}); kept it at '{}' and regenerating",
                 target.display()
             ),
-            Ok(None) => eprintln!("voicewave: {label} key vanished while unusable; regenerating"),
+            Ok(None) => tracing::warn!("{label} key vanished while unusable; regenerating"),
             Err(error) => {
                 // Writing now would replace the only copy of a key that may
                 // still be fine once the lock clears. Run this session on a
                 // throwaway key and leave the file for the next launch.
-                eprintln!(
-                    "voicewave: {label} key is unusable ({reason}) and could not be moved aside \
+                tracing::error!(
+                    "{label} key is unusable ({reason}) and could not be moved aside \
                      ({error}); using a session-only key and leaving the file untouched"
                 );
                 return Ok(random_key());
@@ -127,7 +127,7 @@ pub(crate) fn load_or_create_key(
 /// (or may be) there and must not be replaced.
 fn read_key_file(path: &Path, label: &str) -> KeyFile {
     if let Err(error) = crate::atomic_file::recover_interrupted_replace(path) {
-        eprintln!("voicewave: could not finish an interrupted {label} key write: {error}");
+        tracing::warn!("could not finish an interrupted {label} key write: {error}");
     }
     let mut attempt = 1;
     loop {
@@ -138,8 +138,8 @@ fn read_key_file(path: &Path, label: &str) -> KeyFile {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return KeyFile::Missing,
             Err(error) if attempt >= KEY_READ_ATTEMPTS => return KeyFile::Unreadable(error),
             Err(error) => {
-                eprintln!(
-                    "voicewave: could not read the {label} key (attempt {attempt}), retrying: {error}"
+                tracing::warn!(
+                    "could not read the {label} key (attempt {attempt}), retrying: {error}"
                 );
                 std::thread::sleep(Duration::from_millis(KEY_READ_BACKOFF_MS << (attempt - 1)));
                 attempt += 1;

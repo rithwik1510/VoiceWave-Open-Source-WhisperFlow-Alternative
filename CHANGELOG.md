@@ -5,6 +5,122 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [Unreleased]
+
+A smaller installer, no more Pro screens, and an easy way to report problems.
+
+### Added
+
+- **Report a problem.** Help → Report a problem opens a pre-filled GitHub
+  issue with your app version, Windows version and speech engine. Nothing is
+  sent until you submit it on GitHub. Open logs folder shows the log files to
+  attach.
+- **Log files.** VoiceWave now keeps a week of daily log files, including a
+  record of any crash. Logs never contain what you dictated.
+- **Setup and reliability counts** in the anonymous usage count: which setup
+  step was reached, whether setup finished or was skipped, whether the first
+  dictation ran on the GPU or the CPU, failed model downloads, and GPU-to-CPU
+  fallbacks. Each carries one category and nothing else. The existing switch
+  in setup and Settings → Diagnostics turns all of it off.
+
+### Changed
+
+- **Smaller installer.** The bundled Python runtime no longer ships debug
+  symbols, build libraries, packaging tools, test suites, an unused voice
+  detection library, or duplicate AI polish libraries.
+- **Cleaner upgrades.** Installing a new version now removes the old speech
+  runtime first, so files from earlier versions no longer pile up.
+- **Polish profiles moved to Settings → Polish.** Standard and Literal work
+  without the AI model; Coding and Writing use it.
+- **Everything is free, so the Pro screens are gone.** The Pro and Pro Tools
+  pages, release-offer cards and Pro badges were removed.
+- The sign-in screen and sync messages are hidden. Release builds have no
+  cloud accounts, and the old sign-in accepted any email without doing
+  anything.
+
+---
+
+## [0.7.0] – 2026-10-17
+
+GPU dictation on any vendor's graphics card, a model picked for your PC, and
+a more reliable first run.
+
+### Added
+
+- **GPU dictation through whisper.cpp and Vulkan.** PCs with a discrete GPU
+  from NVIDIA, AMD or Intel (Vulkan 1.2) now transcribe on the GPU. There is
+  no CUDA or driver download. The speech engine runs in its own worker
+  process, so a misbehaving graphics driver cannot take the app down with it.
+  faster-whisper stays the engine for the CPU and for PCs with only
+  integrated graphics.
+- **One-time graphics card check.** The first time the GPU engine starts,
+  VoiceWave runs a few short test clips to confirm the card produces correct
+  text at a useful speed. Until it passes, dictation keeps using the CPU. On
+  NVIDIA cards the first run can take about 25 to 40 seconds while shaders
+  compile.
+- **A model picked for your PC.** Setup and the Models page show two models,
+  Small and Large Turbo, matched to your hardware and to the engine your PC
+  will use. Existing faster-whisper users who can use the GPU get a one-time
+  offer to switch, which downloads, checks and switches the model, and
+  resumes after a restart.
+- **Status and control.** The Models page says "Running on <your GPU>" or
+  "Running on your processor". Settings → Dictation has a GPU acceleration
+  switch (Auto or Off). Installed models you are not using can be removed.
+- **Automatic step-down to the CPU.** If the GPU stalls or errors, the same
+  audio is transcribed on the CPU and inserted once, and the pill says so
+  once per session. Two failures in a row pause the GPU for five minutes. A
+  driver that fails across two sessions is turned off for 7 days, or until
+  you update the app.
+
+### Changed
+
+- **Verified model downloads.** The two whisper.cpp models (Small and Large
+  Turbo) are checked against a pinned SHA-256 hash while they download. A
+  partial download is verified before it replaces anything, so a working
+  model is never deleted before its replacement is ready, and downloads
+  resume by default. faster-whisper models and the AI polish model are
+  still checked for completeness and size only.
+- Faster recovery from a hung GPU: a stuck GPU is detected in seconds
+  instead of costing one dictation about a minute.
+- AI polish is turned off, with a plain explanation, on CPUs without AVX2.
+  Processors without SSE4.1 are told in setup that this PC isn't supported.
+- Removed the in-process whisper-rs engine and the unused CUDA add-on
+  download. GPU dictation is the Vulkan worker now.
+
+### Fixed
+
+- **Clipped word starts.** Audio trimming cut soft first sounds ("Restart"
+  became "Please start"). It now keeps 500 ms of padding at both ends. On a
+  scripted 20-phrase test with a real voice, exact matches went from 9 to 12.
+- Dictionary terms no longer force their capitalization everywhere. "Things"
+  in your dictionary no longer capitalizes every "things". Only terms whose
+  spelling carries casing (multi-word names, inner capitals, digits, dashes)
+  are enforced.
+- A longer retry transcript no longer replaces a better one just for being
+  longer.
+- **First-run setup.** You can always continue past the practice step while
+  the model downloads, and the download keeps running. The model screen
+  shows live progress (percent, megabytes, Cancel, Retry or Resume), follows
+  a download already running, and defaults to the model recommended for this
+  PC. Microphone failures now say what is wrong and link to the Windows
+  microphone privacy settings.
+- Dictating with no model installed fails when you press the hotkey, not
+  after you finish speaking, and the message brings the VoiceWave window
+  forward. Common setup problems (no mic, mic blocked or busy) get plain
+  messages.
+- A second download request for a model that is already downloading shows its
+  progress instead of starting a second copy, and Cancel stops only that
+  model's download.
+- Model files left behind by older versions are adopted at startup, so
+  upgraders are not sent back through setup.
+- A graphics driver that hangs while listing devices can no longer block the
+  model list and setup screen forever.
+- New GPU users are kept off slow paths on first run: early GPU decodes get
+  extra time while the driver's shader cache warms up, and a dictation during
+  the one-time check waits for it instead of loading the model on the CPU.
+
+---
+
 ## [0.6.1] – 2026-10-15
 
 First-run reliability, faster first dictation, and safer storage.

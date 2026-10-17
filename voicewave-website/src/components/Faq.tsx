@@ -3,15 +3,15 @@ import { GITHUB_REPO_URL } from '../config/site'
 
 const FAQS: Array<{ q: string; a: React.ReactNode }> = [
   {
-    q: 'Is it really 100% offline?',
+    q: 'Is it really offline?',
     a: (
       <>
-        Transcription is, yes — audio is captured, decoded by Whisper, and discarded
-        entirely on your machine. The app only goes online to download models, check
-        GitHub for signed updates, and send an anonymous usage count (a random
-        install ID, app version, and a once-a-day active marker via TelemetryDeck;
-        on by default, off with one switch). Never audio or text. You can verify
-        all of it in the{' '}
+        Transcription is. Audio is captured, decoded by Whisper, and discarded on your
+        machine. The app goes online for three things: a one-time speech model download
+        during first-run setup, signed update checks against GitHub, and an anonymous
+        usage count (random install ID, app version, update channel, and a few setup
+        events, sent through TelemetryDeck; on by default, off with one switch). Never
+        audio, text, or settings. You can verify all of it in the{' '}
         <a href={GITHUB_REPO_URL} target="_blank" rel="noreferrer" className="font-semibold text-[#0b3f98] underline decoration-[#9cc6f5] underline-offset-2 hover:text-[#0050d2]">
           source code
         </a>
@@ -20,28 +20,43 @@ const FAQS: Array<{ q: string; a: React.ReactNode }> = [
     )
   },
   {
+    q: 'Windows says "Unknown publisher". Is it safe?',
+    a: (
+      <>
+        The installer isn&apos;t Authenticode-signed yet, so Windows SmartScreen shows
+        &quot;Windows protected your PC&quot; for new downloads. Click More info, then Run
+        anyway. The installer is built in public by GitHub Actions from this repo, and
+        you can read the{' '}
+        <a href={GITHUB_REPO_URL} target="_blank" rel="noreferrer" className="font-semibold text-[#0b3f98] underline decoration-[#9cc6f5] underline-offset-2 hover:text-[#0050d2]">
+          source and the build workflow
+        </a>
+        . Updates inside the app are signed and verified before they install.
+      </>
+    )
+  },
+  {
     q: 'How accurate is it?',
-    a: 'It runs OpenAI\'s Whisper via faster-whisper — the same model family behind most modern dictation tools. Install larger models for more accuracy; the dictionary catches names and jargon.'
+    a: "It runs OpenAI's Whisper, the same model family behind most modern dictation tools. Setup picks a model size that suits your PC, and the dictionary catches names and jargon."
   },
   {
     q: 'Do I need a GPU?',
-    a: 'No. Everything ships CPU-first and the default model is quick on any modern processor. If you have a capable NVIDIA GPU, larger models get faster — GPU acceleration as a one-click download is on the roadmap.'
+    a: 'No. VoiceWave runs on the CPU by default. If you have a discrete GPU from NVIDIA, AMD or Intel with Vulkan 1.2, it uses the GPU automatically after a one-time check, with no CUDA or driver download. That is faster and fits a bigger model. PCs with only integrated graphics use the CPU for now.'
   },
   {
     q: 'What does the AI polish actually send anywhere?',
-    a: 'Nothing. The polish pass is a small language model running on your CPU, in the same process ecosystem as transcription. It\'s off by default, and a fidelity validator rejects any rewrite that changes what you said.'
+    a: 'Nothing. The polish pass is a small language model (Qwen2.5 1.5B, about a 1 GB download) running on your CPU. It is off by default, needs a CPU with AVX2, and a fidelity validator rejects any rewrite that changes what you said.'
   },
   {
     q: 'Which languages are supported?',
-    a: 'English is the tuned, default experience today. Whisper itself is multilingual, and larger multilingual models can be installed from Settings — quality varies by language.'
+    a: 'English only for now. VoiceWave is built and tuned for English dictation, and the speech models it installs are English models.'
   },
   {
     q: 'What are the system requirements?',
-    a: 'Windows 10 or 11, 64-bit. No account, no Python, no dependencies — the installer bundles everything, including the offline transcription runtime.'
+    a: 'Windows 10 or 11, 64-bit, and no account. No Python or other dependencies. The installer does not include a speech model, so first-run setup downloads one once: about 488 MB (Small) up to 1.6 GB (Large Turbo), chosen for your PC. After that, dictation works fully offline.'
   },
   {
-    q: 'Is it free? What\'s the catch?',
-    a: 'The app you download today is free and open source under Apache-2.0, and the core local dictation loop will stay that way. If advanced pro features arrive later, they\'ll be additions — not a paywall in front of what you already have.'
+    q: 'Is it free? What is the catch?',
+    a: 'There is no catch. VoiceWave is free and open source under Apache-2.0, with every feature included and no account or subscription.'
   }
 ]
 

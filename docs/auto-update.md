@@ -53,15 +53,15 @@ npx @tauri-apps/cli signer generate -w src-tauri/.tauri/voicewave-updater.key
 
 ### Required GitHub Actions secrets
 
-| Secret                               | Value                                                |
-| ------------------------------------ | ---------------------------------------------------- |
-| `TAURI_SIGNING_PRIVATE_KEY`          | Contents of `src-tauri/.tauri/voicewave-updater.key` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key password (`""` if generated with `--ci`)     |
-| `WINGET`                             | Classic PAT with `public_repo` (for the winget PR)   |
+| Secret                               | Value                                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Contents of `src-tauri/.tauri/voicewave-updater.key`                                                          |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key password (`""` if generated with `--ci`)                                                              |
+| `WINGET`                             | Classic PAT with `public_repo` (winget PR). Currently invalid, see [winget-pat-setup.md](winget-pat-setup.md) |
 
 ## Release process
 
-Fully automated via `.github/workflows/release.yml` (triggers on a published,
+Mostly automated via `.github/workflows/release.yml` (triggers on a published,
 non-prerelease GitHub Release):
 
 1. Bump the version in **all three**: `src-tauri/tauri.conf.json`,
@@ -73,7 +73,12 @@ non-prerelease GitHub Release):
    - builds + signs the NSIS installer,
    - generates `latest.json` (`scripts/release/generate-latest-json.ps1`),
    - uploads the installer **and** `latest.json` to the release,
-   - submits the winget update (`publish-winget` job, after the upload).
+   - runs the `publish-winget` job after the upload. It tries to open a pull
+     request against `microsoft/winget-pkgs` with `winget-releaser`, but it
+     currently fails at its token preflight because the `WINGET` secret is
+     invalid. The release and the in-app update are unaffected, since both
+     are finished before that job starts. See
+     [winget-distribution.md](winget-distribution.md).
 
 ### Building / signing locally
 
@@ -91,12 +96,12 @@ local builds also emit a signed installer + `<installer>.exe.sig`. To produce
 
 ## Files
 
-| File                                       | Role                                                       |
-| ------------------------------------------ | ---------------------------------------------------------- |
-| `src-tauri/tauri.conf.json`                | `plugins.updater` config + `bundle.createUpdaterArtifacts` |
-| `src-tauri/src/lib.rs`                     | Registers `updater` + `process` plugins                    |
-| `src-tauri/capabilities/default.json`      | `updater:default`, `process:default` permissions           |
-| `src/lib/updater.ts`                       | check / download+install / relaunch wrapper                |
-| `src/components/UpdatePrompt.tsx`          | The launch-time prompt UI                                  |
-| `scripts/release/generate-latest-json.ps1` | Builds the update manifest                                 |
-| `.github/workflows/release.yml`            | Build → sign → latest.json → winget                        |
+| File                                       | Role                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `src-tauri/tauri.conf.json`                | `plugins.updater` config + `bundle.createUpdaterArtifacts`          |
+| `src-tauri/src/lib.rs`                     | Registers `updater` + `process` plugins                             |
+| `src-tauri/capabilities/default.json`      | `updater:default`, `process:default` permissions                    |
+| `src/lib/updater.ts`                       | check / download+install / relaunch wrapper                         |
+| `src/components/UpdatePrompt.tsx`          | The launch-time prompt UI                                           |
+| `scripts/release/generate-latest-json.ps1` | Builds the update manifest                                          |
+| `.github/workflows/release.yml`            | Build → sign → latest.json → winget (winget step currently failing) |

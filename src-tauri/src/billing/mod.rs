@@ -287,7 +287,7 @@ impl BillingManager {
     /// already correct, so a disk problem is worth a log line and nothing more.
     fn log_failed_rewrite(&self, result: Result<(), BillingError>) {
         if let Err(error) = result {
-            eprintln!("voicewave: could not rewrite the billing store: {error}");
+            tracing::warn!("could not rewrite the billing store: {error}");
         }
     }
 

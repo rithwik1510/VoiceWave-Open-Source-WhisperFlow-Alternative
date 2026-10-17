@@ -10,6 +10,7 @@ import {
   startMicLevelMonitor,
   stopMicLevelMonitor
 } from "../lib/tauri";
+import { ANONYMOUS_USAGE_DETAILS, type FunnelEvent, trackFunnelEvent } from "../lib/telemetry";
 import type {
   ModelCatalogItem,
   ModelStatus,
@@ -46,8 +47,8 @@ interface OnboardingProps {
   hotkeyLabel: string;
   snapshot: VoiceWaveSnapshot;
   /** Anonymous usage count, on by default. Disclosed on the first screen so
-   * it is seen before the rehearsal dictation could send anything; changes
-   * persist immediately. */
+   * it is seen before anything could be sent; changes persist immediately.
+   * Setup funnel events read the value current when each one fires. */
   usageOptIn: boolean;
   onUsageOptInChange: (enabled: boolean) => void;
   onComplete: () => void;
@@ -326,6 +327,16 @@ function MicMeter({
 
 /* ------------------------------------------------------------ onboarding */
 
+/** "What's counted" disclosure under every anonymous-usage toggle. */
+export function UsageCountDetails() {
+  return (
+    <details className="mt-1 text-xs text-faint">
+      <summary className="cursor-pointer select-none font-medium text-accent-text">What's counted</summary>
+      <p className="mt-1 max-w-[34rem] leading-relaxed">{ANONYMOUS_USAGE_DETAILS}</p>
+    </details>
+  );
+}
+
 /** Models page, while the one-time graphics card check runs (driver shader
  * compile, 25-50 s on first GPU use). Dictation waits for it rather than
  * running the model on the processor meanwhile. */
@@ -387,6 +398,30 @@ export function Onboarding({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const rehearsalBaselineRef = useRef<string | null>(null);
   const { canvasRef, burst } = useParticleBurst();
+  const usageOptInRef = useRef(usageOptIn);
+  usageOptInRef.current = usageOptIn;
+
+  // Funnel events honour the usage toggle as it stands at each event.
+  // telemetry.ts keeps every step and the outcome to once per install.
+  const track = useCallback((event: FunnelEvent) => {
+    void trackFunnelEvent(usageOptInRef.current, event).catch(() => undefined);
+  }, []);
+
+  // Welcome counts when the user acts on it (not on mount), so the toggle
+  // shown on that screen decides; later steps count on arrival.
+  useEffect(() => {
+    if (step !== "welcome") {
+      track({ type: "Onboarding.stepReached", step });
+    }
+  }, [step, track]);
+
+  const leaveSetup = (outcome: "finished" | "skipped") => {
+    if (step === "welcome") {
+      track({ type: "Onboarding.stepReached", step: "welcome" });
+    }
+    track({ type: "Onboarding.completed", outcome });
+    onComplete();
+  };
 
   useEffect(() => {
     if (quickControlsAvailableOverride !== undefined) {
@@ -470,9 +505,10 @@ export function Onboarding({
   }, [installModel, makeModelActive, modelChoice, modelReady]);
 
   const begin = useCallback(() => {
+    track({ type: "Onboarding.stepReached", step: "welcome" });
     startDownload();
     setStep("mic");
-  }, [startDownload]);
+  }, [startDownload, track]);
 
   const handleMicHeard = useCallback(() => {
     setMicHeard(true);
@@ -654,9 +690,10 @@ export function Onboarding({
                   <div>
                     <p className="vw-set-title">Anonymous usage count · on by default</p>
                     <p className="vw-set-desc">
-                      Counts active installs with a random ID, the app version, and a once-a-day marker.
-                      Never audio or text. Change it anytime in Settings.
+                      Counts installs and setup progress with a random ID. Never audio, transcripts, or
+                      settings. Change it anytime in Settings.
                     </p>
+                    <UsageCountDetails />
                   </div>
                   <span className="vw-switch">
                     <input
@@ -671,7 +708,7 @@ export function Onboarding({
 
                 <div className="mt-auto flex items-center gap-3 pt-8">
                   {cpuUnsupported ? (
-                    <button type="button" className="vw-btn-secondary" onClick={onComplete}>
+                    <button type="button" className="vw-btn-secondary" onClick={() => leaveSetup("skipped")}>
                       Close setup
                     </button>
                   ) : (
@@ -897,7 +934,7 @@ export function Onboarding({
                     AI polish · waiting in Settings
                   </span>
                 </div>
-                <button type="button" className="vw-btn-primary mt-8" onClick={onComplete}>
+                <button type="button" className="vw-btn-primary mt-8" onClick={() => leaveSetup("finished")}>
                   Start dictating
                 </button>
               </div>
@@ -922,7 +959,7 @@ export function Onboarding({
                 <button
                   type="button"
                   className="text-xs font-medium text-hint transition-colors hover:text-quiet"
-                  onClick={onComplete}
+                  onClick={() => leaveSetup("skipped")}
                 >
                   Skip setup
                 </button>

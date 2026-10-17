@@ -265,8 +265,8 @@ pub fn announce_store_resets(app: &AppHandle) {
     if labels.is_empty() {
         return;
     }
-    eprintln!(
-        "voicewave: reset to defaults after unreadable data: {}",
+    tracing::warn!(
+        "reset to defaults after unreadable data: {}",
         labels.join(", ")
     );
     let handle = app.clone();
@@ -1429,14 +1429,14 @@ impl VoiceWaveController {
         // Stats are non-critical: a broken store must never block dictation,
         // so fall back to session-only aggregates instead of erroring out.
         let mut stats_manager = StatsManager::new().unwrap_or_else(|err| {
-            eprintln!("stats store unavailable, keeping session-only stats: {err}");
+            tracing::warn!("stats store unavailable, keeping session-only stats: {err}");
             StatsManager::in_memory()
         });
         if !stats_manager.backfilled() {
             if let Err(err) =
                 stats_manager.backfill_from_latency_records(diagnostics_manager.latency_records())
             {
-                eprintln!("stats backfill failed: {err}");
+                tracing::warn!("stats backfill failed: {err}");
             }
         }
         Ok(Self {
@@ -1538,7 +1538,7 @@ impl VoiceWaveController {
         let baseline = self.fw_baseline(model_id).await;
         tauri::async_runtime::spawn(async move {
             if let Err(err) = prewarm_asr_worker(model, baseline).await {
-                eprintln!("voicewave: speech worker prewarm failed: {err}");
+                tracing::warn!("speech worker prewarm failed: {err}");
             }
         });
     }
@@ -1589,22 +1589,22 @@ impl VoiceWaveController {
         match warmup_plan_for_model(&active_model) {
             WarmupPlan::FasterWhisper => {
                 if let Err(err) = ensure_faster_whisper_ready().await {
-                    eprintln!(
-                        "voicewave: cold-start warmup skipped (worker spawn failed for {active_model}): {err}"
+                    tracing::warn!(
+                        "cold-start warmup skipped (worker spawn failed for {active_model}): {err}"
                     );
                     return;
                 }
                 match prefetch_faster_whisper_model(&active_model).await {
                     Ok(result) => {
-                        eprintln!(
-                            "voicewave: cold-start warmup complete for {active_model} \
+                        tracing::info!(
+                            "cold-start warmup complete for {active_model} \
                              (model_init={}ms, cache_hit={})",
                             result.model_init_ms, result.runtime_cache_hit
                         );
                     }
                     Err(err) => {
-                        eprintln!(
-                            "voicewave: cold-start prefetch failed for {active_model}: {err}"
+                        tracing::warn!(
+                            "cold-start prefetch failed for {active_model}: {err}"
                         );
                     }
                 }
@@ -1615,9 +1615,9 @@ impl VoiceWaveController {
                 if let Some(model) = self.installed_asr_model(&active_model).await {
                     let baseline = self.fw_baseline(&active_model).await;
                     match prewarm_asr_worker(model, baseline).await {
-                        Ok(()) => eprintln!("voicewave: cold-start warmup complete for {active_model}"),
-                        Err(err) => eprintln!(
-                            "voicewave: cold-start speech worker warmup failed for {active_model}: {err}"
+                        Ok(()) => tracing::info!("cold-start warmup complete for {active_model}"),
+                        Err(err) => tracing::warn!(
+                            "cold-start speech worker warmup failed for {active_model}: {err}"
                         ),
                     }
                 }
@@ -1660,13 +1660,13 @@ impl VoiceWaveController {
         .await
         {
             Ok(Some(_)) => {
-                eprintln!("voicewave: polish profile warmup complete for {profile_name}");
+                tracing::info!("polish profile warmup complete for {profile_name}");
             }
             Ok(None) => {
-                eprintln!("voicewave: polish profile warmup skipped for {profile_name}");
+                tracing::info!("polish profile warmup skipped for {profile_name}");
             }
             Err(err) => {
-                eprintln!("voicewave: polish profile warmup failed for {profile_name}: {err}");
+                tracing::warn!("polish profile warmup failed for {profile_name}: {err}");
             }
         }
     }
@@ -1823,8 +1823,8 @@ impl VoiceWaveController {
         trigger: DictationStartTrigger,
         control_mode: DictationControlMode,
     ) -> Result<(), ControllerError> {
-        eprintln!(
-            "voicewave: start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
+        tracing::info!(
+            "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
             trigger, control_mode, mode
         );
         // Snapshot the lifecycle state before touching the token: nothing in
@@ -1844,14 +1844,14 @@ impl VoiceWaveController {
                 .is_some_and(|token| !token.is_cancelled());
             if token_live {
                 if live_cancel_token_is_stale(session_state) {
-                    eprintln!(
-                        "voicewave: start_dictation clearing stale cancel token (session_state={session_state:?})"
+                    tracing::warn!(
+                        "start_dictation clearing stale cancel token (session_state={session_state:?})"
                     );
                     if let Some(stale) = token_slot.take() {
                         stale.cancel();
                     }
                 } else {
-                    eprintln!("voicewave: start_dictation rejected (already running)");
+                    tracing::info!("start_dictation rejected (already running)");
                     return Err(ControllerError::AlreadyRunning);
                 }
             }
@@ -1944,8 +1944,8 @@ impl VoiceWaveController {
             }
             if let Err(err) = run_result {
                 if !still_owns_session {
-                    eprintln!(
-                        "voicewave: stale dictation session {session_id} failed after replacement: {err}"
+                    tracing::warn!(
+                        "stale dictation session {session_id} failed after replacement: {err}"
                     );
                     return;
                 }
@@ -1970,7 +1970,7 @@ impl VoiceWaveController {
                     && controller.model_download_cancels.lock().await.is_empty()
                 {
                     if let Err(show_err) = crate::show_main_window(app.clone()).await {
-                        eprintln!("voicewave: could not show main window for setup: {show_err}");
+                        tracing::warn!("could not show main window for setup: {show_err}");
                     }
                 }
             }
@@ -2061,11 +2061,11 @@ impl VoiceWaveController {
         // Only the user-visible effects stay session-gated, so repeated
         // cancels do not replay the close cue or spam Idle transitions.
         let Some(session_id) = cancelled_session else {
-            eprintln!("voicewave: cancel_dictation ignored (no cancellable session)");
+            tracing::info!("cancel_dictation ignored (no cancellable session)");
             return;
         };
 
-        eprintln!("voicewave: cancel_dictation accepted (session={session_id})");
+        tracing::info!("cancel_dictation accepted (session={session_id})");
         play_cue_without_blocking(crate::cue::CueSound::Close);
         self.update_state(
             &app,
@@ -2096,12 +2096,12 @@ impl VoiceWaveController {
             }
         };
         let Some((session_id, trigger, control_mode)) = finished_session else {
-            eprintln!("voicewave: finish ignored (cause={cause:?}, no listening session)");
+            tracing::info!("finish ignored (cause={cause:?}, no listening session)");
             return;
         };
 
-        eprintln!(
-            "voicewave: finish accepted (session={session_id}, trigger={trigger:?}, control_mode={control_mode:?}, cause={cause:?})"
+        tracing::info!(
+            "finish accepted (session={session_id}, trigger={trigger:?}, control_mode={control_mode:?}, cause={cause:?})"
         );
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
@@ -2139,10 +2139,10 @@ impl VoiceWaveController {
         match HotkeyRuntime::start(config, event_tx) {
             Ok(runtime) => {
                 *slot = Some(runtime);
-                eprintln!("voicewave: event-driven global hotkey runtime started");
+                tracing::info!("event-driven global hotkey runtime started");
             }
             Err(err) => {
-                eprintln!("voicewave: global hotkey runtime unavailable: {err}");
+                tracing::error!("global hotkey runtime unavailable: {err}");
                 // The duplicate-instance case has a fix the user can actually
                 // perform; everything else is a genuine "something broke".
                 let detail = if err.to_string().contains("already owns the keyboard hook") {
@@ -2169,10 +2169,10 @@ impl VoiceWaveController {
                     .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
                     .await
                 {
-                    eprintln!("voicewave: hotkey action failed: {err}");
+                    tracing::warn!("hotkey action failed: {err}");
                 }
             }
-            eprintln!("voicewave: global hotkey event channel closed");
+            tracing::warn!("global hotkey event channel closed");
         });
     }
 
@@ -2499,12 +2499,12 @@ impl VoiceWaveController {
         ) {
             Ok(record_id) => record_id,
             Err(err) => {
-                eprintln!("voicewave: could not record the insertion in history: {err}");
+                tracing::warn!("could not record the insertion in history: {err}");
                 None
             }
         };
         if let Err(err) = app.emit_to(MAIN_WINDOW_LABEL, "voicewave://history-updated", ()) {
-            eprintln!("history-updated emit failed: {err}");
+            tracing::warn!("history-updated emit failed: {err}");
         }
 
         if !result.success {
@@ -2568,8 +2568,8 @@ impl VoiceWaveController {
                         Ok(())
                     }
                     HandsFreeToggleDecision::IgnoreHoldToTalk => {
-                        eprintln!(
-                            "voicewave: ignored hands-free shortcut while hold-to-talk is active"
+                        tracing::info!(
+                            "ignored hands-free shortcut while hold-to-talk is active"
                         );
                         Ok(())
                     }
@@ -2638,8 +2638,8 @@ impl VoiceWaveController {
                         });
                     }
                     PushReleaseDecision::IgnoreNoEligibleSession => {
-                        eprintln!(
-                            "voicewave: ignored push-to-talk release (no eligible push session)"
+                        tracing::info!(
+                            "ignored push-to-talk release (no eligible push session)"
                         );
                     }
                 }
@@ -2753,8 +2753,8 @@ impl VoiceWaveController {
                 // Cancel kills the worker, which can be what made runtime prep
                 // fail — report that as a cancel, not as a broken install.
                 let cancelled = cancel_token.is_cancelled();
-                eprintln!(
-                    "voicewave: faster-whisper runtime not ready (cancelled={cancelled}): {err}"
+                tracing::warn!(
+                    "faster-whisper runtime not ready (cancelled={cancelled}): {err}"
                 );
                 self.model_download_cancels.lock().await.remove(&model_id);
                 let status = if cancelled {
@@ -2864,8 +2864,8 @@ impl VoiceWaveController {
                 Err(err) => {
                     let cancelled = cancel_token.is_cancelled();
                     self.model_download_cancels.lock().await.remove(&model_id);
-                    eprintln!(
-                        "voicewave: faster-whisper prefetch failed for {model_id} (cancelled={cancelled}): {err}"
+                    tracing::warn!(
+                        "faster-whisper prefetch failed for {model_id} (cancelled={cancelled}): {err}"
                     );
                     let status = if cancelled {
                         faster_whisper_cancelled_status(
@@ -2919,7 +2919,7 @@ impl VoiceWaveController {
                 Err(err) => {
                     // Emit a terminal status before returning, or onboarding
                     // sits on a frozen "downloading" bar with no Retry.
-                    eprintln!("voicewave: faster-whisper install failed for {model_id}: {err}");
+                    tracing::error!("faster-whisper install failed for {model_id}: {err}");
                     let (downloaded, progress) =
                         faster_whisper_download_progress(&model_id, expected_total_bytes);
                     let status = ModelStatus {
@@ -2952,12 +2952,12 @@ impl VoiceWaveController {
                 let warm_model_id = model_id.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(err) = prefetch_faster_whisper_model(&warm_model_id).await {
-                        eprintln!("voicewave: post-install warmup failed for {warm_model_id}: {err}");
+                        tracing::warn!("post-install warmup failed for {warm_model_id}: {err}");
                     }
                 });
             }
-            eprintln!(
-                "voicewave: installed {model_id} (load {} ms, cache hit {})",
+            tracing::info!(
+                "installed {model_id} (load {} ms, cache hit {})",
                 prefetch.model_init_ms, prefetch.runtime_cache_hit
             );
             let final_status = ModelStatus {
@@ -4010,7 +4010,7 @@ impl VoiceWaveController {
                 match captured {
                     Ok(rows) => rows,
                     Err(AudioError::Cancelled) => {
-                        eprintln!("voicewave: capture cancelled (session={session_id})");
+                        tracing::info!("capture cancelled (session={session_id})");
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -4027,7 +4027,7 @@ impl VoiceWaveController {
                         return Ok(());
                     }
                     Err(AudioError::NoSpeechDetected) => {
-                        eprintln!("voicewave: capture ended with no speech (session={session_id})");
+                        tracing::info!("capture ended with no speech (session={session_id})");
                         self.set_session_state(
                             session_id,
                             DictationLifecycleState::Idle,
@@ -4066,7 +4066,7 @@ impl VoiceWaveController {
                         return Ok(());
                     }
                     Err(err) => {
-                        eprintln!("voicewave: capture failed (session={session_id}): {err}");
+                        tracing::error!("capture failed (session={session_id}): {err}");
                         return Err(ControllerError::Audio(err));
                     }
                 }
@@ -4518,7 +4518,7 @@ impl VoiceWaveController {
                 ProtectionOutcome::NoMatch
             }
             Err(error) => {
-                eprintln!("voicewave: snippet protection skipped: {error}");
+                tracing::warn!("snippet protection skipped: {error}");
                 ProtectionOutcome::NoMatch
             }
         };
@@ -4569,7 +4569,7 @@ impl VoiceWaveController {
             if plan.validate_candidate(&deterministic_transcript).is_ok() {
                 deterministic_transcript
             } else {
-                eprintln!("voicewave: deterministic formatting changed a snippet slot; using protected baseline");
+                tracing::warn!("deterministic formatting changed a snippet slot; using protected baseline");
                 plan.protected_text().to_string()
             }
         } else {
@@ -4635,7 +4635,7 @@ impl VoiceWaveController {
         } else {
             restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript)
                 .unwrap_or_else(|error| {
-                    eprintln!("voicewave: snippet restoration failed before insertion: {error}");
+                    tracing::warn!("snippet restoration failed before insertion: {error}");
                     baseline_transcript.clone()
                 })
         };
@@ -4716,8 +4716,8 @@ impl VoiceWaveController {
                                                 inserted_text = restored;
                                             }
                                             Err(error) => {
-                                                eprintln!(
-                                                    "voicewave: {} polish changed a protected snippet slot ({error}); inserting deterministic floor",
+                                                tracing::info!(
+                                                    "{} polish changed a protected snippet slot ({error}); inserting deterministic floor",
                                                     polish_profile.as_str()
                                                 );
                                                 polish_meta.polish_outcome = Some(
@@ -4726,8 +4726,8 @@ impl VoiceWaveController {
                                             }
                                         },
                                         Err(reasons) => {
-                                            eprintln!(
-                                                "voicewave: {} polish rejected ({reasons:?}); inserting deterministic floor",
+                                            tracing::info!(
+                                                "{} polish rejected ({reasons:?}); inserting deterministic floor",
                                                 polish_profile.as_str()
                                             );
                                             polish_meta.polish_outcome =
@@ -5170,7 +5170,7 @@ impl VoiceWaveController {
                 decode_telemetry.fw_avg_logprob,
                 decode_telemetry.fw_no_speech_prob,
             ) {
-                eprintln!("stats record failed: {err}");
+                tracing::warn!("stats record failed: {err}");
             }
         }
         if settings.diagnostics_opt_in {
@@ -5280,11 +5280,11 @@ impl VoiceWaveController {
                             "voicewave://history-updated",
                             (),
                         ) {
-                            eprintln!("history-updated emit failed: {err}");
+                            tracing::warn!("history-updated emit failed: {err}");
                         }
                     }
                     Err(err) => {
-                        eprintln!("history record failed: {err}");
+                        tracing::warn!("history record failed: {err}");
                     }
                 }
             }
@@ -5298,11 +5298,11 @@ impl VoiceWaveController {
                         "voicewave://dictionary-queue-changed",
                         added,
                     ) {
-                        eprintln!("dictionary-queue-changed emit failed: {err}");
+                        tracing::warn!("dictionary-queue-changed emit failed: {err}");
                     }
                 }
                 Ok(_) => {}
-                Err(err) => eprintln!("dictionary ingest failed: {err}"),
+                Err(err) => tracing::warn!("dictionary ingest failed: {err}"),
             }
         });
 
@@ -5350,8 +5350,8 @@ impl VoiceWaveController {
             }
             // The only decision arm that used to be silent, and the one that
             // looks identical to a dead hotkey from the user's side.
-            PushPressDecision::Ignore => eprintln!(
-                "voicewave: push press ignored (session_state={:?})",
+            PushPressDecision::Ignore => tracing::info!(
+                "push press ignored (session_state={:?})",
                 session.state
             ),
             _ => {}

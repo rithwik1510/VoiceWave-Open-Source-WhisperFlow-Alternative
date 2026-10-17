@@ -229,11 +229,11 @@ impl VoiceWaveController {
                 // pending and is retried at the next launch.
                 self.set_active_model(app, model_id.clone()).await?;
                 clear_pending_upgrade();
-                eprintln!("voicewave: GPU upgrade complete, now dictating with {model_id}");
+                tracing::info!("GPU upgrade complete, now dictating with {model_id}");
             }
             Some(QualOutcome::Failed) => {
                 clear_pending_upgrade();
-                eprintln!("voicewave: GPU upgrade to {model_id} failed qualification; staying on faster-whisper");
+                tracing::warn!("GPU upgrade to {model_id} failed qualification; staying on faster-whisper");
             }
             _ => {}
         }

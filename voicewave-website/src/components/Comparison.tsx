@@ -32,7 +32,7 @@ const ROWS: CompareRow[] = [
   },
   {
     label: 'Works fully offline',
-    voicewave: { kind: 'yes' },
+    voicewave: { kind: 'yes', note: 'After a one-time model download' },
     wispr: { kind: 'no' },
     superwhisper: { kind: 'yes' },
     windows: { kind: 'no' }
@@ -105,7 +105,7 @@ export default function Comparison() {
           </h2>
           <p className="mt-4 max-w-xl text-base leading-relaxed text-[#475569] sm:text-lg">
             Wispr Flow and SuperWhisper are polished products. VoiceWave covers the
-            corner they don't: Windows, fully offline, free.
+            corner they don't: Windows, offline, free.
           </p>
         </div>
 

@@ -165,7 +165,7 @@ pub fn load_with_recovery<T, E: std::fmt::Display>(
     mut decode: impl FnMut(&str) -> Result<T, E>,
 ) -> StoreLoad<T> {
     if let Err(error) = recover_interrupted_replace(path) {
-        eprintln!("voicewave: could not finish an interrupted {label} write: {error}");
+        tracing::warn!("could not finish an interrupted {label} write: {error}");
     }
     let backup = sibling_with_suffix(path, ".bak");
 
@@ -180,17 +180,17 @@ pub fn load_with_recovery<T, E: std::fmt::Display>(
                 return StoreLoad::Loaded(value);
             }
             Err(error) => {
-                eprintln!("voicewave: {label} store did not decode: {error}");
+                tracing::warn!("{label} store did not decode: {error}");
             }
         },
         Ok(None) => {
             if !backup.exists() {
                 return StoreLoad::Missing;
             }
-            eprintln!("voicewave: {label} store is empty or zero-filled; trying its backup");
+            tracing::warn!("{label} store is empty or zero-filled; trying its backup");
         }
         Err(error) => {
-            eprintln!("voicewave: failed to read the {label} store: {error}");
+            tracing::warn!("failed to read the {label} store: {error}");
         }
     }
 
@@ -198,9 +198,9 @@ pub fn load_with_recovery<T, E: std::fmt::Display>(
         if let Ok(value) = decode(&raw) {
             let _ = fs::remove_file(path);
             match fs::rename(&backup, path) {
-                Ok(()) => eprintln!("voicewave: restored the {label} store from its backup"),
-                Err(error) => eprintln!(
-                    "voicewave: recovered {label} in memory but could not promote its backup: {error}"
+                Ok(()) => tracing::warn!("restored the {label} store from its backup"),
+                Err(error) => tracing::warn!(
+                    "recovered {label} in memory but could not promote its backup: {error}"
                 ),
             }
             return StoreLoad::Recovered(value);
@@ -210,18 +210,18 @@ pub fn load_with_recovery<T, E: std::fmt::Display>(
     let quarantined = match quarantine_corrupt(path) {
         Ok(target) => target,
         Err(error) => {
-            eprintln!("voicewave: could not quarantine the corrupt {label} store: {error}");
+            tracing::warn!("could not quarantine the corrupt {label} store: {error}");
             None
         }
     };
     let _ = fs::remove_file(&backup);
     note_store_reset(label);
     match quarantined {
-        Some(target) => eprintln!(
-            "voicewave: {label} was reset to defaults; the unreadable file is kept at '{}'",
+        Some(target) => tracing::warn!(
+            "{label} was reset to defaults; the unreadable file is kept at '{}'",
             target.display()
         ),
-        None => eprintln!("voicewave: {label} was reset to defaults"),
+        None => tracing::warn!("{label} was reset to defaults"),
     }
     StoreLoad::Reset
 }

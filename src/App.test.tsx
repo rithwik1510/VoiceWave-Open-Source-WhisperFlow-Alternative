@@ -185,6 +185,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Polish profiles live in Settings → Polish. */
+function openPolishSettings() {
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  const settingsDialog = screen.getByRole("dialog", { name: "Settings" });
+  fireEvent.click(within(settingsDialog).getByRole("button", { name: "Polish" }));
+}
+
 describe("App navigation and phase three panels", () => {
   it("advertises hands-free on the existing push-to-talk shortcut", () => {
     const runDictation = vi.fn();
@@ -199,12 +206,7 @@ describe("App navigation and phase three panels", () => {
     expect(runDictation).not.toHaveBeenCalled();
   });
 
-  it("shows Pro Tools navigation by default during the release offer", async () => {
-    render(<App />);
-    expect(screen.getByRole("button", { name: "Pro Tools" })).toBeInTheDocument();
-  });
-
-  it("shows Polish Profiles for pro users and selects Coding with one atomic call", async () => {
+  it("shows polish profiles in Settings and selects Coding with one atomic call", async () => {
     const setDictationProfile = vi.fn().mockResolvedValue(undefined);
     const setLlmPolishEnabled = vi.fn().mockResolvedValue(true);
     const setFormatProfile = vi.fn();
@@ -212,25 +214,6 @@ describe("App navigation and phase three panels", () => {
       .spyOn(hookModule, "useVoiceWave")
       .mockReturnValue(
         buildHookMock({
-          isPro: true,
-          entitlement: {
-            tier: "pro",
-            status: "pro_active",
-            isPro: true,
-            isOwnerOverride: false,
-            expiresAtUtcMs: null,
-            graceUntilUtcMs: null,
-            lastRefreshedAtUtcMs: 0,
-            plan: {
-              basePriceUsdMonthly: 4,
-              launchPriceUsdMonthly: 1.5,
-              launchMonths: 3,
-              displayBasePrice: "$4/mo",
-              displayLaunchPrice: "$1.50/mo",
-              offerCopy: "Launch offer: first 3 months at $1.50, then $4/month"
-            },
-            message: null
-          },
           setDictationProfile,
           setLlmPolishEnabled,
           setFormatProfile
@@ -238,8 +221,8 @@ describe("App navigation and phase three panels", () => {
       );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Pro Tools" }));
-    expect(screen.getByText("Polish Profiles")).toBeInTheDocument();
+    openPolishSettings();
+    expect(screen.getByText("Polish profile")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Standard/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Coding/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Writing/ })).toBeInTheDocument();
@@ -277,7 +260,6 @@ describe("App navigation and phase three panels", () => {
       .spyOn(hookModule, "useVoiceWave")
       .mockReturnValue(
         buildHookMock({
-          isPro: true,
           setDictationProfile,
           setFormatProfile,
           setDomainPacks,
@@ -288,7 +270,7 @@ describe("App navigation and phase three panels", () => {
       );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Pro Tools" }));
+    openPolishSettings();
     fireEvent.click(screen.getByRole("button", { name: /^Coding/ }));
 
     await waitFor(() => {
@@ -624,44 +606,6 @@ describe("App navigation and phase three panels", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close Style" }));
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
     expect(screen.getByRole("dialog", { name: "Help" })).toBeInTheDocument();
-  });
-
-  it("opens profile and auth overlays from the workspace menu while keeping guest access available", async () => {
-    render(<App />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Open workspace menu" }));
-    const workspaceMenu = screen.getByRole("menu", { name: "Workspace menu" });
-    fireEvent.click(within(workspaceMenu).getByRole("menuitem", { name: "Profile" }));
-
-    const profileDialog = screen.getByRole("dialog", { name: "Profile" });
-    expect(within(profileDialog).getByText("Guest Workspace")).toBeInTheDocument();
-
-    fireEvent.click(within(profileDialog).getByRole("button", { name: "Sign In / Sign Up" }));
-    const authDialog = screen.getByRole("dialog", { name: "Sign In / Sign Up" });
-    expect(within(authDialog).getByRole("button", { name: "Continue as Guest" })).toBeInTheDocument();
-
-    fireEvent.click(within(authDialog).getByRole("button", { name: "Continue as Guest" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Sign In / Sign Up" })).not.toBeInTheDocument();
-    });
-  });
-
-  it("applies demo sign-in locally and reflects account details in profile", async () => {
-    render(<App />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Open workspace menu" }));
-    const workspaceMenu = screen.getByRole("menu", { name: "Workspace menu" });
-    fireEvent.click(within(workspaceMenu).getByRole("menuitem", { name: "Sign In" }));
-
-    const authDialog = screen.getByRole("dialog", { name: "Sign In / Sign Up" });
-    fireEvent.change(within(authDialog).getByLabelText("Email"), { target: { value: "alex@voicewave.app" } });
-    fireEvent.change(within(authDialog).getByLabelText("Password"), { target: { value: "pass-1234" } });
-    fireEvent.click(within(authDialog).getByRole("button", { name: "Sign In" }));
-
-    await waitFor(() => {
-      const profileDialog = screen.getByRole("dialog", { name: "Profile" });
-      expect(within(profileDialog).getByText("alex@voicewave.app")).toBeInTheDocument();
-    });
   });
 
   it("collapses and expands the sidebar shell", async () => {

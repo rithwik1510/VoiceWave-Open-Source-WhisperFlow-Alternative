@@ -312,33 +312,6 @@ body {
   transform: scale(0.6);
 }
 
-.vw-sidebar-pro-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.vw-sidebar-pro-wrap-inner {
-  min-height: 0;
-  overflow: hidden;
-  padding: 0 1rem 1rem;
-  opacity: 1;
-  transform: translateY(0);
-  transition:
-    opacity 220ms ease,
-    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.vw-sidebar-shell[data-sidebar-collapsed="true"] .vw-sidebar-pro-wrap {
-  grid-template-rows: 0fr;
-}
-
-.vw-sidebar-shell[data-sidebar-collapsed="true"] .vw-sidebar-pro-wrap-inner {
-  opacity: 0;
-  transform: translateY(-8px);
-  pointer-events: none;
-}
-
 .vw-sidebar-divider-wrap {
   padding: 0 1.5rem 0.75rem;
   opacity: 1;
@@ -351,13 +324,6 @@ body {
   padding: 0 0.25rem 0.25rem;
   opacity: 0;
   pointer-events: none;
-}
-
-.vw-sidebar-pro-panel {
-  border: 1px solid var(--vw-color-border);
-  border-radius: var(--vw-radius-lg);
-  background: var(--vw-color-surface);
-  box-shadow: var(--vw-shadow-card);
 }
 
 /* ------------------------------------------------------------- typography */
@@ -1082,26 +1048,6 @@ body {
   background: var(--vw-color-row-hover);
 }
 
-.vw-mode-card {
-  border-color: var(--vw-color-border);
-  background: var(--vw-color-surface);
-  box-shadow: var(--vw-shadow-card);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-
-.vw-mode-card:hover:not(:disabled) {
-  border-color: var(--vw-color-border-strong);
-}
-
-.vw-mode-card:disabled {
-  cursor: default;
-}
-
-.vw-pro-mode-card-active {
-  border-color: rgba(27, 142, 255, 0.6) !important;
-  box-shadow: inset 0 0 0 1px rgba(27, 142, 255, 0.5), 0 8px 20px -12px rgba(27, 142, 255, 0.45);
-}
-
 .vw-mode-status-chip {
   min-width: 64px;
   justify-content: center;
@@ -1338,50 +1284,9 @@ body {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--vw-state-accent, var(--vw-state-idle-accent)) 16%, transparent);
 }
 
-/* ---------------------------------------------------------------- pro tab */
+/* --------------------------------------------------------------- icon tile */
 
-.vw-pro-badge {
-  border: 1px solid var(--vw-color-border);
-  background: var(--vw-color-surface-subtle);
-  color: var(--vw-color-text-label);
-}
-
-.vw-pro-badge-active {
-  border: 1px solid rgba(27, 142, 255, 0.55);
-  background: var(--vw-cta-gradient);
-  color: var(--vw-on-accent);
-}
-
-.vw-pro-minimal-grid {
-  display: grid;
-  gap: 0.6rem;
-}
-
-.vw-pro-minimal-grid > * {
-  animation: vw-list-item-in 240ms cubic-bezier(0.22, 0.84, 0.24, 1) both;
-}
-
-.vw-pro-minimal-grid > *:nth-child(2) {
-  animation-delay: 30ms;
-}
-
-.vw-pro-minimal-grid > *:nth-child(3) {
-  animation-delay: 60ms;
-}
-
-.vw-pro-minimal-card {
-  display: flex;
-  min-height: 104px;
-  flex-direction: column;
-  justify-content: center;
-  gap: 0.15rem;
-  border: 1px solid var(--vw-color-border);
-  border-radius: var(--vw-radius-lg);
-  padding: 0.9rem;
-  background: var(--vw-color-surface);
-  box-shadow: var(--vw-shadow-card);
-}
-
+/* Small blue-tinted icon tile (update prompt). */
 .vw-pro-minimal-icon {
   display: inline-flex;
   height: 1.95rem;
@@ -1393,12 +1298,6 @@ body {
   background: var(--vw-accent-soft-gradient);
   color: var(--vw-ink);
   margin-bottom: 0.45rem;
-}
-
-@media (min-width: 980px) {
-  .vw-pro-minimal-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 /* -------------------------------------------------------------- keyframes */
@@ -1450,13 +1349,11 @@ body {
   .vw-modal-card,
   .vw-page-shell > *,
   .vw-list-stagger > *,
-  .vw-pro-minimal-grid > *,
   .vw-ring-shell::before {
     animation: none;
   }
 
   .vw-interactive-row,
-  .vw-mode-card,
   .vw-switch-track,
   .vw-switch-track::after {
     transition: none;
@@ -1464,8 +1361,6 @@ body {
 
   .vw-sidebar-shell,
   .vw-sidebar-shell .vw-nav-label,
-  .vw-sidebar-pro-wrap,
-  .vw-sidebar-pro-wrap-inner,
   .vw-sidebar-divider-wrap {
     transition: none !important;
     transform: none !important;

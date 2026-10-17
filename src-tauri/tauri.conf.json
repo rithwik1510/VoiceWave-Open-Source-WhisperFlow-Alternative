@@ -54,7 +54,8 @@
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "startMenuFolder": "VoiceWave"
+        "startMenuFolder": "VoiceWave",
+        "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
         "language": "en-US"

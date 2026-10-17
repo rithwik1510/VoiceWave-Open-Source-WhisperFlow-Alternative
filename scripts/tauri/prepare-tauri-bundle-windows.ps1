@@ -105,6 +105,9 @@ if (-not (Test-TruthyValue $env:VOICEWAVE_SKIP_EMBEDDED_RUNTIME)) {
   if (-not (Test-Path $runtimePython)) {
     throw "Embedded faster-whisper runtime is still missing at $runtimePython after build."
   }
+  # Idempotent: guarantees the installer never ships an unpruned runtime that
+  # was staged (or restored from a cache) before the current prune rules.
+  & (Join-Path $PSScriptRoot "..\faster_whisper\prune-embedded-runtime.ps1") -PythonDir (Split-Path $runtimePython -Parent)
 }
 
 $resourceDir = Join-Path $repoRoot "src-tauri\windows"

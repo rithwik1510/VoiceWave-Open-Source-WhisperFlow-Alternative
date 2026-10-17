@@ -200,7 +200,7 @@ pub fn prewarm() {
     }
     if let Ok(mut supervisor) = service().lock() {
         if let Err(err) = supervisor.prewarm() {
-            eprintln!("voicewave: cue prewarm deferred: {err}");
+            tracing::info!("cue prewarm deferred: {err}");
         }
     }
 }
@@ -212,10 +212,10 @@ pub fn play(cue: CueSound) {
     match service().lock() {
         Ok(mut supervisor) => {
             if let Err(err) = supervisor.play(cue) {
-                eprintln!("voicewave: cue playback unavailable after recovery: {err}");
+                tracing::warn!("cue playback unavailable after recovery: {err}");
             }
         }
-        Err(_) => eprintln!("voicewave: cue supervisor lock is poisoned"),
+        Err(_) => tracing::error!("cue supervisor lock is poisoned"),
     }
 }
 
@@ -370,7 +370,7 @@ fn audio_thread(
         let healthy = Arc::clone(&healthy);
         move |err| {
             healthy.store(false, Ordering::Release);
-            eprintln!("voicewave: cue output stream error: {err}");
+            tracing::warn!("cue output stream error: {err}");
         }
     };
     let stream = match sample_format {

@@ -1,22 +1,21 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, Check, Copy } from 'lucide-react'
+import { ArrowRight, ArrowUpRight } from 'lucide-react'
 import { windowsDownloadUrl } from '../config/download'
+import { GITHUB_REPO_URL } from '../config/site'
 import { useGitHubStats } from '../lib/useGitHubStats'
 import HeroDottedField, { type HeroSafeZone } from './HeroDottedField'
 
-const WINGET_COMMAND = 'winget install VoiceWave.LocalCore'
-
 const HERO_SUBTEXTS = [
   'Built for fast on-device dictation. No cloud path. Your words stay local.',
-  'Press. Speak. Release. Text appears in your active app in under 2 seconds.',
-  'Whisper runs on your CPU or GPU. Your audio never leaves this machine.',
+  'Press. Speak. Release. Text appears in your active app.',
+  'Whisper runs on your own CPU or GPU. Your audio never leaves this machine.',
   'Hold to talk. Release to insert. Local by design, fast by default.',
 ]
 
 // Short positioning markers under the subtext. Keeping this brand-forward
 // (not metric-forward) so the hero reads as a product, not a spec sheet.
-const HERO_POINTS = ['Windows', 'Free preview', 'Offline-first']
+const HERO_POINTS = ['Windows', 'Free', 'Open source']
 
 export default function Hero() {
   const { installerUrl } = useGitHubStats()
@@ -25,19 +24,6 @@ export default function Hero() {
   const copyStackRef = useRef<HTMLDivElement | null>(null)
   const [safeZone, setSafeZone] = useState<HeroSafeZone | null>(null)
   const [topCutoffPx, setTopCutoffPx] = useState(0)
-  const [wingetCopied, setWingetCopied] = useState(false)
-
-  const copyWingetCommand = async () => {
-    try {
-      await navigator.clipboard.writeText(WINGET_COMMAND)
-      setWingetCopied(true)
-      window.setTimeout(() => setWingetCopied(false), 1800)
-    } catch {
-      // Clipboard API unavailable (very old browsers / iframe). Silent fall-through;
-      // user can still select-and-copy from the visible text.
-    }
-  }
-
   useEffect(() => {
     const heroSection = heroSectionRef.current
     const copyStack = copyStackRef.current
@@ -183,28 +169,21 @@ export default function Hero() {
             <ArrowRight className="ml-2 h-3.5 w-3.5" />
           </a>
 
-          <button
-            type="button"
-            onClick={copyWingetCommand}
-            aria-label={
-              wingetCopied
-                ? 'winget command copied to clipboard'
-                : `Copy winget install command: ${WINGET_COMMAND}`
-            }
-            className="hero-winget-strip pointer-events-auto mt-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 backdrop-blur-sm transition-colors duration-200 hover:border-white/30 hover:bg-white/[0.1] sm:gap-2.5 sm:px-4"
+          <a
+            href={GITHUB_REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            data-goatcounter-click="github-hero"
+            className="hero-secondary-strip pointer-events-auto mt-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 backdrop-blur-sm transition-colors duration-200 hover:border-white/30 hover:bg-white/[0.1] sm:gap-2.5 sm:px-4"
           >
             <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-[#9fbedd] sm:text-[10px]">
               or
             </span>
-            <code className="font-mono text-[11px] font-medium text-[#e6f1ff] sm:text-xs">
-              {WINGET_COMMAND}
-            </code>
-            {wingetCopied ? (
-              <Check className="h-3 w-3 text-[#bef264]" aria-hidden="true" />
-            ) : (
-              <Copy className="h-3 w-3 text-[#9fbedd]" aria-hidden="true" />
-            )}
-          </button>
+            <span className="font-mono text-[11px] font-medium text-[#e6f1ff] sm:text-xs">
+              Read the source on GitHub
+            </span>
+            <ArrowUpRight className="h-3 w-3 text-[#9fbedd]" aria-hidden="true" />
+          </a>
         </div>
       </div>
     </section>

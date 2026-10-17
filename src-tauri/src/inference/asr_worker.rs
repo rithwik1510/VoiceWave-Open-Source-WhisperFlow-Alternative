@@ -392,8 +392,8 @@ fn kill_and_reap(child: &mut Child) {
         match child.try_wait() {
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                eprintln!(
-                    "voicewave: asr worker pid {pid} still running {} ms after kill",
+                tracing::warn!(
+                    "asr worker pid {pid} still running {} ms after kill",
                     REAP_WAIT.as_millis()
                 );
                 return;
@@ -502,8 +502,13 @@ impl WorkerProcess {
             let Some(line) = self.next_line(until, &command)? else {
                 continue;
             };
+            // Replies carry transcript text, and fault reasons reach the log,
+            // gpu-engine.json and the diagnostics export: report sizes only.
             let reply: Value = serde_json::from_str(line.trim()).map_err(|_| {
-                Fault::worker(ErrorClass::Protocol, format!("unparseable reply: {line}"))
+                Fault::worker(
+                    ErrorClass::Protocol,
+                    format!("unparseable reply ({} bytes)", line.len()),
+                )
             })?;
             let reply_id = reply.get("id").and_then(Value::as_u64);
             if reply_id.is_some() && reply_id == cancel_id {
@@ -512,7 +517,7 @@ impl WorkerProcess {
             if reply_id != Some(id) {
                 return Err(Fault::worker(
                     ErrorClass::Protocol,
-                    format!("reply id mismatch (expected {id}): {line}"),
+                    format!("reply id mismatch (expected {id}, got {reply_id:?})"),
                 ));
             }
             if reply.get("ok") == Some(&Value::Bool(true)) {
@@ -629,8 +634,8 @@ fn ensure_spawned(
         }
         // Found dead while idle (sleep/resume, driver reset): respawn
         // lazily, not a failure.
-        eprintln!(
-            "voicewave: {} speech worker found dead while idle; respawning",
+        tracing::warn!(
+            "{} speech worker found dead while idle; respawning",
             rung.dir_name()
         );
         *guard = None;
@@ -939,7 +944,10 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
         return;
     };
     if *class == ErrorClass::Protocol {
-        eprintln!("voicewave: speech worker protocol error (worker bug): {}", trim_reason(reason));
+        tracing::error!(
+            "speech worker protocol error (worker bug): {}",
+            trim_reason(reason)
+        );
     }
     if *class != ErrorClass::Backend || (background_load && *timed_out) {
         return;
@@ -952,8 +960,8 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
         }
         session.gpu_failures = 0;
         session.gpu_cooldown_until = Some(Instant::now() + GPU_COOLDOWN);
-        eprintln!(
-            "voicewave: GPU speech worker failed twice in a row; using CPU for {} min",
+        tracing::warn!(
+            "GPU speech worker failed twice in a row; using CPU for {} min",
             GPU_COOLDOWN.as_secs() / 60
         );
     }
@@ -961,8 +969,8 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
     // per session must never turn the GPU off for a week.
     if let Some(device) = hardware_profile().gpu {
         if gpu_select::record_backend_failure(&device) {
-            eprintln!(
-                "voicewave: GPU failed in two sessions on driver {}; disabled for 7 days or until an update",
+            tracing::warn!(
+                "GPU failed in two sessions on driver {}; disabled for 7 days or until an update",
                 device.driver_version
             );
         }
@@ -1062,8 +1070,8 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
     let started = Instant::now();
     let result = ensure_loaded(&mut guard, rung, &model.path, deadline);
     match &result {
-        Ok((_, false)) => eprintln!(
-            "voicewave: {} speech worker ready in {} ms",
+        Ok((_, false)) => tracing::info!(
+            "{} speech worker ready in {} ms",
             rung.dir_name(),
             started.elapsed().as_millis()
         ),
@@ -1403,7 +1411,7 @@ async fn faster_whisper_baseline(runtime_model: &str, clips: &[QualifyClip]) -> 
         {
             Ok(output) => times.push(output.decode_compute_ms),
             Err(err) => {
-                eprintln!("voicewave: qualification skipped the faster-whisper comparison: {err}");
+                tracing::warn!("qualification skipped the faster-whisper comparison: {err}");
                 return None;
             }
         }
@@ -1455,8 +1463,8 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
         session.qualifying = Some(key.clone());
     }
     let _heavy = super::HEAVY_LOAD.lock().await;
-    eprintln!(
-        "voicewave: qualifying '{}' on '{}' (first GPU use can take up to a minute)",
+    tracing::info!(
+        "qualifying '{}' on '{}' (first GPU use can take up to a minute)",
         model.id, device.name
     );
 
@@ -1515,8 +1523,8 @@ pub async fn qualify(model: AsrModel, fw_baseline: Option<String>) -> Option<Qua
             trim_reason(&format!("{}{reason}", gpu_select::INCONCLUSIVE_PREFIX)),
         ),
     };
-    eprintln!(
-        "voicewave: qualification {outcome:?} for '{}' on '{}' (load {} ms, clips {:?}/{:?} ms): {detail}",
+    tracing::info!(
+        "qualification {outcome:?} for '{}' on '{}' (load {} ms, clips {:?}/{:?} ms): {detail}",
         model.id, device.name, timings.load_ms, timings.short_ms, timings.long_ms
     );
     gpu_select::record_qualification(QualificationRecord {
@@ -1642,8 +1650,8 @@ pub(crate) async fn wait_for_gpu_check(
             return (rung, step_down);
         }
         if !preparing || started.elapsed() >= GPU_CHECK_WAIT {
-            eprintln!(
-                "voicewave: dictation waited {} ms for the GPU check; decoding on the {} worker",
+            tracing::info!(
+                "dictation waited {} ms for the GPU check; decoding on the {} worker",
                 started.elapsed().as_millis(),
                 rung.dir_name()
             );

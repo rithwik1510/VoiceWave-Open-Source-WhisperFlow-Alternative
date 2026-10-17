@@ -44,7 +44,7 @@ export default function WhereItWorks() {
             Works Where You Write
           </p>
           <p className="mt-4 text-pretty text-[clamp(1.05rem,1.6vw,1.28rem)] leading-relaxed text-[#2a4261] sm:mt-5">
-            One hotkey. No setup. Just speak.
+            One hotkey. Any app. Just speak.
           </p>
         </div>
       </div>

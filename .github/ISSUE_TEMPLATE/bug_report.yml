@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in VoiceWave is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. **Please don't paste anything you dictated that is private** (messages, passwords, names). Describe the problem instead, or use made-up text.
+
+        Opened this from the app (Help → Report a problem)? The version, Windows and engine fields below are already filled in.
+  - type: input
+    id: version
+    attributes:
+      label: VoiceWave version
+      placeholder: "0.7.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 Home 24H2 (build 26100.1234)"
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Speech engine (Settings → Running on…)
+      placeholder: "e.g. GPU (NVIDIA GeForce RTX 3060) or CPU"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence that triggers it, if you know one.
+      placeholder: |
+        1. Hold the dictation hotkey in Notepad
+        2. Say a short sentence
+        3. ...
+  - type: markdown
+    attributes:
+      value: |
+        ### Attach logs (recommended)
+
+        These two files make most bugs fixable. Drag them into a comment box on this issue.
+
+        - **Log files:** Help → Report a problem → **Open logs folder**, then attach the newest `voicewave.*.log`. Logs record what the app did (timings, errors, engine choices). They never contain what you dictated.
+        - **Diagnostics bundle:** Settings → Diagnostics, turn diagnostics on, then **Export Diagnostics Bundle** and attach the exported file.

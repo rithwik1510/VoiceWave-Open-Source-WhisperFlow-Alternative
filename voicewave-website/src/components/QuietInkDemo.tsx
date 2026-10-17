@@ -2,7 +2,6 @@ import { motion, useReducedMotion } from 'framer-motion'
 import {
   BarChart3,
   Cpu,
-  Crown,
   FileText,
   HelpCircle,
   History,
@@ -31,7 +30,6 @@ type Pane =
   | 'dictionary'
   | 'sessions'
   | 'stats'
-  | 'pro'
   | 'style'
   | 'settings'
   | 'help'
@@ -85,8 +83,7 @@ const NAV_ITEMS_TOP: Array<{ id: Pane; label: string; icon: typeof Home }> = [
   { id: 'models', label: 'Models', icon: Cpu },
   { id: 'dictionary', label: 'Dictionary', icon: FileText },
   { id: 'sessions', label: 'History', icon: History },
-  { id: 'stats', label: 'Stats', icon: BarChart3 },
-  { id: 'pro', label: 'Pro', icon: Crown }
+  { id: 'stats', label: 'Stats', icon: BarChart3 }
 ]
 
 const NAV_ITEMS_BOTTOM: Array<{ id: Pane; label: string; icon: typeof Home }> = [
@@ -284,7 +281,7 @@ export default function QuietInkDemo() {
               <h3 className="font-['Fraunces'] text-2xl text-[#09090B]">{statusMeta.title}</h3>
               <p className="mt-1 text-sm text-[#475569]">{statusMeta.hint}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <p className="text-xs uppercase tracking-[0.16em] text-[#71717A]">Model: fw-small.en</p>
+                <p className="text-xs uppercase tracking-[0.16em] text-[#71717A]">Model: Small · CPU</p>
                 <span className={`vw-home-state-badge ${stateClass}`}>{statusMeta.badge}</span>
               </div>
             </div>
@@ -430,11 +427,11 @@ export default function QuietInkDemo() {
   )
 
   const renderModels = () => (
-    <QuietPane kicker="On-device Models" heading="Model Manager" sub="Checksum-verified downloads. Everything runs on this machine.">
+    <QuietPane kicker="On-device Models" heading="Model Manager" sub="Each model downloads once. Everything runs on this machine.">
       <div className="vw-row-list">
         {[
-          { name: 'fw-small.en', desc: 'Fast on any CPU', size: '488 MB', chip: 'Active', active: true },
-          { name: 'fw-large-v3-turbo', desc: 'Highest accuracy, GPU recommended', size: '1.6 GB', chip: 'Download', active: false }
+          { name: 'Small · CPU', desc: 'Fast on any CPU', size: '488 MB', chip: 'Active', active: true },
+          { name: 'Large Turbo · GPU', desc: 'Highest accuracy on a discrete GPU', size: '1.6 GB', chip: 'Download', active: false }
         ].map((model) => (
           <div key={model.name} className="flex items-center justify-between gap-4 px-5 py-4">
             <div>
@@ -532,12 +529,6 @@ export default function QuietInkDemo() {
         return renderSessions()
       case 'stats':
         return renderStats()
-      case 'pro':
-        return renderSimple('VoiceWave Pro', 'Power features', [
-          ['Format profiles', 'Included'],
-          ['Code mode', 'Included'],
-          ['Power history tools', 'Included']
-        ])
       case 'style':
         return renderSimple('Style', 'Formatting', [
           ['AI polish', 'Opt-in, on-device'],
@@ -657,20 +648,6 @@ export default function QuietInkDemo() {
                 </nav>
 
                 <div className="flex-1" />
-
-                <div className={`vw-sidebar-pro-wrap ${collapsed ? 'is-collapsed' : ''}`}>
-                  <div className="vw-sidebar-pro-wrap-inner">
-                    <div className="vw-sidebar-pro-panel p-4">
-                      <span className="vw-pro-badge rounded px-2 py-0.5 text-[10px] font-bold uppercase">Pro</span>
-                      <p className="mb-3 mt-2.5 text-xs leading-relaxed text-[#52525B]">
-                        The release offer unlocks every Pro tool for coders and students.
-                      </p>
-                      <button className="vw-btn-primary vw-btn-sm w-full" type="button" onClick={() => setPane('pro')}>
-                        View Release Offer
-                      </button>
-                    </div>
-                  </div>
-                </div>
 
                 <div className="vw-sidebar-divider-wrap">
                   <div className="mx-1 h-px border-t border-[#D4D4D8]" />

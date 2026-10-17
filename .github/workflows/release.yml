@@ -9,6 +9,14 @@ name: Release (build, sign, publish auto-update)
 #   TAURI_SIGNING_PRIVATE_KEY           contents of src-tauri/.tauri/voicewave-updater.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the key password ("" if generated with --ci)
 #   WINGET                               classic PAT with public_repo (for winget-pkgs PR)
+#
+# Optional repo secrets (Windows Authenticode signing via Azure Trusted Signing;
+# the build is unsigned and these steps are skipped unless ALL six are set;
+# setup in docs/code-signing.md):
+#   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET   service principal
+#   AZURE_TRUSTED_SIGNING_ENDPOINT   e.g. https://eus.codesigning.azure.net
+#   AZURE_TRUSTED_SIGNING_ACCOUNT    Trusted Signing account name
+#   AZURE_TRUSTED_SIGNING_PROFILE    certificate profile name
 on:
   release:
     types: [released]
@@ -98,8 +106,10 @@ jobs:
           # pip install (~400 MB) is otherwise reused across release runs.
           # The wheelhouse MUST be part of the key: the llama-cpp-python wheel
           # is baked into the runtime, so swapping the wheel without touching
-          # the script would otherwise restore a stale runtime forever.
-          key: fw-runtime-${{ runner.os }}-${{ hashFiles('scripts/faster_whisper/embedded-runtime-requirements.txt', 'scripts/faster_whisper/build-embedded-runtime.ps1', 'scripts/llm-polish/wheelhouse/*.whl') }}
+          # the script would otherwise restore a stale runtime forever. The
+          # prune script is part of the key for the same reason: it decides
+          # what the cached (already pruned) tree contains.
+          key: fw-runtime-${{ runner.os }}-${{ hashFiles('scripts/faster_whisper/embedded-runtime-requirements.txt', 'scripts/faster_whisper/build-embedded-runtime.ps1', 'scripts/faster_whisper/prune-embedded-runtime.ps1', 'scripts/llm-polish/wheelhouse/*.whl') }}
 
       - name: Build embedded faster-whisper runtime (CPU)
         if: steps.cache-fw-runtime.outputs.cache-hit != 'true'
@@ -157,7 +167,40 @@ jobs:
           if ($hash -ne "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f") { throw "ggml-tiny.en.bin hash mismatch: $hash" }
           ./scripts/asr-worker/smoke-asr-worker.ps1 -ModelPath $model
 
-      - name: Build signed installer + updater artifacts
+      # Windows Authenticode signing (separate from the Tauri updater key).
+      # A no-op until every Azure Trusted Signing secret exists; see
+      # docs/code-signing.md. When enabled, a Tauri config override sets
+      # bundle.windows.signCommand, so Tauri signs the app exe and the NSIS
+      # installer, and computes the updater .sig over the final SIGNED installer.
+      - name: Configure code signing (skipped without Azure secrets)
+        id: codesign
+        shell: pwsh
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          $required = "AZURE_TRUSTED_SIGNING_ENDPOINT", "AZURE_TRUSTED_SIGNING_ACCOUNT", "AZURE_TRUSTED_SIGNING_PROFILE", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) {
+            Write-Host "Code signing not configured (missing: $($missing -join ', ')). Building an UNSIGNED installer."
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            return
+          }
+          # trusted-signing-cli authenticates from AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET.
+          cargo install trusted-signing-cli --locked
+          if ($LASTEXITCODE -ne 0) { throw "trusted-signing-cli install failed" }
+          $signCommand = "trusted-signing-cli -e $env:AZURE_TRUSTED_SIGNING_ENDPOINT -a $env:AZURE_TRUSTED_SIGNING_ACCOUNT -c $env:AZURE_TRUSTED_SIGNING_PROFILE -d VoiceWave %1"
+          $config = Join-Path $env:RUNNER_TEMP "tauri.signing.conf.json"
+          @{ bundle = @{ windows = @{ signCommand = $signCommand } } } | ConvertTo-Json -Depth 5 | Set-Content -Path $config -Encoding utf8
+          "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "config=$config" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Code signing enabled via Azure Trusted Signing."
+
+      - name: Build installer + updater artifacts
         shell: pwsh
         env:
           # The wrapper prepends this dir to PATH so the bundle step finds the
@@ -165,7 +208,26 @@ jobs:
           VOICEWAVE_MINGW_BIN: C:\msys64\mingw64\bin
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- --bundles nsis
+          # Read by trusted-signing-cli when Tauri invokes signCommand.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SIGNING_CONFIG: ${{ steps.codesign.outputs.config }}
+        run: |
+          $signingArgs = @()
+          if ($env:SIGNING_CONFIG) { $signingArgs = @("--config", $env:SIGNING_CONFIG) }
+          npm run tauri:build -- --bundles nsis @signingArgs
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+
+      - name: Verify installer is Authenticode-signed
+        if: steps.codesign.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "$env:VIBE_SAFE_TARGET_DIR" -Recurse -Filter "*_x64-setup.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $sig = Get-AuthenticodeSignature -FilePath $exe.FullName
+          if ($sig.Status -ne "Valid") { throw "Installer signature is '$($sig.Status)', expected Valid: $($exe.FullName)" }
+          Write-Host "Installer signed by: $($sig.SignerCertificate.Subject)"
 
       - name: Verify bundled C++ runtime
         shell: pwsh

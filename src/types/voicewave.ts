@@ -69,8 +69,9 @@ export interface VoiceWaveSettings {
   releaseTailMs: number;
   decodeMode: DecodeMode;
   diagnosticsOptIn: boolean;
-  /** Two content-free analytics events: first successful dictation and
-   * once-per-day activity. On by default; the user can turn it off. */
+  /** Content-free analytics: first successful dictation, once-per-day
+   * activity, and the setup/reliability funnel (src/lib/telemetry.ts). On by
+   * default; the user can turn it off. */
   anonymousUsageOptIn: boolean;
   /** Analytics disclosure revision the user has seen (0 = never). Below
    * ANALYTICS_CONSENT_VERSION after onboarding, the app asks once. */
@@ -193,6 +194,11 @@ export interface LatencyBreakdownEvent {
   backendRequested: string;
   backendUsed: string;
   backendFallback: boolean;
+  /** Why this dictation did not run on the graphics card when it should have
+   * ("gpu-preparing: …", "gpu-cooldown: …", "driver-disabled: …", other
+   * unavailable reasons, or the fault text when the GPU attempt failed and the
+   * CPU retried it). Null when it ran where expected; absent on older cores. */
+  asrStepDownReason?: string | null;
   holdToFirstDraftMs: number;
   incrementalDecodeMs: number;
   releaseFinalizeMs: number;
@@ -237,6 +243,13 @@ export interface DiagnosticsStatus {
   lastExportPath: string | null;
   lastExportedAtUtcMs: number | null;
   watchdogRecoveryCount: number;
+}
+
+/** `get_support_context`: what a "Report a problem" issue is pre-filled with. */
+export interface SupportContext {
+  appVersion: string;
+  osVersion: string;
+  logDir: string;
 }
 
 export interface DiagnosticsExportResult {

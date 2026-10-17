@@ -65,14 +65,14 @@ try {
   & $cargoExe +stable-x86_64-pc-windows-gnu test --no-default-features
   if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
 
-  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --bin phase1_harness -- benchmark --runs $BenchmarkRuns --out "../docs/phase1/phase1-latency-baseline.json"
+  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --example phase1_harness -- benchmark --runs $BenchmarkRuns --out "../docs/phase1/phase1-latency-baseline.json"
   if ($LASTEXITCODE -ne 0) { throw "benchmark harness failed" }
 
-  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --bin phase1_harness -- stability --sessions $StabilitySessions --out "../docs/phase1/phase1-stability-200.json"
+  & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --example phase1_harness -- stability --sessions $StabilitySessions --out "../docs/phase1/phase1-stability-200.json"
   if ($LASTEXITCODE -ne 0) { throw "stability harness failed" }
 
   if ($RunSustained) {
-    & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --bin phase1_harness -- sustained --minutes $SustainedMinutes --out "../docs/phase1/phase1-sustained-30m.json"
+    & $cargoExe +stable-x86_64-pc-windows-gnu run --no-default-features --example phase1_harness -- sustained --minutes $SustainedMinutes --out "../docs/phase1/phase1-sustained-30m.json"
     if ($LASTEXITCODE -ne 0) { throw "sustained harness failed" }
   }
 }

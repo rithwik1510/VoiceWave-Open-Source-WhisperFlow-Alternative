@@ -51,6 +51,13 @@ export interface ThemeConfig {
 
 export type DictationState = "idle" | "listening" | "transcribing" | "inserted" | "error";
 
+/** Full pages in the main canvas. */
+export type PageId = "home" | "models" | "dictionary" | "snippets" | "sessions" | "stats";
+/** Panels that open as overlays above the current page. "profile" and "auth"
+ * only exist in builds with cloud sync configured. */
+export type OverlayId = "style" | "settings" | "help" | "profile" | "auth";
+export type NavId = PageId | OverlayId;
+
 export interface SessionData {
   id: string;
   title: string;
