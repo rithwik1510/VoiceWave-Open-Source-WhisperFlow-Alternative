@@ -18,6 +18,8 @@ mod secure_store;
 pub mod settings;
 pub mod snippet;
 pub mod stats;
+#[cfg(feature = "desktop")]
+mod support;
 pub mod transcript;
 
 #[cfg(feature = "desktop")]
@@ -352,7 +354,7 @@ fn ensure_pill_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, St
             let still_unfocused = pill.is_focused().map(|focused| !focused).unwrap_or(true);
             if still_same_session && still_unfocused {
                 if let Err(err) = dismiss_pill_quick_controls_spike_if_open(&app) {
-                    eprintln!("voicewave: failed to close unfocused Quick Controls: {err}");
+                    tracing::warn!("failed to close unfocused Quick Controls: {err}");
                 }
             }
         });
@@ -364,7 +366,7 @@ fn ensure_pill_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, St
         PILL_WINDOW_COMPACT_HEIGHT,
         PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
     ) {
-        eprintln!("voicewave: initial pill positioning deferred: {err}");
+        tracing::warn!("initial pill positioning deferred: {err}");
     }
     Ok(window)
 }
@@ -618,7 +620,7 @@ fn initialize_pill_hit_target(app: &tauri::AppHandle, visible: bool) -> Result<(
             true,
             PillQuickControlsInvocation::Mouse,
         ) {
-            eprintln!("voicewave: native pill click failed to open Quick Controls: {err}");
+            tracing::warn!("native pill click failed to open Quick Controls: {err}");
             let _ = show_pill_hit_target(&click_app);
         }
     })?;
@@ -631,7 +633,7 @@ fn initialize_pill_hit_target(app: &tauri::AppHandle, visible: bool) -> Result<(
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             if let Err(err) = show_pill_hit_target(&monitor_app) {
-                eprintln!("voicewave: pill hit-target safety refresh failed: {err}");
+                tracing::warn!("pill hit-target safety refresh failed: {err}");
             }
         }
     });
@@ -755,13 +757,13 @@ fn show_pill_for_listening(app: &tauri::AppHandle) -> Result<(), String> {
     // setup are logged but must never prevent a valid existing pill window
     // from becoming visible when dictation has been accepted.
     if let Err(err) = pill.set_ignore_cursor_events(true) {
-        eprintln!("voicewave: failed to make listening pill click-through: {err}");
+        tracing::warn!("failed to make listening pill click-through: {err}");
     }
     if let Err(err) = pill.set_size(Size::Logical(LogicalSize::new(
         PILL_WINDOW_COMPACT_WIDTH,
         PILL_WINDOW_COMPACT_HEIGHT,
     ))) {
-        eprintln!("voicewave: failed to restore listening pill size: {err}");
+        tracing::warn!("failed to restore listening pill size: {err}");
     }
     if let Err(err) = position_pill_window(
         app,
@@ -770,7 +772,7 @@ fn show_pill_for_listening(app: &tauri::AppHandle) -> Result<(), String> {
         PILL_WINDOW_COMPACT_HEIGHT,
         PILL_WINDOW_COMPACT_BOTTOM_MARGIN,
     ) {
-        eprintln!("voicewave: failed to re-anchor listening pill: {err}");
+        tracing::warn!("failed to re-anchor listening pill: {err}");
     }
     pill.show()
         .map_err(|err| format!("failed to show listening pill: {err}"))
@@ -901,7 +903,7 @@ fn configure_system_tray(app: &tauri::AppHandle) -> Result<(), String> {
                         true,
                         PillQuickControlsInvocation::Focused,
                     ) {
-                        eprintln!("voicewave: failed to open tray Quick Controls: {err}");
+                        tracing::warn!("failed to open tray Quick Controls: {err}");
                     }
                 }
                 TRAY_QUIT_ID => {
@@ -1116,7 +1118,7 @@ async fn set_dictation_profile(
         .await
         .map_err(|err| String::from(AppError::Controller(err)))?;
     if let Err(err) = app.emit("voicewave://settings-changed", updated.clone()) {
-        eprintln!("voicewave: failed to emit settings change: {err}");
+        tracing::warn!("failed to emit settings change: {err}");
     }
     Ok(updated)
 }
@@ -1156,6 +1158,48 @@ fn open_microphone_privacy_settings() -> Result<(), String> {
     {
         Err("microphone privacy settings are only available on Windows".to_string())
     }
+}
+
+/// What the "Report a problem" screen shows and pre-fills.
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportContext {
+    app_version: String,
+    os_version: String,
+    log_dir: String,
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn get_support_context() -> SupportContext {
+    SupportContext {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        os_version: support::os_version(),
+        log_dir: support::log_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// Opens the prefilled GitHub bug form in the default browser. The frontend
+/// only supplies the engine label; the URL itself is built from fixed parts.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn open_issue_report(engine: String) -> Result<(), String> {
+    let url = support::issue_report_url(&engine)?;
+    support::shell_open(url.as_ref())
+        .map_err(|err| format!("failed to open the issue form: {err}"))
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn open_logs_folder() -> Result<(), String> {
+    let dir = support::log_dir().ok_or("cannot resolve the app data directory")?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("failed to create the logs folder: {err}"))?;
+    support::shell_open(dir.as_os_str())
+        .map_err(|err| format!("failed to open the logs folder: {err}"))
 }
 
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -2260,6 +2304,11 @@ async fn download_polish_model(
 
 #[cfg(feature = "desktop")]
 pub fn run() {
+    // First, so every later line (and any panic) reaches the log file. This
+    // runs after main()'s single-instance claim, so a second launch that
+    // exits there never opens or rotates the log.
+    support::init();
+
     tauri::Builder::default()
         // Single instance: two event-driven keyboard hooks would BOTH capture
         // and insert every dictation (text lands twice). A second launch must
@@ -2307,7 +2356,7 @@ pub fn run() {
                 controller_for_prewarm.prewarm_active_model().await;
                 // A GPU upgrade accepted before a restart: qualify + switch.
                 if let Err(err) = controller_for_prewarm.finish_gpu_upgrade(app_for_upgrade).await {
-                    eprintln!("voicewave: resuming the GPU upgrade failed: {err}");
+                    tracing::warn!("resuming the GPU upgrade failed: {err}");
                 }
                 // Warm the optional formatter only after ASR is ready. Running
                 // both model preloads concurrently causes avoidable CPU, disk,
@@ -2327,7 +2376,7 @@ pub fn run() {
             let tray_ready = match configure_system_tray(&app_handle) {
                 Ok(_) => true,
                 Err(err) => {
-                    eprintln!("voicewave: tray setup failed, falling back to close-to-exit: {err}");
+                    tracing::warn!("tray setup failed, falling back to close-to-exit: {err}");
                     false
                 }
             };
@@ -2371,7 +2420,7 @@ pub fn run() {
                                 let result = dismiss_pill_quick_controls_spike_if_open(&handle)
                                     .and_then(|_| show_pill_for_listening(&handle));
                                 if let Err(err) = result {
-                                    eprintln!("voicewave: listening pill recovery failed: {err}");
+                                    tracing::warn!("listening pill recovery failed: {err}");
                                 }
                             }
                             state::VoiceWaveHudState::Transcribing => {
@@ -2423,6 +2472,9 @@ pub fn run() {
             set_dictation_profile,
             show_main_window,
             open_microphone_privacy_settings,
+            get_support_context,
+            open_issue_report,
+            open_logs_folder,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
             set_pill_window_mode,

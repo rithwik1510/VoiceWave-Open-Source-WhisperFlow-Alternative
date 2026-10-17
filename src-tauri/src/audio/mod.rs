@@ -329,8 +329,8 @@ impl AudioCaptureService {
                     for device in devices {
                         if let Ok(device_name) = device.name() {
                             if !is_likely_low_quality_asr_input(&device_name) {
-                                eprintln!(
-                                    "voicewave: requested input '{}' missing; using higher-quality fallback '{}' instead of low-quality default '{}'",
+                                tracing::warn!(
+                                    "requested input '{}' missing; using higher-quality fallback '{}' instead of low-quality default '{}'",
                                     name, device_name, default_name
                                 );
                                 return Ok(device);
@@ -338,8 +338,8 @@ impl AudioCaptureService {
                         }
                     }
                 }
-                eprintln!(
-                    "voicewave: requested input device '{}' not found; falling back to default input device",
+                tracing::warn!(
+                    "requested input device '{}' not found; falling back to default input device",
                     name
                 );
                 return Ok(default_device);

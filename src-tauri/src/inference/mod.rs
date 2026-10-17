@@ -850,8 +850,8 @@ async fn transcribe_with_asr_worker(
         }
     );
     if backend_fault {
-        eprintln!(
-            "voicewave: {} decode failed, retrying on a fresh worker: {reason}",
+        tracing::warn!(
+            "{} decode failed, retrying on a fresh worker: {reason}",
             primary.engine()
         );
         let fresh_gpu = WhisperEngine::AsrWorker {
@@ -881,8 +881,8 @@ async fn transcribe_with_asr_worker(
             return Err(InferenceError::Cancelled);
         }
     }
-    eprintln!(
-        "voicewave: {} decode failed, retrying on {}: {reason}",
+    tracing::warn!(
+        "{} decode failed, retrying on {}: {reason}",
         primary.engine(),
         cpu_rung.label()
     );

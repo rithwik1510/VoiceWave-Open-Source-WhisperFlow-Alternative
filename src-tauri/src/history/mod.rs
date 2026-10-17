@@ -587,7 +587,7 @@ impl HistoryManager {
     /// already correct, so a disk problem is worth a log line and nothing more.
     fn log_failed_rewrite(&self, result: Result<(), HistoryError>) {
         if let Err(error) = result {
-            eprintln!("voicewave: could not rewrite the history store: {error}");
+            tracing::warn!("could not rewrite the history store: {error}");
         }
     }
 

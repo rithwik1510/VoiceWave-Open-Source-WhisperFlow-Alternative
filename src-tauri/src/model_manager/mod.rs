@@ -1070,8 +1070,8 @@ impl ModelManager {
                 return Ok(());
             }
             Err(error) => {
-                eprintln!(
-                    "voicewave: failed to read the installed model index at '{}': {}",
+                tracing::warn!(
+                    "failed to read the installed model index at '{}': {}",
                     self.installed_index_path.display(),
                     error
                 );
@@ -1092,8 +1092,8 @@ impl ModelManager {
                     .collect();
             }
             Err(err) => {
-                eprintln!(
-                    "voicewave: corrupt installed model index recovered at '{}': {}",
+                tracing::warn!(
+                    "corrupt installed model index recovered at '{}': {}",
                     self.installed_index_path.display(),
                     err
                 );
@@ -1123,7 +1123,7 @@ impl ModelManager {
                 // Files deleted or never finished: un-register so the UI
                 // offers a (resuming) download instead of a dead model.
                 if let Err(reason) = verify_faster_whisper_snapshot(Path::new(&model.file_path)) {
-                    eprintln!("voicewave: {model_id} no longer installed: {reason}");
+                    tracing::warn!("{model_id} no longer installed: {reason}");
                     to_remove.push(model_id.clone());
                     changed = true;
                 }
@@ -1186,8 +1186,8 @@ impl ModelManager {
                 return Ok(());
             }
             Err(error) => {
-                eprintln!(
-                    "voicewave: failed to read the model download checkpoints at '{}': {}",
+                tracing::warn!(
+                    "failed to read the model download checkpoints at '{}': {}",
                     self.download_state_path.display(),
                     error
                 );
@@ -1208,8 +1208,8 @@ impl ModelManager {
                     .collect();
             }
             Err(err) => {
-                eprintln!(
-                    "voicewave: corrupt model download checkpoint recovered at '{}': {}",
+                tracing::warn!(
+                    "corrupt model download checkpoint recovered at '{}': {}",
                     self.download_state_path.display(),
                     err
                 );

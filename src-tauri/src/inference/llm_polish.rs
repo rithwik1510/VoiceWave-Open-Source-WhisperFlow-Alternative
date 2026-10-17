@@ -170,12 +170,12 @@ fn polish_text_blocking(raw: String, profile: String) -> Option<String> {
             .filter(|value| !value.is_empty()),
         Ok(response) => {
             if let Some(reason) = response.error {
-                eprintln!("voicewave: polish worker rejected request: {reason}");
+                tracing::warn!("polish worker rejected request: {reason}");
             }
             None
         }
         Err(err) => {
-            eprintln!("voicewave: polish worker error: {err}");
+            tracing::warn!("polish worker error: {err}");
             None
         }
     }

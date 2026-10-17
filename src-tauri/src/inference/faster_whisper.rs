@@ -557,8 +557,8 @@ fn acquire_request_gate(max_wait: Duration) -> Option<MutexGuard<'static, ()>> {
             Ok(guard) => return Some(guard),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    eprintln!(
-                        "voicewave: worker request gate busy for {} ms; giving up",
+                    tracing::warn!(
+                        "worker request gate busy for {} ms; giving up",
                         max_wait.as_millis()
                     );
                     return None;
@@ -582,14 +582,14 @@ fn schedule_worker_reload(model_id: String) {
     let spawned = std::thread::Builder::new()
         .name("voicewave-fw-reload".to_string())
         .spawn(move || {
-            eprintln!("voicewave: worker died; reloading {model_id} in background");
+            tracing::warn!("worker died; reloading {model_id} in background");
             match send_worker_request_blocking(prefetch_request_for(&model_id, false)) {
-                Ok(response) => eprintln!(
-                    "voicewave: background worker reload complete for {model_id} (model_init={} ms)",
+                Ok(response) => tracing::info!(
+                    "background worker reload complete for {model_id} (model_init={} ms)",
                     response.model_init_ms
                 ),
                 Err(err) => {
-                    eprintln!("voicewave: background worker reload failed for {model_id}: {err}")
+                    tracing::error!("background worker reload failed for {model_id}: {err}")
                 }
             }
             WORKER_RELOAD_IN_FLIGHT.store(false, Ordering::SeqCst);
@@ -622,8 +622,8 @@ fn exchange_with_worker(
     if let Some(reader) = worker.stdout.as_mut() {
         let drained = drain_buffered_stdout_lines(reader);
         if drained > 0 {
-            eprintln!(
-                "voicewave: drained {drained} stale worker response line(s) before request {}",
+            tracing::warn!(
+                "drained {drained} stale worker response line(s) before request {}",
                 request.id
             );
         }

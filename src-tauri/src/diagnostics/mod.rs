@@ -428,7 +428,7 @@ impl DiagnosticsManager {
     /// already correct, so a disk problem is worth a log line and nothing more.
     fn log_failed_rewrite(&self, result: Result<(), DiagnosticsError>) {
         if let Err(error) = result {
-            eprintln!("voicewave: could not rewrite the diagnostics store: {error}");
+            tracing::warn!("could not rewrite the diagnostics store: {error}");
         }
     }
 
