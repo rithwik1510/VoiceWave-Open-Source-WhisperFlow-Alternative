@@ -32,6 +32,8 @@ tests and migration work.
 | 014 | Complete dark mode ("Quiet Ink, Night") | P1 | L | — | IMPLEMENTED 2026-08-10 on branch `dark-mode-v1.2` — full token-driven theming (light/dark/system setting, no-flash boot, semantic Tailwind layer, zero raw neutral hexes in main-window TSX), AA-contrast audited; desktop visual smoke test pending. |
 | 013 | Stats depth, accuracy & GitHub-style streak heatmap | P2 | M | 007 | IMPLEMENTED 2026-08 — insertion-success gate, backfill success gate, day-bucket range windows (30/91/365), streak math, top-app-class / words-cleaned / clarity aggregates, brand-blue streak heatmap + insight panels. Rust stats tests 14/14, full Rust lib suite 343 pass, frontend 74 pass. Commit/review pending. |
 
+| 020 | Every dictation lands (terminal paste, spoken submit, elevated-app honesty, retry after failed decode, hands-free that waits) | P1 | M | — | IMPLEMENTED 2026-10-17 on branch `feat/lands-every-time`; owner desktop checklist (in the plan) pending. |
+
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
 ## How to choose what to do first
