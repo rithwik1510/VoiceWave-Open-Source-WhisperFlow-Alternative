@@ -24,9 +24,5 @@ ignores:
   - voicewave-prototype
   - voicewave-website
   - voicewave-website2
-  - voicewave-website-v1
   - plans
-  - manifests
-  - winget
-  - winget-manifest
   - Idea.md
