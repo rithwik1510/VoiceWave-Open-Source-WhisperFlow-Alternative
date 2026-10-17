@@ -822,7 +822,7 @@ export function Onboarding({
                             : " "}
                     </p>
                     <p className="mt-1 text-xs text-hint">
-                      Longer thought? Double-tap {hotkeyLabel} for hands-free, then pause or press it again.
+                      Longer thought? Double-tap {hotkeyLabel} for hands-free, then press it again when you're done.
                     </p>
                   </>
                 ) : (
@@ -837,7 +837,7 @@ export function Onboarding({
                       </div>
                       <div className="flex items-center gap-3 px-4 py-3 text-[15px] text-faint">
                         <kbd className="vw-onb-kbd">{hotkeyLabel}</kbd>
-                        <span>Double-tap for hands-free. Pause when you're done, or press it again.</span>
+                        <span>Double-tap for hands-free. Take your time, then press it again when you're done.</span>
                       </div>
                     </div>
                     <div className="mt-5">

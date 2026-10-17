@@ -10,6 +10,7 @@ import {
   loadSettings,
   loadSnapshot,
   rejectDictionaryEntry,
+  retryLastDictation,
   listenVoicewaveMicLevel,
   listenVoicewaveDictionaryQueueChanged,
   listenVoicewavePillNotice,
@@ -286,8 +287,10 @@ export function FloatingPill() {
           setNotice(payload);
           // Rescue notices (transcript present) may hold their full duration up
           // to 10s so the user can read/copy; plain notices keep the 2.5-12s
-          // clamp. Both share the same upper bound here.
-          const holdMs = Math.min(Math.max(payload.durationMs || 5000, 2500), 12000);
+          // clamp. A Try again offer may hold 30s: it can be the only way back
+          // to a long dictation.
+          const maxHoldMs = payload.action?.kind === "retryDictation" ? 30000 : 12000;
+          const holdMs = Math.min(Math.max(payload.durationMs || 5000, 2500), maxHoldMs);
           scheduleNoticeDismiss(holdMs);
         }));
         await keep(listenVoicewavePillQuickControls((payload) => {
@@ -520,6 +523,18 @@ export function FloatingPill() {
     }
   }, [notice, scheduleNoticeDismiss]);
 
+  const handleRetryDictation = useCallback(async () => {
+    try {
+      await retryLastDictation();
+      // The pill moves to transcribing; the offer has done its job.
+      clearNoticeDismiss();
+      setNotice(null);
+    } catch {
+      // Nothing left to retry, or a dictation is running: keep the notice so
+      // the user can try again in a moment. Never crash the overlay.
+    }
+  }, [clearNoticeDismiss]);
+
   // Hover pause is only wired for interactive rescue notices: holding the
   // pointer over the capsule clears the dismiss timer; leaving re-arms a short
   // 2s grace.
@@ -722,7 +737,7 @@ export function FloatingPill() {
 
   const handsFreeActive = controlMode === "handsFree" && visualState === "listening";
   const pillLabel = handsFreeActive
-    ? "VoiceWave hands-free listening. Pause when done, or press the shortcut again."
+    ? "VoiceWave hands-free listening. Press the shortcut again when you're done."
     : `VoiceWave ${visualState}`;
 
   return (
@@ -811,6 +826,14 @@ export function FloatingPill() {
                 onClick={() => void handleAddDictionaryTerm()}
               >
                 {actionDone ? "Added ✓" : notice.action.label}
+              </button>
+            ) : notice?.action?.kind === "retryDictation" ? (
+              <button
+                type="button"
+                className="vw-pill-action vw-pill-action-retry"
+                onClick={() => void handleRetryDictation()}
+              >
+                {notice.action.label}
               </button>
             ) : null}
           </div>

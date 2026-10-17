@@ -104,6 +104,11 @@ safe).
 The clipboard-only fallback and its pill ("Copied to clipboard, press Ctrl+V")
 are unchanged. The clipboard is not restored after paste.
 
+Undo (Ctrl+Z) is never offered after a terminal paste: in a Unix-style shell
+it suspends the foreground job. The undo record always means the latest
+insertion, so a terminal paste or clipboard-only result also clears an older
+record instead of leaving Ctrl+Z aimed at text from another app.
+
 ### 2. Spoken submit
 
 `split_trailing_submit_command` (transcript module) strips a trailing
