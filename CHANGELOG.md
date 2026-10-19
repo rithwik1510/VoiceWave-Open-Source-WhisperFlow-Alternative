@@ -12,6 +12,11 @@ dictation that lands in terminals and survives a failed transcription.
 
 ### Added
 
+- **Start with Windows.** A new switch in Settings > General (and on the last
+  setup screen) opens VoiceWave in the tray when you sign in, with the speech
+  model already loaded, so the first dictation after a reboot is as fast as
+  any other. Off by default. The app log (Help > Open logs folder) records
+  `startup prewarm started` and `finished` with the time it took.
 - **Dictation into terminals.** Windows Terminal, PowerShell, Command Prompt,
   Git Bash and other terminals now get the text pasted at the prompt instead
   of only copied. Line breaks become spaces there, so dictated text can never

@@ -165,6 +165,9 @@ const PILL_WINDOW_SPIKE_QUICK_HEIGHT: f64 = 184.0;
 const PILL_WINDOW_SPIKE_QUICK_BOTTOM_MARGIN: f64 = 12.0;
 #[cfg(feature = "desktop")]
 const TRAY_ID: &str = "voicewave-tray";
+/// Argument the "Start with Windows" Run-key entry launches the app with.
+#[cfg(feature = "desktop")]
+const AUTOSTART_ARG: &str = "--autostart";
 #[cfg(feature = "desktop")]
 const TRAY_SHOW_ID: &str = "show";
 #[cfg(feature = "desktop")]
@@ -2344,7 +2347,21 @@ pub fn run() {
         // setup. `process` provides the relaunch after a successful install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // "Start with Windows": the Run-key entry launches us with
+        // `--autostart`, which keeps the window hidden (see `setup`).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARG]),
+        ))
         .setup(|app| {
+            // The main window is created hidden (tauri.conf.json) so a login
+            // launch never flashes it. Normal launches show it straight away.
+            let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+            if !launched_at_login {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             let controller = Arc::new(
                 VoiceWaveController::new()
                     .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
@@ -2395,6 +2412,13 @@ pub fn run() {
                 }
             };
             configure_main_window_close_behavior(&app_handle, tray_ready);
+            // A login launch lives in the tray; without a tray there would be
+            // no way back to the app, so show the window instead.
+            if launched_at_login && !tray_ready {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             sync_pill_visibility(&app.handle().clone(), initial_settings.show_floating_hud)
                 .map_err(|err| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::other(err))
