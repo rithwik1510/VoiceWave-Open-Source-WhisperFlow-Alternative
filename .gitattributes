@@ -1,0 +1,2 @@
+# Patches applied by tools (git apply) must keep LF endings on every checkout.
+*.patch text eol=lf
