@@ -79,7 +79,9 @@ impl MicKeeper {
 
     /// Apply the Settings choices. Unchanged values are a no-op.
     pub fn configure(&self, device: Option<String>, keep_ready: bool) {
-        let _ = self.commands.send(Command::Configure { device, keep_ready });
+        let _ = self
+            .commands
+            .send(Command::Configure { device, keep_ready });
     }
 
     /// Record one dictation from the kept stream, opening it if needed. Same
@@ -239,7 +241,9 @@ impl Shared {
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
-    shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// cpal panics on some vanished-device paths (`Device::name`); unguarded,
