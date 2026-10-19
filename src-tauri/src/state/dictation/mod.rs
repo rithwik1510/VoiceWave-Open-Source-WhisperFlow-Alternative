@@ -1,30 +1,28 @@
 //! The dictation pipeline: one run from the accepted press to inserted text.
 
 mod capture;
+mod insert;
 mod polish;
 mod post_process;
 mod preflight;
 mod transcribe;
 
 use capture::CapturedAudio;
+use insert::Insertion;
 use polish::{resolve_delivery, Delivery};
 use post_process::{FormattedText, SpokenText};
 use transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::{
-    clamp_max_utterance_ms, classify_insertion_target, derive_correction_candidates,
-    emit_pill_action_notice, emit_pill_notice, emit_pill_rescue, emit_submit_notice,
-    insertion_method_key, now_utc_ms, restore_snippet_candidate, return_focus_for_retry,
-    sample_count_to_ms, ControllerError, CorrectionSession, DictationControlMode,
-    DictationLifecycleState, DictationMode, LatencyBreakdownEvent, PillAction, RetainedAudio,
-    TranscriptEvent, VoiceWaveController, VoiceWaveHudState, CORRECTION_SESSION_WINDOW_MS,
-    MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL, POLISH_PILL_ANNOUNCE_EVERY, SUBMIT_DELAY_AFTER_PASTE_MS,
-    SUBMIT_DELAY_AFTER_TYPING_MS,
+    clamp_max_utterance_ms, emit_pill_action_notice, emit_pill_notice, emit_pill_rescue,
+    emit_submit_notice, now_utc_ms, restore_snippet_candidate, sample_count_to_ms,
+    ControllerError, DictationControlMode, DictationLifecycleState, DictationMode,
+    LatencyBreakdownEvent, PillAction, RetainedAudio, VoiceWaveController, VoiceWaveHudState,
+    MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL, POLISH_PILL_ANNOUNCE_EVERY,
 };
 use crate::{
     diagnostics::LatencyMetricRecord,
     history::PolishHistoryMeta,
     inference::{polish_gate::gate_polish_candidate, uses_whisper_pipeline},
-    insertion::InsertTextRequest,
     settings::{InsertPath, PolishProfile, VoiceWaveSettings},
 };
 use std::{
@@ -32,10 +30,9 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tauri::{AppHandle, Emitter};
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 /// One dictation's fixed inputs, shared by every phase.
 struct DictationRun {
@@ -107,7 +104,6 @@ impl VoiceWaveController {
             ref app,
             mode,
             session_id,
-            ref retry_audio,
             flow_started,
             ref settings,
             ..
@@ -139,6 +135,9 @@ impl VoiceWaveController {
             return Ok(());
         };
         let delivery = resolve_delivery(&run, &text, &spoken, &transcription).await;
+        let insertion = self
+            .insert_transcript(&run, &delivery, &text, &spoken)
+            .await;
         let Transcription {
             worker: final_worker,
             mode_choice:
@@ -173,11 +172,11 @@ impl VoiceWaveController {
             custom_terms,
             exact_snippet_expansion,
             inline_snippet_plan,
-            had_snippet,
             final_transcript,
             asr_integrity_percent,
             asr_raw_word_count,
             asr_final_word_count,
+            ..
         } = text;
         let Delivery {
             inserted_text,
@@ -185,122 +184,19 @@ impl VoiceWaveController {
             polish_wait_ms,
             late_polish_handle,
         } = delivery;
-
-        let post_started = Instant::now();
-        let _ = app.emit(
-            "voicewave://transcript",
-            TranscriptEvent {
-                text: inserted_text.clone(),
-                is_final: true,
-                elapsed_ms: 0,
-            },
-        );
-
-        {
-            let mut snapshot = self.snapshot.lock().await;
-            snapshot.last_partial = None;
-            snapshot.last_final = Some(inserted_text.clone());
-            snapshot.active_model = settings.active_model.clone();
-        }
-        let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
-
-        return_focus_for_retry(retry_audio.as_ref()).await;
-
-        let insert_payload = InsertTextRequest {
-            text: inserted_text.clone(),
-            target_app: None,
-            prefer_clipboard: settings.prefer_clipboard_fallback
-                || (had_snippet && inserted_text.contains('\n')),
-            force_clipboard_only: false,
-        };
-        let insert_started = Instant::now();
-        let (
-            insertion_success,
-            insertion_method,
-            insertion_target_class,
-            insertion_history_recorded,
-            insertion_record_id,
-            insertion_blocked_by_elevation,
-        ) = match self
-            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(&polish_meta))
-            .await
-        {
-            Ok((result, record_id)) => (
-                result.success,
-                insertion_method_key(&result.method).to_string(),
-                classify_insertion_target(result.target_app.as_deref()).to_string(),
-                // insert_text already wrote the history record (with method
-                // and success), or logged why it could not; the record is in
-                // memory either way, so the transcript-side write below must
-                // not duplicate it.
-                true,
-                record_id,
-                result.blocked_by_elevation,
-            ),
-            Err(err) => {
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Error,
-                    Some(format!("Insertion failed: {err}")),
-                )
-                .await;
-                self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
-                    .await;
-                (
-                    false,
-                    "error".to_string(),
-                    "unknown".to_string(),
-                    false,
-                    None,
-                    false,
-                )
-            }
-        };
-        let insert_ms = insert_started.elapsed().as_millis() as u64;
-        // Spoken submit: Enter goes only into the window that received the
-        // text, after the paste has had time to land (see the delay consts).
-        let submit_outcome = if submit_requested {
-            let delay_ms = match insertion_method.as_str() {
-                "clipboardPaste" => SUBMIT_DELAY_AFTER_PASTE_MS,
-                "direct" => SUBMIT_DELAY_AFTER_TYPING_MS,
-                _ => 0,
-            };
-            sleep(Duration::from_millis(delay_ms)).await;
-            Some(self.insertion_engine.lock().await.press_enter_after_insert())
-        } else {
-            None
-        };
-        let inserted_at_utc_ms = now_utc_ms();
-        let previous_correction_session = { self.correction_session.lock().await.clone() };
-        let correction_candidates = if insertion_success {
-            if let Some(previous) = previous_correction_session {
-                if !had_snippet
-                    && !previous.had_snippet
-                    && inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
-                        <= CORRECTION_SESSION_WINDOW_MS
-                {
-                    derive_correction_candidates(&previous.inserted_text, &inserted_text)
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-        {
-            let mut correction_session = self.correction_session.lock().await;
-            if insertion_success {
-                *correction_session = Some(CorrectionSession {
-                    inserted_text: inserted_text.clone(),
-                    inserted_at_utc_ms,
-                    had_snippet,
-                });
-            } else {
-                *correction_session = None;
-            }
-        }
+        let Insertion {
+            success: insertion_success,
+            method: insertion_method,
+            target_class: insertion_target_class,
+            history_recorded: insertion_history_recorded,
+            record_id: insertion_record_id,
+            blocked_by_elevation: insertion_blocked_by_elevation,
+            submit_outcome,
+            correction_candidates,
+            post_started,
+            post_before_insert_ms,
+            insert_ms,
+        } = insertion;
 
         // Off-by-default on-device LLM polish (plan 005, Phase 3) — Standard
         // profile only (wait-validated profiles already made their single
