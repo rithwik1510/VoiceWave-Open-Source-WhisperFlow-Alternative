@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex, OnceLock,
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -49,15 +50,17 @@ pub enum HotkeyPhase {
     Triggered,
 }
 
+// Messages here reach the Settings shortcut recorder verbatim, so they are
+// written for the user rather than for logs.
 #[derive(Debug, thiserror::Error)]
 pub enum HotkeyError {
-    #[error("hotkey '{field}' cannot be empty")]
+    #[error("Pick a shortcut first.")]
     EmptyBinding { field: &'static str },
-    #[error("hotkey '{field}' has invalid token '{token}'")]
+    #[error("VoiceWave can't use the '{token}' key in a shortcut. Try a letter, a number, an F key, or Space.")]
     InvalidToken { field: &'static str, token: String },
-    #[error("hotkey '{field}' must include one non-modifier key")]
-    MissingMainKey { field: &'static str },
-    #[error("toggle and push-to-talk hotkeys conflict")]
+    #[error("{0}")]
+    Unusable(&'static str),
+    #[error("That shortcut is already VoiceWave's hands-free toggle.")]
     Conflict,
     #[error("global hotkey runtime failed: {0}")]
     Runtime(String),
@@ -77,15 +80,56 @@ struct ParsedHotkey {
     super_key: bool,
     modifier_only: bool,
     main_vk: u16,
+    /// Canonical name of the main key ("X", "F9", "Space"); empty when
+    /// `modifier_only`.
+    main_name: String,
 }
+
+impl ParsedHotkey {
+    /// Stored/displayed form: modifiers in a fixed order, then the main key,
+    /// e.g. "Ctrl+Windows" or "Ctrl+Shift+Space".
+    fn canonical(&self) -> String {
+        let mut parts = Vec::with_capacity(5);
+        for (held, name) in [
+            (self.ctrl, "Ctrl"),
+            (self.alt, "Alt"),
+            (self.shift, "Shift"),
+            (self.super_key, "Windows"),
+        ] {
+            if held {
+                parts.push(name);
+            }
+        }
+        if !self.modifier_only {
+            parts.push(self.main_name.as_str());
+        }
+        parts.join("+")
+    }
+
+    /// Whether the hook swallows the main key while the combo is held, so
+    /// holding e.g. Ctrl+Space does not also auto-repeat into the focused app.
+    /// Never with Win held: Windows would then read the Win press as a lone tap
+    /// and open Start on release.
+    fn swallows_main_key(&self) -> bool {
+        !self.modifier_only && !self.super_key
+    }
+}
+
+/// While set and in the future, the Settings recorder owns the keyboard: no
+/// dictation signals, no swallowed keys. A lease rather than a flag so a
+/// recorder that vanishes mid-capture cannot leave the hotkey dead.
+const CAPTURE_LEASE: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct HotkeyEdgeTracker {
     toggle: ParsedHotkey,
     push_to_talk: ParsedHotkey,
     keys_down: HashSet<u16>,
+    /// Keys whose press was swallowed; their repeats and release are too.
+    swallowed: HashSet<u16>,
     escape_down: bool,
     escape_owned: bool,
+    capture_until: Option<Instant>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -100,9 +144,16 @@ impl HotkeyEdgeTracker {
             toggle: parse_combo("toggle", &config.toggle)?,
             push_to_talk: parse_combo("pushToTalk", &config.push_to_talk)?,
             keys_down: HashSet::new(),
+            swallowed: HashSet::new(),
             escape_down: false,
             escape_owned: false,
+            capture_until: None,
         })
+    }
+
+    fn capturing(&self) -> bool {
+        self.capture_until
+            .is_some_and(|until| Instant::now() < until)
     }
 
     fn key_event(&mut self, vk: u16, pressed: bool) -> Vec<HotkeySignal> {
@@ -156,10 +207,24 @@ impl HotkeyEdgeTracker {
         if pressed {
             // Auto-repeat must not produce additional toggle or push edges.
             if !self.keys_down.insert(vk) {
-                return HotkeyEventOutcome::default();
+                return HotkeyEventOutcome {
+                    consume: self.swallowed.contains(&vk),
+                    ..HotkeyEventOutcome::default()
+                };
             }
         } else if !self.keys_down.remove(&vk) {
             return HotkeyEventOutcome::default();
+        }
+        // A release always matches its press, even if capture began between.
+        let mut consume = !pressed && self.swallowed.remove(&vk);
+
+        // Keep tracking keys while the recorder captures, so edges stay
+        // consistent afterwards, but stay invisible to it and to dictation.
+        if self.capturing() {
+            return HotkeyEventOutcome {
+                consume,
+                ..HotkeyEventOutcome::default()
+            };
         }
 
         let mut signals = Vec::with_capacity(2);
@@ -172,9 +237,16 @@ impl HotkeyEdgeTracker {
                 action: HotkeyAction::ToggleDictation,
                 phase: HotkeyPhase::Triggered,
             });
+            consume |= self.toggle.swallows_main_key();
         }
 
         let push_is_active = parsed_is_active(&self.push_to_talk, &self.keys_down);
+        if pressed && vk == self.push_to_talk.main_vk && push_is_active {
+            consume |= self.push_to_talk.swallows_main_key();
+        }
+        if pressed && consume {
+            self.swallowed.insert(vk);
+        }
         if !push_was_active && push_is_active {
             signals.push(HotkeySignal {
                 action: HotkeyAction::PushToTalk,
@@ -186,10 +258,7 @@ impl HotkeyEdgeTracker {
                 phase: HotkeyPhase::Released,
             });
         }
-        HotkeyEventOutcome {
-            signals,
-            consume: false,
-        }
+        HotkeyEventOutcome { signals, consume }
     }
 }
 
@@ -263,6 +332,41 @@ impl HotkeyRuntime {
     pub fn set_dictation_active(&self, active: bool) {
         self.dictation_active.store(active, Ordering::Release);
     }
+
+    /// Swaps the combos the running hook listens for. Keys currently held stay
+    /// tracked, so no restart and no lost release edge.
+    pub fn update_config(&self, config: &HotkeyConfig) -> Result<(), HotkeyError> {
+        let toggle = parse_combo("toggle", &config.toggle)?;
+        let push_to_talk = parse_combo("pushToTalk", &config.push_to_talk)?;
+        with_hook_tracker(|tracker| {
+            tracker.toggle = toggle;
+            tracker.push_to_talk = push_to_talk;
+        });
+        Ok(())
+    }
+
+    /// Pauses dictation triggers while Settings records a new shortcut. Each
+    /// `true` renews a short lease (see `CAPTURE_LEASE`).
+    pub fn set_capture(&self, active: bool) {
+        let until = active.then(|| Instant::now() + CAPTURE_LEASE);
+        with_hook_tracker(|tracker| tracker.capture_until = until);
+    }
+}
+
+/// Runs `f` on the live hook's tracker. Only one hook exists per process, so
+/// any `HotkeyRuntime` handle addresses it.
+fn with_hook_tracker(f: impl FnOnce(&mut HotkeyEdgeTracker)) {
+    #[cfg(target_os = "windows")]
+    if let Some(dispatch) = HOOK_DISPATCH.get() {
+        if let Ok(mut slot) = dispatch.lock() {
+            if let Some(state) = slot.as_mut() {
+                f(&mut state.tracker);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = f;
 }
 
 #[cfg(target_os = "windows")]
@@ -353,7 +457,6 @@ fn start_windows_hotkey_runtime(
     sender: UnboundedSender<HotkeySignal>,
 ) -> Result<HotkeyRuntime, HotkeyError> {
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let tracker = HotkeyEdgeTracker::new(&config)?;
     let dictation_active = Arc::new(AtomicBool::new(false));
@@ -518,7 +621,7 @@ pub struct HotkeyManager {
 
 impl HotkeyManager {
     pub fn new(config: HotkeyConfig) -> Result<Self, HotkeyError> {
-        validate_config(&config)?;
+        let config = validate_config(&config)?;
         let parsed_toggle = parse_combo("toggle", &config.toggle)?;
         let parsed_push_to_talk = parse_combo("pushToTalk", &config.push_to_talk)?;
         let (registration_supported, registration_error) = platform_registration_status();
@@ -544,8 +647,14 @@ impl HotkeyManager {
         }
     }
 
+    /// Records why the keyboard hook could not start, so Settings can say so.
+    pub fn set_registration_error(&mut self, error: Option<String>) {
+        self.registration_error = error;
+    }
+
+    /// Validates and stores `config` in canonical form.
     pub fn update_config(&mut self, config: HotkeyConfig) -> Result<HotkeySnapshot, HotkeyError> {
-        validate_config(&config)?;
+        let config = validate_config(&config)?;
         self.parsed_toggle = parse_combo("toggle", &config.toggle)?;
         self.parsed_push_to_talk = parse_combo("pushToTalk", &config.push_to_talk)?;
         self.config = config;
@@ -564,157 +673,181 @@ impl HotkeyManager {
     }
 }
 
-fn validate_config(config: &HotkeyConfig) -> Result<(), HotkeyError> {
-    normalize_combo("toggle", &config.toggle)?;
-    normalize_combo("pushToTalk", &config.push_to_talk)?;
-    if detect_conflicts(config)
-        .iter()
-        .any(|c| c == "duplicateBinding")
-    {
+/// Canonical form of a user-chosen hold-to-talk shortcut, checked against the
+/// fixed hands-free toggle. The one validation entry point for settings load
+/// and the Settings recorder.
+pub fn validate_push_to_talk(combo: &str) -> Result<String, HotkeyError> {
+    validate_config(&HotkeyConfig {
+        push_to_talk: combo.to_string(),
+        ..HotkeyConfig::default()
+    })
+    .map(|config| config.push_to_talk)
+}
+
+fn validate_config(config: &HotkeyConfig) -> Result<HotkeyConfig, HotkeyError> {
+    let toggle = parse_combo("toggle", &config.toggle)?;
+    let push_to_talk = parse_combo("pushToTalk", &config.push_to_talk)?;
+    check_usable(&toggle)?;
+    check_usable(&push_to_talk)?;
+    let canonical = HotkeyConfig {
+        toggle: toggle.canonical(),
+        push_to_talk: push_to_talk.canonical(),
+    };
+    if canonical.toggle == canonical.push_to_talk {
         return Err(HotkeyError::Conflict);
     }
-    Ok(())
+    Ok(canonical)
 }
 
 fn detect_conflicts(config: &HotkeyConfig) -> Vec<String> {
-    let toggle = normalize_combo("toggle", &config.toggle).ok();
-    let push = normalize_combo("pushToTalk", &config.push_to_talk).ok();
+    let toggle = parse_combo("toggle", &config.toggle).ok();
+    let push = parse_combo("pushToTalk", &config.push_to_talk).ok();
 
     let mut conflicts = Vec::new();
-    if toggle.is_some() && toggle == push {
-        conflicts.push("duplicateBinding".to_string());
+    if let (Some(toggle), Some(push)) = (toggle, push) {
+        if toggle.canonical() == push.canonical() {
+            conflicts.push("duplicateBinding".to_string());
+        }
     }
     conflicts
 }
 
-fn normalize_combo(field: &'static str, combo: &str) -> Result<String, HotkeyError> {
+/// Rejects shortcuts that would misfire during ordinary typing, or that
+/// Windows keeps for itself. Hold-to-talk fires on press, so anything that is
+/// also part of normal typing or a common shortcut would start dictations.
+fn check_usable(parsed: &ParsedHotkey) -> Result<(), HotkeyError> {
+    let modifier_count = [parsed.ctrl, parsed.alt, parsed.shift, parsed.super_key]
+        .into_iter()
+        .filter(|held| *held)
+        .count();
+
+    if parsed.modifier_only {
+        if modifier_count < 2 {
+            return Err(HotkeyError::Unusable(
+                "Add another key. A single modifier would fire every time you use it.",
+            ));
+        }
+        // Ctrl+Alt is AltGr on many keyboards and Ctrl+Shift / Alt+Shift
+        // switch input languages; Win-based chords are the free ones.
+        if !parsed.super_key {
+            return Err(HotkeyError::Unusable(
+                "Shortcuts made only of modifier keys need Win, like Ctrl + Win. Others clash with everyday shortcuts.",
+            ));
+        }
+        return Ok(());
+    }
+
+    let typing_key = parsed.main_name.len() == 1
+        || matches!(
+            parsed.main_name.as_str(),
+            "Space" | "Home" | "End" | "PageUp" | "PageDown"
+        );
+    if typing_key && !parsed.ctrl && !parsed.alt && !parsed.super_key {
+        return Err(HotkeyError::Unusable(
+            "Add Ctrl, or pick an F key. On its own or with Shift, this key would fire while you type.",
+        ));
+    }
+    // Bare Ctrl + letter/digit is an app shortcut almost everywhere (copy,
+    // save, undo...), and the hook would swallow it.
+    if parsed.main_name.len() == 1 && parsed.ctrl && !parsed.alt && !parsed.shift && !parsed.super_key {
+        return Err(HotkeyError::Unusable(
+            "Ctrl + letter is already a shortcut in most apps. Add Shift or Alt, like Ctrl + Shift + D.",
+        ));
+    }
+    // Win + letter/digit/Space (with or without Ctrl/Shift) is nearly all
+    // taken by the shell: virtual desktops, Narrator, snipping, taskbar.
+    if typing_key && parsed.super_key {
+        return Err(HotkeyError::Unusable(
+            "Windows keeps Win + letter shortcuts for itself. Use Win with an F key, or Ctrl + Win on its own.",
+        ));
+    }
+    // Without Ctrl, Alt + key either fires the app's menu accelerator or, once
+    // the key is swallowed, leaves a lone Alt tap that focuses the menu bar
+    // (where the dictated text would then go). Also covers Alt+Space/Alt+F4.
+    if parsed.alt && !parsed.ctrl && !parsed.super_key {
+        return Err(HotkeyError::Unusable(
+            "Alt shortcuts open menus in many apps. Add Ctrl or Win, or pick another key.",
+        ));
+    }
+    Ok(())
+}
+
+/// Main keys beyond letters, digits and F1-F24: (canonical name, virtual-key).
+const NAMED_MAIN_KEYS: &[(&str, u16)] = &[
+    ("Space", 0x20),
+    ("Insert", 0x2D),
+    ("Home", 0x24),
+    ("End", 0x23),
+    ("PageUp", 0x21),
+    ("PageDown", 0x22),
+    ("Pause", 0x13),
+    ("ScrollLock", 0x91),
+];
+
+/// Resolves an upper-cased token to (canonical name, virtual-key).
+fn main_key(token: &str) -> Option<(String, u16)> {
+    if let [byte] = token.as_bytes() {
+        // Letters and digits: the virtual-key code is the ASCII code.
+        return byte
+            .is_ascii_alphanumeric()
+            .then(|| (token.to_string(), u16::from(*byte)));
+    }
+    if let Some(number) = token
+        .strip_prefix('F')
+        .and_then(|suffix| suffix.parse::<u8>().ok())
+        .filter(|n| (1..=24).contains(n))
+    {
+        return Some((format!("F{number}"), vk_f(number)));
+    }
+    NAMED_MAIN_KEYS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(token))
+        .map(|(name, vk)| (name.to_string(), *vk))
+}
+
+fn parse_combo(field: &'static str, combo: &str) -> Result<ParsedHotkey, HotkeyError> {
     if combo.trim().is_empty() {
         return Err(HotkeyError::EmptyBinding { field });
     }
 
-    let modifier_aliases = [
-        ("CTRL", "CTRL"),
-        ("CONTROL", "CTRL"),
-        ("SHIFT", "SHIFT"),
-        ("ALT", "ALT"),
-        ("OPTION", "ALT"),
-        ("WIN", "SUPER"),
-        ("WINDOWS", "SUPER"),
-        ("META", "SUPER"),
-        ("CMD", "SUPER"),
-        ("SUPER", "SUPER"),
-    ];
-
-    let mut modifiers = HashSet::new();
-    let mut main_keys = Vec::new();
-
+    let mut parsed = ParsedHotkey {
+        ctrl: false,
+        shift: false,
+        alt: false,
+        super_key: false,
+        modifier_only: true,
+        main_vk: 0,
+        main_name: String::new(),
+    };
     for raw in combo.split('+') {
         let token = raw.trim().to_uppercase();
-        if token.is_empty() {
-            return Err(HotkeyError::InvalidToken {
-                field,
-                token: raw.to_string(),
-            });
-        }
-
-        if let Some((_, normalized)) = modifier_aliases.iter().find(|(alias, _)| *alias == token) {
-            modifiers.insert(*normalized);
-            continue;
-        }
-
-        if token == "SPACE"
-            || token
-                .strip_prefix('F')
-                .and_then(|suffix| suffix.parse::<u8>().ok())
-                .is_some_and(|n| (1..=24).contains(&n))
-            || (token.len() == 1 && token.chars().all(|c| c.is_ascii_alphanumeric()))
-        {
-            main_keys.push(token);
-            continue;
-        }
-
-        return Err(HotkeyError::InvalidToken { field, token });
-    }
-
-    if main_keys.is_empty() {
-        if field == "pushToTalk"
-            && modifiers.contains("CTRL")
-            && modifiers.contains("SUPER")
-            && modifiers.len() == 2
-        {
-            let mut ordered_modifiers = modifiers.into_iter().collect::<Vec<_>>();
-            ordered_modifiers.sort_unstable();
-            return Ok(ordered_modifiers.join("+"));
-        }
-        return Err(HotkeyError::MissingMainKey { field });
-    }
-    if main_keys.len() != 1 {
-        return Err(HotkeyError::MissingMainKey { field });
-    }
-
-    let mut ordered_modifiers = modifiers.into_iter().collect::<Vec<_>>();
-    ordered_modifiers.sort_unstable();
-    ordered_modifiers.push(main_keys[0].as_str());
-    Ok(ordered_modifiers.join("+"))
-}
-
-fn parse_combo(field: &'static str, combo: &str) -> Result<ParsedHotkey, HotkeyError> {
-    let normalized = normalize_combo(field, combo)?;
-    let mut ctrl = false;
-    let mut shift = false;
-    let mut alt = false;
-    let mut super_key = false;
-    let mut main_vk: Option<u16> = None;
-
-    for token in normalized.split('+') {
-        match token {
-            "CTRL" => ctrl = true,
-            "SHIFT" => shift = true,
-            "ALT" => alt = true,
-            "SUPER" => super_key = true,
-            "SPACE" => main_vk = Some(vk_space()),
-            _ if token.starts_with('F') => {
-                let number = token.trim_start_matches('F').parse::<u8>().map_err(|_| {
-                    HotkeyError::InvalidToken {
-                        field,
-                        token: token.to_string(),
-                    }
-                })?;
-                if !(1..=24).contains(&number) {
-                    return Err(HotkeyError::InvalidToken {
-                        field,
-                        token: token.to_string(),
-                    });
-                }
-                main_vk = Some(vk_f(number));
-            }
-            _ if token.len() == 1 => {
-                let byte = token.as_bytes()[0];
-                main_vk = Some(byte as u16);
+        match token.as_str() {
+            "CTRL" | "CONTROL" => parsed.ctrl = true,
+            "SHIFT" => parsed.shift = true,
+            "ALT" | "OPTION" => parsed.alt = true,
+            "WIN" | "WINDOWS" | "META" | "CMD" | "SUPER" => parsed.super_key = true,
+            "ESC" | "ESCAPE" => {
+                return Err(HotkeyError::Unusable(
+                    "Esc is reserved for cancelling a dictation.",
+                ))
             }
             _ => {
-                return Err(HotkeyError::InvalidToken {
+                let (name, vk) = main_key(&token).ok_or_else(|| HotkeyError::InvalidToken {
                     field,
-                    token: token.to_string(),
-                })
+                    token: raw.trim().to_string(),
+                })?;
+                if !parsed.modifier_only {
+                    return Err(HotkeyError::Unusable(
+                        "Use one main key, plus any of Ctrl, Alt, Shift, and Win.",
+                    ));
+                }
+                parsed.modifier_only = false;
+                parsed.main_vk = vk;
+                parsed.main_name = name;
             }
         }
     }
-
-    let modifier_only = main_vk.is_none();
-    let main_vk = if modifier_only {
-        0
-    } else {
-        main_vk.ok_or(HotkeyError::MissingMainKey { field })?
-    };
-    Ok(ParsedHotkey {
-        ctrl,
-        shift,
-        alt,
-        super_key,
-        modifier_only,
-        main_vk,
-    })
+    Ok(parsed)
 }
 
 fn platform_registration_status() -> (bool, Option<String>) {
@@ -781,30 +914,9 @@ fn key_down_any(vks: &[u16]) -> bool {
     vks.iter().copied().any(key_down)
 }
 
-fn vk_space() -> u16 {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
-        return VK_SPACE as u16;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        0x20
-    }
-}
-
+// F1..F24 are contiguous virtual-key codes starting at VK_F1 (0x70).
 fn vk_f(number: u8) -> u16 {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F1;
-        return (VK_F1 as u16) + (number as u16 - 1);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        0x70 + (number as u16 - 1)
-    }
+    0x70 + (u16::from(number) - 1)
 }
 
 #[cfg(test)]

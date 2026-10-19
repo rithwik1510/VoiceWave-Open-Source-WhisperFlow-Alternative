@@ -264,7 +264,7 @@ impl Default for VoiceWaveSettings {
             anonymous_usage_opt_in: true,
             analytics_consent_version: 0,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
-            push_to_talk_hotkey: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
+            push_to_talk_hotkey: DEFAULT_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
             format_profile: FormatProfile::Default,
             active_domain_packs: Vec::new(),
@@ -404,12 +404,26 @@ fn migrate_analytics_consent(settings: &mut VoiceWaveSettings) {
     }
 }
 
+/// The hands-free toggle is fixed; only hold-to-talk is user-rebindable.
 pub const LOCKED_TOGGLE_HOTKEY: &str = "Ctrl+Alt+X";
-pub const LOCKED_PUSH_TO_TALK_HOTKEY: &str = "Ctrl+Windows";
+pub const DEFAULT_PUSH_TO_TALK_HOTKEY: &str = "Ctrl+Windows";
 
+/// Pins the toggle and canonicalizes the hold-to-talk shortcut, falling back
+/// to the default when a saved value is unusable (hand-edited file, or a combo
+/// an older build accepted).
 pub fn normalize_hotkey_bindings(settings: &mut VoiceWaveSettings) {
     settings.toggle_hotkey = LOCKED_TOGGLE_HOTKEY.to_string();
-    settings.push_to_talk_hotkey = LOCKED_PUSH_TO_TALK_HOTKEY.to_string();
+    settings.push_to_talk_hotkey =
+        match crate::hotkey::validate_push_to_talk(&settings.push_to_talk_hotkey) {
+            Ok(canonical) => canonical,
+            Err(err) => {
+                tracing::warn!(
+                    "saved hold-to-talk shortcut {:?} is unusable ({err}); using the default",
+                    settings.push_to_talk_hotkey
+                );
+                DEFAULT_PUSH_TO_TALK_HOTKEY.to_string()
+            }
+        };
 }
 
 #[cfg(test)]
@@ -476,15 +490,15 @@ mod tests {
     }
 
     #[test]
-    fn load_enforces_locked_hotkey_pair() {
+    fn load_pins_toggle_and_resets_unusable_push_to_talk() {
         let path = temp_settings_path();
         let store = SettingsStore::from_path(path.clone());
-        let raw = r#"{"toggleHotkey":"Ctrl+Shift+Space","pushToTalkHotkey":"Ctrl+Alt+Space"}"#;
+        let raw = r#"{"toggleHotkey":"Ctrl+Shift+Space","pushToTalkHotkey":"Q"}"#;
         std::fs::write(&path, raw).expect("write should succeed");
 
         let loaded = store.load().expect("load should succeed");
         assert_eq!(loaded.toggle_hotkey, LOCKED_TOGGLE_HOTKEY);
-        assert_eq!(loaded.push_to_talk_hotkey, LOCKED_PUSH_TO_TALK_HOTKEY);
+        assert_eq!(loaded.push_to_talk_hotkey, DEFAULT_PUSH_TO_TALK_HOTKEY);
 
         let _ = std::fs::remove_file(path);
     }
