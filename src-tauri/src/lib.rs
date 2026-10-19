@@ -9,6 +9,7 @@ pub mod history;
 pub mod hotkey;
 pub mod inference;
 pub mod insertion;
+mod job_object;
 pub mod model_manager;
 pub mod permissions;
 pub mod phase1;

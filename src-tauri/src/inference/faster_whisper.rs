@@ -883,6 +883,7 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
             "failed to spawn faster-whisper worker using '{python}': {err}. Reinstall the latest beta build or configure VOICEWAVE_FASTER_WHISPER_PYTHON."
         ))
     })?;
+    crate::job_object::assign(&child);
     register_worker_pid(child.id());
 
     // Every early return below must reap the child: Windows does not kill it
