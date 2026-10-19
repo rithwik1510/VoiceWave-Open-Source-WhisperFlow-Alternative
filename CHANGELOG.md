@@ -32,6 +32,15 @@ dictation that lands in terminals and survives a failed transcription.
   issue with your app version, Windows version and speech engine. Nothing is
   sent until you submit it on GitHub. Open logs folder shows the log files to
   attach.
+- **Your first word is no longer clipped.** After a dictation the mic stays
+  on for 2 minutes and remembers the last 0.6 seconds, so the next dictation
+  starts with what you said just before the hotkey went down. The mic also
+  opens faster when it was off. That audio stays in memory and is thrown away
+  unless you press the hotkey.
+- **Keep mic ready** (Settings → Audio, off by default) keeps the mic on
+  whenever VoiceWave is running, so even the first dictation after a break
+  keeps its first word. Windows shows the microphone-in-use icon while it is
+  on.
 - **Log files.** VoiceWave now keeps a week of daily log files, including a
   record of any crash. Logs never contain what you dictated.
 - **Setup and reliability counts** in the anonymous usage count: which setup

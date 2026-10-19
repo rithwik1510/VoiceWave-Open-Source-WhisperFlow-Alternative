@@ -1,4 +1,5 @@
 pub mod input_volume;
+pub mod mic_keeper;
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -282,8 +283,17 @@ impl AudioCaptureService {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
         let (error_tx, error_rx) = mpsc::channel::<String>();
 
-        let stream =
-            build_input_stream(&device, &stream_config, sample_format, audio_tx, error_tx)?;
+        let stream = build_input_stream(
+            &device,
+            &stream_config,
+            sample_format,
+            move |chunk| {
+                let _ = audio_tx.send(chunk);
+            },
+            move |err| {
+                let _ = error_tx.send(err);
+            },
+        )?;
         stream.play().map_err(AudioError::PlayStream)?;
         on_stream_ready();
 
@@ -586,23 +596,21 @@ fn is_likely_low_quality_asr_input(device_name: &str) -> bool {
         || normalized.contains("sco")
 }
 
+/// Raw input stream: `on_data` gets each callback buffer as interleaved f32
+/// at the device's own rate and channel count.
 fn build_input_stream(
     device: &cpal::Device,
     stream_config: &StreamConfig,
     sample_format: SampleFormat,
-    audio_tx: Sender<Vec<f32>>,
-    error_tx: Sender<String>,
+    mut on_data: impl FnMut(Vec<f32>) + Send + 'static,
+    mut on_error: impl FnMut(String) + Send + 'static,
 ) -> Result<Stream, AudioError> {
     match sample_format {
         SampleFormat::F32 => device
             .build_input_stream(
                 stream_config,
-                move |data: &[f32], _| {
-                    let _ = audio_tx.send(data.to_vec());
-                },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |data: &[f32], _| on_data(data.to_vec()),
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
@@ -610,15 +618,13 @@ fn build_input_stream(
             .build_input_stream(
                 stream_config,
                 move |data: &[i16], _| {
-                    let converted = data
-                        .iter()
-                        .map(|sample| *sample as f32 / i16::MAX as f32)
-                        .collect::<Vec<_>>();
-                    let _ = audio_tx.send(converted);
+                    on_data(
+                        data.iter()
+                            .map(|sample| *sample as f32 / i16::MAX as f32)
+                            .collect(),
+                    )
                 },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
@@ -626,15 +632,13 @@ fn build_input_stream(
             .build_input_stream(
                 stream_config,
                 move |data: &[u16], _| {
-                    let converted = data
-                        .iter()
-                        .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect::<Vec<_>>();
-                    let _ = audio_tx.send(converted);
+                    on_data(
+                        data.iter()
+                            .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                            .collect(),
+                    )
                 },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
