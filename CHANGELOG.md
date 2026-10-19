@@ -7,10 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ## [Unreleased]
 
-A smaller installer, no more Pro screens, and an easy way to report problems.
+A smaller installer, no more Pro screens, an easy way to report problems, and
+dictation that lands in terminals and survives a failed transcription.
 
 ### Added
 
+- **Dictation into terminals.** Windows Terminal, PowerShell, Command Prompt,
+  Git Bash and other terminals now get the text pasted at the prompt instead
+  of only copied. Line breaks become spaces there, so dictated text can never
+  run a command on its own.
+- **Say "press enter" to send.** End a dictation with "press enter" (or "hit
+  enter") as its own sentence and VoiceWave presses Enter after the text
+  lands. Say it on its own to press Enter only. It follows the Spoken edit
+  commands switch.
+- **Try again after a failed transcription.** When transcription fails or
+  times out, the pill offers Try again, which transcribes the same recording.
+  The audio stays in memory only, and only until your next dictation.
 - **Report a problem.** Help → Report a problem opens a pre-filled GitHub
   issue with your app version, Windows version and speech engine. Nothing is
   sent until you submit it on GitHub. Open logs folder shows the log files to
@@ -37,6 +49,13 @@ A smaller installer, no more Pro screens, and an easy way to report problems.
 - The sign-in screen and sync messages are hidden. Release builds have no
   cloud accounts, and the old sign-in accepted any email without doing
   anything.
+- **Hands-free waits while you think.** Hands-free ends when you press the
+  shortcut again (Escape cancels). It only stops on its own after 30 seconds
+  of silence or at 5 minutes, and long recordings get more time to
+  transcribe.
+- **Apps running as administrator.** Windows blocks typing into them from a
+  normal app, so VoiceWave now copies the text and says so, instead of
+  reporting it as inserted.
 
 ---
 

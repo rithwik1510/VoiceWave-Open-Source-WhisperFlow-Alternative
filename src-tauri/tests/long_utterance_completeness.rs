@@ -3,7 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use voicewave_core_lib::dictionary::DictionaryManager;
 use voicewave_core_lib::history::{HistoryManager, SessionHistoryQuery};
 use voicewave_core_lib::insertion::{
-    BackendInsertSuccess, InsertTextRequest, InsertionBackend, InsertionEngine, UndoToken,
+    BackendInsertSuccess, InsertTextRequest, InsertionBackend, InsertionEngine, PasteChord,
+    UndoToken,
 };
 
 static LAST_INSERTED_TEXT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -43,6 +44,7 @@ impl InsertionBackend for CaptureBackend {
         &mut self,
         text: &str,
         target_app: Option<&str>,
+        _chord: PasteChord,
     ) -> Result<BackendInsertSuccess, String> {
         self.direct_insert(text, target_app)
     }
@@ -57,6 +59,10 @@ impl InsertionBackend for CaptureBackend {
 
     fn undo(&mut self, _token: &UndoToken) -> Result<Option<String>, String> {
         Ok(Some("undo ok".to_string()))
+    }
+
+    fn press_enter(&mut self) -> Result<(), String> {
+        Ok(())
     }
 }
 

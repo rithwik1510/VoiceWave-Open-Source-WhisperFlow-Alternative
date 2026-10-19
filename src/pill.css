@@ -870,6 +870,20 @@ body,
     inset 0 1px 0 rgba(255, 255, 255, 0.56);
 }
 
+/* Try again after a failed transcription: the one primary action on the
+   pill, so it carries the brand blue (same stops as --vw-cta-gradient in the
+   main window's styles.css, which the pill bundle does not load). */
+.vw-pill-action-retry {
+  flex: none;
+  border-color: rgba(27, 142, 255, 0.7);
+  background: linear-gradient(110deg, #0a2a8c 0%, #0f5fd7 42%, #1b8eff 100%);
+  color: #ffffff;
+}
+
+.vw-pill-action-retry:hover:not(:disabled) {
+  background: linear-gradient(110deg, #0d34a4 0%, #146ce8 42%, #35a0ff 100%);
+}
+
 @keyframes vw-pill-spin {
   to {
     transform: rotate(360deg);

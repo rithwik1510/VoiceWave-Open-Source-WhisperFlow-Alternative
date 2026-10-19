@@ -442,6 +442,11 @@ export async function cancelDictation(): Promise<void> {
   await invokeVoicewave<void>("cancel_dictation");
 }
 
+/** Reruns transcription on the audio kept after a failed dictation. */
+export async function retryLastDictation(): Promise<void> {
+  await invokeVoicewave<void>("retry_last_dictation");
+}
+
 export async function stopDictation(): Promise<void> {
   await invokeVoicewave<void>("stop_dictation");
 }

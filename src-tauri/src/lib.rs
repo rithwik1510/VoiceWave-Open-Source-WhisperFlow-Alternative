@@ -1558,6 +1558,20 @@ async fn cancel_dictation(
     Ok(())
 }
 
+/// Pill "Try again" after a failed transcription (plan 020).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn retry_last_dictation(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
+    runtime
+        .controller
+        .retry_last_dictation(app)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn stop_dictation(
@@ -2486,6 +2500,7 @@ pub fn run() {
             export_diagnostics_bundle,
             start_dictation,
             cancel_dictation,
+            retry_last_dictation,
             stop_dictation,
             load_hotkey_config,
             update_hotkey_config,

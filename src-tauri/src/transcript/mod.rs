@@ -580,6 +580,43 @@ fn apply_structural_commands(input: &str) -> String {
     text
 }
 
+/// Spoken submit (plan 020): splits a trailing "press enter" / "hit enter"
+/// off the dictation and reports whether Enter should follow the insertion.
+///
+/// Deliberately narrow, because a false match submits a half-written prompt:
+/// the phrase must end the utterance (trailing punctuation aside) and be
+/// either the whole utterance or its own sentence, i.e. follow `.`, `!` or
+/// `?` the way Whisper punctuates a pause. "To continue, press enter" and
+/// "then press enter" stay text. Callers gate this on the spoken edit
+/// commands setting.
+pub fn split_trailing_submit_command(text: &str) -> (String, bool) {
+    const SUBMIT_PHRASES: &[&str] = &["press enter", "hit enter"];
+    let body = text.trim_end_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '.' | '!' | '?' | ',')
+    });
+    // ASCII lowercasing keeps byte offsets identical, so `body` can be sliced
+    // at positions found in `lowered`.
+    let lowered = body.to_ascii_lowercase();
+    for phrase in SUBMIT_PHRASES {
+        if !lowered.ends_with(phrase) {
+            continue;
+        }
+        let head = &body[..body.len() - phrase.len()];
+        let head_trimmed = head.trim_end();
+        if head_trimmed.is_empty() {
+            return (String::new(), true);
+        }
+        // "...repress enter" or "...xhit enter": not the phrase.
+        if head_trimmed.len() == head.len() {
+            continue;
+        }
+        if head_trimmed.ends_with(['.', '!', '?']) {
+            return (head_trimmed.to_string(), true);
+        }
+    }
+    (text.to_string(), false)
+}
+
 fn apply_writing_profile(input: &str) -> String {
     let mut text = input.to_string();
     text = replace_boundary_phrase_case_insensitive(&text, "don't", "do not");

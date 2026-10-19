@@ -128,7 +128,8 @@ export interface VoiceWaveSnapshot {
 /** A typed one-tap action carried by a pill notice. The frontend switches on
  * `kind` to render the button and dispatch the handler. */
 export interface PillAction {
-  kind: "copyTranscript" | "addDictionaryTerm";
+  /** `retryDictation` reruns transcription on audio kept from a failed run. */
+  kind: "copyTranscript" | "addDictionaryTerm" | "retryDictation";
   /** Button label, e.g. "Copy" or 'Add "foo"'. */
   label: string;
   /** Action data (e.g. the term to add). `copyTranscript` reads the rescue
@@ -371,6 +372,9 @@ export interface InsertResult {
   targetApp?: string | null;
   transactionId: string;
   undoAvailable: boolean;
+  /** The focused app runs as administrator, so the text went to the
+   * clipboard instead of being typed. */
+  blockedByElevation?: boolean;
 }
 
 export interface UndoResult {
