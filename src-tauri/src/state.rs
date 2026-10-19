@@ -2,6 +2,7 @@ use crate::{
     audio::{
         analyze_captured_segments,
         input_volume::{self, MicGuardPlan},
+        mic_keeper::MicKeeper,
         AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureEndPolicy,
         CaptureOptions, HandsFreeLimits, HandsFreeSwitch, VadConfig,
     },
@@ -1387,6 +1388,8 @@ struct CorrectionSession {
 
 pub struct VoiceWaveController {
     audio: AudioCaptureService,
+    // Dictation's mic stream: kept warm between presses for pre-roll.
+    mic: MicKeeper,
     settings_store: SettingsStore,
     settings: Mutex<VoiceWaveSettings>,
     snapshot: Mutex<VoiceWaveSnapshot>,
@@ -1527,8 +1530,16 @@ impl VoiceWaveController {
                 tracing::warn!("stats backfill failed: {err}");
             }
         }
+        // Spawned after every fallible step so a failed construction never
+        // leaves a thread that might hold the mic open.
+        let mic = MicKeeper::spawn(
+            audio.clone(),
+            settings.input_device.clone(),
+            settings.keep_mic_ready,
+        );
         Ok(Self {
             audio,
+            mic,
             settings_store,
             snapshot: Mutex::new(VoiceWaveSnapshot {
                 state: VoiceWaveHudState::Idle,
@@ -1604,6 +1615,8 @@ impl VoiceWaveController {
         })?;
         drop(hotkey_manager);
         set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
+        self.mic
+            .configure(settings.input_device.clone(), settings.keep_mic_ready);
 
         if is_faster_whisper_model(&settings.active_model) {
             release_idle_asr_workers();
@@ -4118,6 +4131,14 @@ impl VoiceWaveController {
             (DictationMode::Fixture, None) => phase1::build_fixture_segments(settings.vad_threshold),
             (DictationMode::Microphone, None) => {
                 let audio = self.audio.clone();
+                let mic = self.mic.clone();
+                // The accepted press, for the mic start-latency log line.
+                let pressed_at = self
+                    .active_session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map_or(flow_started, |session| session.started_at);
                 let input_device = settings.input_device.clone();
                 let mut threshold = clamp_vad_threshold(settings.vad_threshold);
                 if input_device
@@ -4167,9 +4188,11 @@ impl VoiceWaveController {
                 let input_device_for_capture = input_device.clone();
                 let captured_task = tokio::task::spawn_blocking(move || {
                     let mut ready_tx = Some(ready_tx);
-                    audio.capture_segments_from_microphone_with_signals_and_observer(
+                    mic.capture(
+                        &audio,
                         input_device_for_capture.as_deref(),
                         capture_options,
+                        pressed_at,
                         || cancel_for_capture.is_cancelled(),
                         || stop_for_capture.load(Ordering::Relaxed),
                         move || {
