@@ -2,35 +2,32 @@
 
 mod capture;
 mod preflight;
+mod transcribe;
 
 use capture::CapturedAudio;
+use transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::{
-    asr_integrity_metrics, clamp_max_utterance_ms, classify_insertion_target, decode_mode_key,
-    derive_correction_candidates, dictation_retry_instruction,
-    effective_release_watchdog_threshold_ms, emit_pill_action_notice, emit_pill_notice,
-    emit_pill_rescue, emit_submit_notice, final_decode_timeout, floor_decode_mode,
-    fw_min_decode_audio_ms, gpu_step_down_notice, insertion_method_key,
-    is_likely_low_quality_input_name, now_utc_ms, release_watchdog_recovered,
+    asr_integrity_metrics, clamp_max_utterance_ms, classify_insertion_target,
+    derive_correction_candidates, dictation_retry_instruction, emit_pill_action_notice,
+    emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
     restore_snippet_candidate, return_focus_for_retry, sample_count_to_ms,
     should_reject_low_confidence_transcript_as_no_speech, ControllerError, CorrectionSession,
     DictationControlMode, DictationLifecycleState, DictationMode, LatencyBreakdownEvent,
     PillAction, RetainedAudio, TranscriptEvent, VoiceWaveController, VoiceWaveHudState,
-    CORRECTION_SESSION_WINDOW_MS, ENGINE_WAIT_NOTICE_GRACE_MS, HANDS_FREE_MAX_CAPTURE_MS,
-    MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL, POLISH_OUTCOME_ACCEPTED, POLISH_OUTCOME_DISABLED,
-    POLISH_OUTCOME_FALLBACK_REJECTED, POLISH_OUTCOME_FALLBACK_TIMEOUT, POLISH_OUTCOME_LITERAL,
-    POLISH_OUTCOME_SNIPPET_EXACT, POLISH_PILL_ANNOUNCE_EVERY, SUBMIT_DELAY_AFTER_PASTE_MS,
-    SUBMIT_DELAY_AFTER_TYPING_MS, WAIT_VALIDATED_RELEASE_BUDGET_MS,
+    CORRECTION_SESSION_WINDOW_MS, MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL, POLISH_OUTCOME_ACCEPTED,
+    POLISH_OUTCOME_DISABLED, POLISH_OUTCOME_FALLBACK_REJECTED, POLISH_OUTCOME_FALLBACK_TIMEOUT,
+    POLISH_OUTCOME_LITERAL, POLISH_OUTCOME_SNIPPET_EXACT, POLISH_PILL_ANNOUNCE_EVERY,
+    SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS, WAIT_VALIDATED_RELEASE_BUDGET_MS,
 };
 use crate::{
-    audio::AudioQualityBand,
     diagnostics::LatencyMetricRecord,
     history::PolishHistoryMeta,
     inference::{
-        note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
-        polish_gate::gate_polish_candidate, uses_whisper_pipeline, InferenceError,
+        note_audio_pipeline_decode_hard_failure, polish_gate::gate_polish_candidate,
+        uses_whisper_pipeline,
     },
     insertion::InsertTextRequest,
-    settings::{resolve_profile, DecodeMode, InsertPath, PolishProfile, VoiceWaveSettings},
+    settings::{resolve_profile, InsertPath, PolishProfile, VoiceWaveSettings},
     snippet::{ProtectionError, ProtectionOutcome, SnippetExpansionPlan},
     transcript::{
         finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
@@ -120,13 +117,11 @@ impl VoiceWaveController {
             session_id,
             control_mode,
             ref cancel_token,
-            ref stop_flag,
-            ref hands_free,
             ref retry_audio,
             flow_started,
             ref settings,
-            max_capture_ms,
             whisper_pipeline,
+            ..
         } = run;
         let fw_ready_task = self.preflight(&run).await?;
         let Some(capture) = self.capture_audio(&run).await? else {
@@ -137,353 +132,36 @@ impl VoiceWaveController {
             ref source_samples,
             capture_ms,
             captured_audio_ms,
-            release_tail_ms,
-            ref audio_quality,
             ref mic_input_volume_slot,
+            ..
         } = capture;
-        let policy_selected_mode = match mode {
-            DictationMode::Fixture => settings.decode_mode,
-            DictationMode::Microphone => self
-                .decode_policy
-                .lock()
-                .await
-                .select_mode(captured_audio_ms),
+        let Some(transcription) = self.transcribe(&run, &capture, fw_ready_task).await? else {
+            return Ok(());
         };
-        let mut effective_decode_mode = policy_selected_mode;
-        let mut decode_policy_reasons = vec![match mode {
-            DictationMode::Fixture => "fixture-settings".to_string(),
-            DictationMode::Microphone => {
-                format!("runtime-policy:{}", decode_mode_key(policy_selected_mode))
-            }
-        }];
-        if whisper_pipeline && mode == DictationMode::Microphone {
-            let mut decode_floor = match audio_quality.quality {
-                AudioQualityBand::Good => DecodeMode::Fast,
-                AudioQualityBand::Fair => DecodeMode::Balanced,
-                AudioQualityBand::Poor => DecodeMode::Quality,
-            };
-            if settings
-                .input_device
-                .as_deref()
-                .is_some_and(is_likely_low_quality_input_name)
-            {
-                decode_floor = floor_decode_mode(decode_floor, DecodeMode::Balanced);
-            }
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, decode_floor);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons
-                    .push(format!("fw-audio-floor:{}", decode_mode_key(decode_floor)));
-            }
-            // The fast lanes that previously downgraded Balanced -> Fast here
-            // (clean-audio floor and short-utterance) are removed: beam=1
-            // greedy output regularly passed the confidence retry gate while
-            // being wrong, so short dictations shipped degraded text. Beam=5
-            // is ~0.3 s on GPU and the latency policy still handles genuinely
-            // slow machines.
-        }
-        if mode == DictationMode::Microphone {
-            // The user's decode-mode setting is a floor for live dictation, so
-            // "balanced"/"quality" in settings can never be silently downgraded
-            // by the runtime policy. "fast" imposes no floor and lets the
-            // policy manage the speed/quality trade-off.
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, settings.decode_mode);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons.push(format!(
-                    "settings-floor:{}",
-                    decode_mode_key(settings.decode_mode)
-                ));
-            }
-        }
-        let decode_policy_reason = decode_policy_reasons.join("|");
-        let mut fw_runtime_ready = false;
-        if let Some(mut task) = fw_ready_task {
-            // Capture is done, but the engine may still be loading the model:
-            // dictating seconds after launch waits on the startup prefetch, and
-            // a crashed worker reloads in the background. That wait is real
-            // (no decode can start before the model is in memory) and used to
-            // be silent, so say what is happening. Releases that land on a
-            // warm engine never see this.
-            let grace = Duration::from_millis(ENGINE_WAIT_NOTICE_GRACE_MS);
-            let joined = if task.is_finished() {
-                task.await
-            } else {
-                match timeout(grace, &mut task).await {
-                    Ok(joined) => joined,
-                    Err(_) => {
-                        emit_pill_notice(
-                            &app,
-                            "info",
-                            "Loading the speech model",
-                            Some(
-                                "Your words are captured. Transcription starts as soon as it's ready."
-                                    .to_string(),
-                            ),
-                            5_000,
-                        );
-                        task.await
-                    }
-                }
-            };
-            match joined {
-                Ok(Ok(())) => {
-                    fw_runtime_ready = true;
-                }
-                Ok(Err(err)) => {
-                    return Err(ControllerError::Runtime(format!(
-                        "Faster-Whisper runtime warmup failed: {err}"
-                    )));
-                }
-                Err(err) => {
-                    return Err(ControllerError::Runtime(format!(
-                        "Faster-Whisper warmup join failure: {err}"
-                    )));
-                }
-            }
-        }
-        let final_worker = self
-            .build_inference_worker(
-                &settings.active_model,
-                mode,
-                effective_decode_mode,
-                fw_runtime_ready,
-            )
-            .await?;
-        let hands_free_capture = hands_free.load(Ordering::Relaxed);
-        let capture_cap_ms = if hands_free_capture {
-            HANDS_FREE_MAX_CAPTURE_MS
-        } else {
-            max_capture_ms
-        };
-        let cap_hit = mode == DictationMode::Microphone
-            && retry_audio.is_none()
-            && !stop_flag.load(Ordering::Relaxed)
-            && captured_audio_ms.saturating_add(150) >= capture_cap_ms;
-        let transcribing_message = if cap_hit {
-            format!(
-                "Transcribing locally (max utterance {}s reached)...",
-                capture_cap_ms / 1000
-            )
-        } else {
-            "Transcribing locally...".to_string()
-        };
-        // Hands-free users may still be talking when the cap stops capture.
-        if cap_hit && hands_free_capture {
-            emit_pill_notice(
-                &app,
-                "info",
-                format!(
-                    "Reached the {}-minute limit",
-                    HANDS_FREE_MAX_CAPTURE_MS / 60_000
-                ),
-                Some("Transcribing what you said so far.".to_string()),
-                4_500,
-            );
-        }
-
-        let transcribing_started = Instant::now();
-        let release_to_transcribing_ms = self
-            .session_release_elapsed_ms(session_id, transcribing_started)
-            .await
-            .unwrap_or(0);
-        let effective_release_watchdog_ms = effective_release_watchdog_threshold_ms(
-            audio_quality.quality.clone(),
-            captured_audio_ms,
-            release_tail_ms,
-        );
-        let watchdog_recovered =
-            release_watchdog_recovered(release_to_transcribing_ms, effective_release_watchdog_ms);
-        if watchdog_recovered {
-            self.watchdog_recovery_count.fetch_add(1, Ordering::Relaxed);
-        }
-        let watchdog_note = if watchdog_recovered {
-            " (release watchdog recovered delayed transition)"
-        } else {
-            ""
-        };
-        self.set_session_state(
-            session_id,
-            DictationLifecycleState::Transcribing,
-            None,
-            None,
-        )
-        .await;
-        self.update_state(
-            &app,
-            VoiceWaveHudState::Transcribing,
-            Some(format!("{transcribing_message}{watchdog_note}")),
-        )
-        .await;
-
-        let decode_started = Instant::now();
-        if mode == DictationMode::Microphone && whisper_pipeline {
-            let finalize_audio_ms =
-                sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-            if finalize_audio_ms < fw_min_decode_audio_ms() {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Idle,
-                    Some(format!(
-                        "Capture was too short to transcribe reliably. {}",
-                        dictation_retry_instruction(control_mode)
-                    )),
-                )
-                .await;
-                return Ok(());
-            }
-        }
-        // The whole capture is decoded at release.
-        let finalize_tail_audio_ms =
-            sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-        let finalize_started = Instant::now();
-        let finalize_samples_ref: &[f32] = source_samples.as_slice();
-        let default_finalize_timeout =
-            final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
-        // During the one-time GPU check, a whisper.cpp model with no
-        // faster-whisper fallback waits for the check before decoding.
-        let waits_for_gpu_check = final_worker.waits_for_gpu_check().await;
-        // The speech worker may fail on the GPU and retry the same audio on
-        // the CPU rung; the outer timeout covers that wait and both attempts.
-        let finalize_timeout = final_worker
-            .asr_worker_timeout(
-                sample_count_to_ms(finalize_samples_ref.len(), self.audio.target_sample_rate),
-                default_finalize_timeout,
-                waits_for_gpu_check,
-            )
-            .unwrap_or(default_finalize_timeout);
-        // That wait can take most of a minute, so say why now rather than
-        // after the result. It uses the session's one GPU notice.
-        let gpu_wait_notice = waits_for_gpu_check
-            && mode == DictationMode::Microphone
-            && !self.gpu_notice_sent.swap(true, Ordering::Relaxed);
-        if gpu_wait_notice {
-            emit_pill_notice(
-                &app,
-                "info",
-                "Getting your graphics card ready",
-                Some("One-time setup, up to a minute. Your text appears when it's done.".to_string()),
-                15_000,
-            );
-        }
-        // Long decodes leave the user staring at a spinner with no promise it
-        // is alive; past ~2.5s the pill says so explicitly (unless the GPU
-        // notice above already explains the wait).
-        let decode_watch_done = Arc::new(AtomicBool::new(false));
-        if mode == DictationMode::Microphone && !gpu_wait_notice {
-            let done = Arc::clone(&decode_watch_done);
-            let watch_app = app.clone();
-            let watch_cancel = cancel_token.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(2_500)).await;
-                if !done.load(Ordering::Relaxed) && !watch_cancel.is_cancelled() {
-                    emit_pill_notice(
-                        &watch_app,
-                        "info",
-                        "Still transcribing…",
-                        Some("Long dictations take a little more time.".to_string()),
-                        2_600,
-                    );
-                }
-            });
-        }
-        let finalize_result = timeout(
-            finalize_timeout,
-            final_worker.transcribe_segment(
-                finalize_samples_ref,
-                &cancel_token,
-                |_text, _is_final, _elapsed_ms| {},
-            ),
-        )
-        .await;
-        decode_watch_done.store(true, Ordering::Relaxed);
-        let finalize_output = match finalize_result {
-            Ok(Ok(text)) => text,
-            Ok(Err(InferenceError::Cancelled)) => {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Idle,
-                    Some("Dictation cancelled.".to_string()),
-                )
-                .await;
-                return Ok(());
-            }
-            Ok(Err(err)) => {
-                // The worker refuses to load a model that is not on disk yet
-                // (worker.py raises "... is not downloaded yet"). That is a
-                // setup state, not a decode failure: feeding it to the policy
-                // or the audio-pipeline fallback counters would degrade later
-                // dictations once the download finishes.
-                // The pill notice comes from `dictation_failure_notice`.
-                if err.to_string().contains("is not downloaded yet") {
-                    return Err(ControllerError::MissingModel(
-                        final_worker.active_model().to_string(),
-                    ));
-                }
-                if mode == DictationMode::Microphone {
-                    self.decode_policy
-                        .lock()
-                        .await
-                        .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if whisper_pipeline {
-                        note_audio_pipeline_decode_hard_failure();
-                    }
-                }
-                return Err(ControllerError::Runtime(format!(
-                    "Inference failed for model '{}': {err}",
-                    final_worker.active_model()
-                )));
-            }
-            Err(_) => {
-                cancel_token.cancel();
-                if mode == DictationMode::Microphone {
-                    self.decode_policy
-                        .lock()
-                        .await
-                        .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if whisper_pipeline {
-                        note_audio_pipeline_decode_hard_failure();
-                    }
-                }
-                return Err(ControllerError::Runtime(format!(
-                    "Inference timed out after {} ms for model '{}'.",
-                    finalize_timeout.as_millis(),
-                    final_worker.active_model()
-                )));
-            }
-        };
-        let release_finalize_ms = finalize_started.elapsed().as_millis() as u64;
-        let decode_ms = decode_started.elapsed().as_millis() as u64;
-        let decode_telemetry = finalize_output.telemetry;
-        if mode == DictationMode::Microphone && whisper_pipeline {
-            note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
-        }
-        if mode == DictationMode::Microphone {
-            if let Some(kind) = decode_telemetry.asr_step_down_kind.filter(|_| {
-                !self.gpu_notice_sent.swap(true, Ordering::Relaxed)
-            }) {
-                let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
-                emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
-            } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
-            {
-                emit_pill_notice(
-                    &app,
-                    "info",
-                    "Engine was cold",
-                    Some(
-                        "First dictation after a restart takes longer — the next ones are fast."
-                            .to_string(),
-                    ),
-                    4_500,
-                );
-            }
-        }
-        let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
-        let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
+        let Transcription {
+            worker: final_worker,
+            mode_choice:
+                DecodeModeChoice {
+                    policy_selected: policy_selected_mode,
+                    reason: decode_policy_reason,
+                    ..
+                },
+            start:
+                TranscribingStart {
+                    transcribing_started,
+                    release_to_transcribing_ms,
+                    effective_release_watchdog_ms,
+                    watchdog_recovered,
+                },
+            decoded:
+                Decoded {
+                    telemetry: decode_telemetry,
+                    finalize_text,
+                    release_finalize_ms,
+                    decode_ms,
+                    finalize_tail_audio_ms,
+                },
+        } = transcription;
         let merged_transcript = finalize_text.clone();
         // Spoken submit (plan 020): a trailing "press enter" is a command, not
         // text. It rides the spoken edit commands toggle like "new line".
