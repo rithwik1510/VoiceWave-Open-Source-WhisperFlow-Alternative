@@ -134,38 +134,11 @@ jobs:
 
       # whisper.cpp speech workers (plan 019): built with MSVC, independent of
       # the app's GNU Rust toolchain, and bundled as resources
-      # (asr-worker/vk, asr-worker/cpu). Only this build machine needs the
-      # Vulkan SDK; users need nothing beyond their GPU driver.
-      - name: Install Vulkan SDK (pinned, cached)
-        # v1.7.0, pinned by commit SHA.
-        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533
-        with:
-          vulkan_version: 1.4.341.1
-          install_runtime: false
-          cache: true
-          stripdown: true
-
-      - name: Build speech workers (MSVC)
-        shell: pwsh
-        run: ./scripts/asr-worker/build-asr-worker.ps1 -BuildRoot "$env:RUNNER_TEMP\asr-worker-build"
-
-      - name: Verify speech worker dependencies (dumpbin)
-        shell: pwsh
-        # Fails if the CPU worker imports vulkan-1.dll, the Vulkan worker
-        # imports it at load time instead of delay-loading it, or either one
-        # imports a VC++ runtime DLL (they must run without the redistributable).
-        run: ./scripts/asr-worker/check-asr-worker-deps.ps1
-
-      - name: Smoke test speech workers (no GPU on the runner)
-        shell: pwsh
-        run: |
-          # Pinned tiny model, only to prove the CPU worker loads and decodes here.
-          $model = Join-Path $env:RUNNER_TEMP "ggml-tiny.en.bin"
-          Invoke-WebRequest -UseBasicParsing -OutFile $model `
-            -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin"
-          $hash = (Get-FileHash -Algorithm SHA256 $model).Hash.ToLowerInvariant()
-          if ($hash -ne "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f") { throw "ggml-tiny.en.bin hash mismatch: $hash" }
-          ./scripts/asr-worker/smoke-asr-worker.ps1 -ModelPath $model
+      # (asr-worker/vk, asr-worker/cpu). The shared action also checks their
+      # dependencies and smoke-tests whisper and Parakeet (the same steps
+      # asr-worker.yml runs on pull requests).
+      - name: Build and smoke-test speech workers
+        uses: ./.github/actions/asr-workers
 
       # Windows Authenticode signing (separate from the Tauri updater key).
       # A no-op until every Azure Trusted Signing secret exists; see
