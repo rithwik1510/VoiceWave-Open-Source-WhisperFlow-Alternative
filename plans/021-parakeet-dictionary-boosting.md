@@ -1,6 +1,6 @@
 # 021: Dictionary boosting for Parakeet
 
-Status: APPROVED (owner, 2026-10-17). Implementation on `feat/parakeet-boost`, based on `feat/parakeet-engine`.
+Status: IMPLEMENTED 2026-10-19 on `feat/parakeet-boost` (based on `feat/parakeet-engine`). Approved by the owner 2026-10-17. See "Deviations" and "Results" at the end. Owner voice test pending.
 
 Review notes (main agent, before handoff):
 - Re-casing on any completed match contradicted the bird trap, so it now requires a flipped decision.
@@ -132,3 +132,46 @@ The worker builds the trie per request. It's trivial at this size.
 | GPU (vk) vs CPU worker | Identical text |
 
 **Owner test (later, slowly).** In the dev app, dictate the same names with the real voice, plus a few everyday sentences containing cloud/whisper/code.
+
+## Deviations (implementation, 2026-10-19)
+
+Found in the code or on the test set; the conservative choice was taken each time.
+
+- **"Skip words the model already knows" catches almost nothing.** Parakeet v3's 8192-piece vocab is multilingual: `▁these` is a piece, but `▁small`, `▁things`, `▁cloud` and `▁code` are not. The rule is kept as written. Junk entries are contained by the guards below instead; the "these things are small" trap never changed.
+- **All acronyms are skipped**, not only those under 3 characters: a term with no lowercase letter (API, GPU, NASA) is never boosted.
+- **Blank is never boosted against.** The bonus only reorders word-pieces at steps where the model already chose to emit a token, so boosting can't insert a word into silence or a pause.
+- **Start bonus needs a piece with 2+ letters** (`▁cl`, not `▁T`). The 1-letter start bonus turned "tempest" into "Tempest" and "8GB" into "8 GB". A 1-letter piece the model chose itself still opens a match, because names often start that way (`▁V ul kan`).
+- **Continuations beat starts.** In a step where some candidate continues an open match, start bonuses are withheld. Otherwise `▁Co` (start of "Codex") beat `co` (continuing "goatcounter").
+- **No re-casing flips.** A candidate gets no bonus if it spells the same letters as the model's choice in a different case, in either direction (`▁T` over `▁tem`, `▁cl` over `▁C`).
+- **Candidates.** Only pieces within the largest bonus of the top logit can win, so the candidate set is those pieces, capped at K = 16.
+- **λ_cont = 7, not ≈3.** On TTS the logit margins are large (often 5–10), so 3 changed almost nothing. λ_start stays 1.5. Both are the highest values that changed no trap sentence (see Results).
+- **Skipped terms are reported as counts only** (owner rule: no dictionary terms in diagnostics). The reply carries `"boost":{"terms","skipped","completed","flipped","ms"}`; Rust logs it at debug level.
+- **Env var.** `VOICEWAVE_PARAKEET_BOOST` also accepts `start,cont` for tuning.
+- **Partial matches.** They are never re-cased, but a continuation bonus can change a partial spelling ("cloud" → "claud" at λ_cont ≥ 9). That is the limit on λ_cont.
+- **Superseded risk note.** The Risks line accepting "whisper" → "Whisper" re-casing is superseded by the review note. A completed match is re-cased only if the bonus flipped a decision inside it, and Rust's `stabilize_custom_terms` leaves plain capitalized words alone. So a common-word term the model spells on its own ("parakeet", "whisper", "convex") stays lowercase mid-sentence.
+- **avgLogProb.** For Parakeet it is computed from the boosted logits, so it reads slightly higher on boosted tokens.
+
+## Results (2026-10-19, worker CLI, q8_0 model, RTX 3060 via Vulkan index 1, and CPU)
+
+Test set (scratch only, nothing played aloud):
+- SAPI David + Zira, 16 kHz.
+- 30 positives (80 term slots), each spoken the way a person says the term ("Vulcan", "Versel", "goat counter").
+- 20 traps.
+- A 10 dB white-noise copy of every clip.
+- Synthetic dictionaries: 34 terms (owner names, Things/These/Small, PR/API/GPU/CPU) and a 200-term stress list.
+
+Recall is scored the way the app shows it. Terms with distinct casing (multi-word, inner capitals, dots) are compared case-insensitively, since the Rust post-pass fixes them; plain capitalized words are compared case-sensitively. The "ci" column ignores case throughout.
+
+| Default 1.5 / 7, 34 terms | Recall clean (ci) | Recall noisy (ci) | Trap sentences changed | WER, 6 clips / 358 words |
+|---|---|---|---|---|
+| vk, boost off | 58.8% (71.2%) | 50.0% (61.3%) | — | 3.07% |
+| vk, boost on | 73.8% (86.2%) | 71.2% (82.5%) | 0/20 clean, 0/20 noisy | 3.07% (texts identical) |
+| cpu, boost off | 60.0% (72.5%) | 47.5% (61.3%) | — | 3.07% |
+| cpu, boost on | 73.8% (86.2%) | 67.5% (81.2%) | 0/20, 0/20 | 3.07% |
+| vk, 200 terms, on | 73.8% (86.2%) | 68.8% (80.0%) | 0/20, 0/20 | 3.07% |
+| cpu, 200 terms, on | 73.8% (86.2%) | 65.0% (78.8%) | 0/20, 0/20 | 3.07% |
+
+- **Sweep (vk, 34 terms).** Traps first change at 3/9 ("codec" → "Codex"); at 3/10 and above, "cloud" → "claud(s)", "whiskey" → "Whisper", "tail" → "Tailwind". With 200 terms under noise, a start bonus of 3 changed 4 trap sentences ("sink" → "s Ink", "wagged" → "ragged"). 1.5/7 is the only tested point with 0 changes on all four sets.
+- **Added decode time.** Measured inside the worker: 0.09 ms median per clip (vk, 34 terms), 0.11 ms with 200 terms. It grows with length: 1.9–2.3 ms on a 60 s clip. Gate met.
+- **vk vs cpu.** Not identical, and not because of boosting: with boost off, 7 of 206 clips already differ (backend numerics on borderline words, e.g. "next js" vs "next.js"). With boost on, 8 differ, because a borderline boost can land on one backend and not the other (vk "Vercel", cpu "Versal").
+- **Gates.** Traps (≤1/20): met. WER (±0.5 pt): met. Latency (≤2 ms median): met. Recall (≥90%): **not met**, 86% case-insensitive and 74% as scored. What is left: TTS mispronunciations the model hears confidently ("archetype", "Tory"), split forms ("telemetry deck"), and model-spelled lowercase common words (by design, above). vk = cpu: not met, for the pre-existing backend reason.
