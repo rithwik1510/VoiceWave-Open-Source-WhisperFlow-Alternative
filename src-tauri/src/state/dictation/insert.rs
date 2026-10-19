@@ -10,9 +10,9 @@ use crate::insertion::{InsertTextRequest, SubmitError};
 use crate::state::{
     classify_insertion_target, derive_correction_candidates, emit_pill_action_notice,
     emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
-    return_focus_for_retry, CorrectionSession, DictationLifecycleState, DictationMode,
-    PillAction, VoiceWaveController, VoiceWaveHudState,
-    CORRECTION_SESSION_WINDOW_MS, SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
+    return_focus_for_retry, CorrectionSession, DictationLifecycleState, DictationMode, PillAction,
+    VoiceWaveController, VoiceWaveHudState, CORRECTION_SESSION_WINDOW_MS,
+    SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -148,7 +148,12 @@ impl VoiceWaveController {
                 _ => 0,
             };
             sleep(Duration::from_millis(delay_ms)).await;
-            Some(self.insertion_engine.lock().await.press_enter_after_insert())
+            Some(
+                self.insertion_engine
+                    .lock()
+                    .await
+                    .press_enter_after_insert(),
+            )
         } else {
             None
         };
@@ -286,9 +291,7 @@ pub(super) fn announce_insertion(
         // high-confidence correction candidate — the dictionary review
         // popup already ingests these independently, so this never
         // double-surfaces on the default calm UX.
-        if settings.pill_action_suggestions
-            && insertion_success
-            && correction_candidates.len() == 1
+        if settings.pill_action_suggestions && insertion_success && correction_candidates.len() == 1
         {
             let term = correction_candidates[0].clone();
             emit_pill_action_notice(

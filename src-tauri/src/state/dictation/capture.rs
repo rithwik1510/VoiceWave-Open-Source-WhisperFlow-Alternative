@@ -18,10 +18,7 @@ use crate::state::{
     HANDS_FREE_MAX_CAPTURE_MS, HANDS_FREE_SILENCE_TIMEOUT_MS, MAX_RELEASE_TAIL_MS,
 };
 use std::{
-    sync::{
-        atomic::Ordering,
-        Arc, Mutex as StdMutex,
-    },
+    sync::{atomic::Ordering, Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 use tauri::Emitter;
@@ -67,7 +64,9 @@ impl VoiceWaveController {
         let capture_started = Instant::now();
         let segments = match (mode, retry_audio.as_ref()) {
             (_, Some(retained)) => vec![retained.samples.to_vec()],
-            (DictationMode::Fixture, None) => phase1::build_fixture_segments(settings.vad_threshold),
+            (DictationMode::Fixture, None) => {
+                phase1::build_fixture_segments(settings.vad_threshold)
+            }
             (DictationMode::Microphone, None) => {
                 let Some(rows) = self.capture_from_mic(run, &mut release_tail_ms).await? else {
                     return Ok(None);
@@ -276,21 +275,16 @@ impl VoiceWaveController {
             )
             .await;
         }
-        let captured = captured_task.await.map_err(|err| {
-            ControllerError::Runtime(format!("audio task join failure: {err}"))
-        })?;
+        let captured = captured_task
+            .await
+            .map_err(|err| ControllerError::Runtime(format!("audio task join failure: {err}")))?;
 
         match captured {
             Ok(rows) => Ok(Some(rows)),
             Err(AudioError::Cancelled) => {
                 tracing::info!("capture cancelled (session={session_id})");
-                self.set_session_state(
-                    session_id,
-                    DictationLifecycleState::Idle,
-                    None,
-                    None,
-                )
-                .await;
+                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
+                    .await;
                 self.update_state(
                     &app,
                     VoiceWaveHudState::Idle,
@@ -301,13 +295,8 @@ impl VoiceWaveController {
             }
             Err(AudioError::NoSpeechDetected) => {
                 tracing::info!("capture ended with no speech (session={session_id})");
-                self.set_session_state(
-                    session_id,
-                    DictationLifecycleState::Idle,
-                    None,
-                    None,
-                )
-                .await;
+                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
+                    .await;
                 let device_label = input_device.as_deref().unwrap_or("system default");
                 let warmup_peak_msg = if threshold > 0.0 {
                     format!(

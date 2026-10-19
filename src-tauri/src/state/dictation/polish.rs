@@ -102,11 +102,12 @@ pub(super) async fn resolve_delivery(
     let mut inserted_text = if let Some(expansion) = &exact_snippet_expansion {
         expansion.clone()
     } else {
-        restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript)
-            .unwrap_or_else(|error| {
+        restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript).unwrap_or_else(
+            |error| {
                 tracing::warn!("snippet restoration failed before insertion: {error}");
                 baseline_transcript.clone()
-            })
+            },
+        )
     };
     let mut polish_meta = PolishHistoryMeta {
         selected_profile: Some(polish_profile.as_str().to_string()),
@@ -139,8 +140,8 @@ pub(super) async fn resolve_delivery(
                     // existing release_to_inserted_ms metric measures from.
                     let elapsed_since_release_ms = release_to_transcribing_ms
                         .saturating_add(transcribing_started.elapsed().as_millis() as u64);
-                    let remaining_budget_ms = WAIT_VALIDATED_RELEASE_BUDGET_MS
-                        .saturating_sub(elapsed_since_release_ms);
+                    let remaining_budget_ms =
+                        WAIT_VALIDATED_RELEASE_BUDGET_MS.saturating_sub(elapsed_since_release_ms);
                     if remaining_budget_ms == 0 {
                         // Decode alone consumed the budget (long dictation):
                         // insert the floor immediately, no attempt.
@@ -189,9 +190,8 @@ pub(super) async fn resolve_delivery(
                                                 "{} polish changed a protected snippet slot ({error}); inserting deterministic floor",
                                                 polish_profile.as_str()
                                             );
-                                            polish_meta.polish_outcome = Some(
-                                                POLISH_OUTCOME_FALLBACK_REJECTED.to_string(),
-                                            );
+                                            polish_meta.polish_outcome =
+                                                Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
                                         }
                                     },
                                     Err(reasons) => {

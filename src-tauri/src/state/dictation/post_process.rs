@@ -10,9 +10,8 @@ use crate::settings::{resolve_profile, EffectivePolicy, InsertPath, PolishProfil
 use crate::snippet::{ProtectionError, ProtectionOutcome, SnippetExpansionPlan};
 use crate::state::{
     asr_integrity_metrics, dictation_retry_instruction, emit_pill_notice, emit_submit_notice,
-    return_focus_for_retry, should_reject_low_confidence_transcript_as_no_speech,
-    ControllerError, DictationLifecycleState, DictationMode, VoiceWaveController,
-    VoiceWaveHudState,
+    return_focus_for_retry, should_reject_low_confidence_transcript_as_no_speech, ControllerError,
+    DictationLifecycleState, DictationMode, VoiceWaveController, VoiceWaveHudState,
 };
 use crate::transcript::{
     finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
@@ -236,7 +235,9 @@ impl VoiceWaveController {
             if plan.validate_candidate(&deterministic_transcript).is_ok() {
                 deterministic_transcript
             } else {
-                tracing::warn!("deterministic formatting changed a snippet slot; using protected baseline");
+                tracing::warn!(
+                    "deterministic formatting changed a snippet slot; using protected baseline"
+                );
                 plan.protected_text().to_string()
             }
         } else {

@@ -127,15 +127,15 @@ impl VoiceWaveController {
         let insertion = self
             .insert_transcript(&run, &delivery, &text, &spoken)
             .await;
-        self.spawn_background_polish(
-            &run,
-            &text,
-            &insertion,
-            delivery.late_polish_handle.take(),
-        );
+        self.spawn_background_polish(&run, &text, &insertion, delivery.late_polish_handle.take());
         announce_insertion(&run, &delivery, &text, &spoken, &insertion);
-        self.set_session_state(run.session_id, DictationLifecycleState::Inserted, None, None)
-            .await;
+        self.set_session_state(
+            run.session_id,
+            DictationLifecycleState::Inserted,
+            None,
+            None,
+        )
+        .await;
         self.record_dictation(&run, &capture, transcription, &text, delivery, insertion)
             .await;
         Ok(())

@@ -14,10 +14,9 @@ use crate::settings::DecodeMode;
 use crate::state::{
     decode_mode_key, dictation_retry_instruction, effective_release_watchdog_threshold_ms,
     emit_pill_notice, final_decode_timeout, floor_decode_mode, fw_min_decode_audio_ms,
-    is_likely_low_quality_input_name, release_watchdog_recovered,
-    sample_count_to_ms, ControllerError, DictationLifecycleState, DictationMode,
-    VoiceWaveController, VoiceWaveHudState, ENGINE_WAIT_NOTICE_GRACE_MS,
-    HANDS_FREE_MAX_CAPTURE_MS,
+    is_likely_low_quality_input_name, release_watchdog_recovered, sample_count_to_ms,
+    ControllerError, DictationLifecycleState, DictationMode, VoiceWaveController,
+    VoiceWaveHudState, ENGINE_WAIT_NOTICE_GRACE_MS, HANDS_FREE_MAX_CAPTURE_MS,
 };
 use crate::transcript::sanitize_user_transcript;
 use std::{
@@ -286,8 +285,7 @@ impl VoiceWaveController {
             ..
         } = *run;
         let CapturedAudio {
-            ref source_samples,
-            ..
+            ref source_samples, ..
         } = *capture;
         let decode_started = Instant::now();
         if mode == DictationMode::Microphone && whisper_pipeline {
@@ -337,7 +335,9 @@ impl VoiceWaveController {
                 &app,
                 "info",
                 "Getting your graphics card ready",
-                Some("One-time setup, up to a minute. Your text appears when it's done.".to_string()),
+                Some(
+                    "One-time setup, up to a minute. Your text appears when it's done.".to_string(),
+                ),
                 15_000,
             );
         }
@@ -436,9 +436,10 @@ impl VoiceWaveController {
             note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
         }
         if mode == DictationMode::Microphone {
-            if let Some(kind) = decode_telemetry.asr_step_down_kind.filter(|_| {
-                !self.gpu_notice_sent.swap(true, Ordering::Relaxed)
-            }) {
+            if let Some(kind) = decode_telemetry
+                .asr_step_down_kind
+                .filter(|_| !self.gpu_notice_sent.swap(true, Ordering::Relaxed))
+            {
                 let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
                 emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
             } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
