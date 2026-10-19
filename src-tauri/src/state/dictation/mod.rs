@@ -36,7 +36,7 @@ use crate::{
     },
     insertion::InsertTextRequest,
     phase1,
-    settings::{resolve_profile, DecodeMode, InsertPath, PolishProfile},
+    settings::{resolve_profile, DecodeMode, InsertPath, PolishProfile, VoiceWaveSettings},
     snippet::{ProtectionError, ProtectionOutcome, SnippetExpansionPlan},
     transcript::{
         finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
@@ -55,6 +55,29 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+/// One dictation's fixed inputs, shared by every phase.
+struct DictationRun {
+    app: AppHandle,
+    mode: DictationMode,
+    session_id: u64,
+    control_mode: DictationControlMode,
+    cancel_token: CancellationToken,
+    /// Set when the user ends the capture (release, second press, Stop).
+    stop_flag: Arc<AtomicBool>,
+    /// Flips the capture to hands-free limits (at start or on a double-tap lock).
+    hands_free: Arc<AtomicBool>,
+    /// Kept audio being transcribed again (Try again, plan 020).
+    retry_audio: Option<RetainedAudio>,
+    flow_started: Instant,
+    /// Taken once at flow start, so a mid-flight settings change cannot
+    /// produce a hybrid dictation.
+    settings: VoiceWaveSettings,
+    max_capture_ms: u64,
+    /// faster-whisper and the whisper.cpp speech worker share capture,
+    /// conditioning, quality gates and finalization (plan 019).
+    whisper_pipeline: bool,
+}
 
 impl VoiceWaveController {
     pub(super) async fn run_dictation_flow(
@@ -85,7 +108,34 @@ impl VoiceWaveController {
         }
 
         let settings = self.settings.lock().await.clone();
-        let max_capture_ms = clamp_max_utterance_ms(settings.max_utterance_ms);
+        let run = DictationRun {
+            max_capture_ms: clamp_max_utterance_ms(settings.max_utterance_ms),
+            whisper_pipeline: uses_whisper_pipeline(&settings.active_model),
+            app,
+            mode,
+            session_id,
+            control_mode,
+            cancel_token,
+            stop_flag,
+            hands_free,
+            retry_audio,
+            flow_started,
+            settings,
+        };
+        let DictationRun {
+            ref app,
+            mode,
+            session_id,
+            control_mode,
+            ref cancel_token,
+            ref stop_flag,
+            ref hands_free,
+            ref retry_audio,
+            flow_started,
+            ref settings,
+            max_capture_ms,
+            whisper_pipeline,
+        } = run;
         let mut release_tail_ms = effective_release_tail_ms(
             clamp_release_tail_ms(settings.release_tail_ms),
             max_capture_ms,
@@ -96,9 +146,6 @@ impl VoiceWaveController {
         let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
         let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
         let use_asr_worker = is_whisper_cpp_model(&settings.active_model);
-        // faster-whisper and the whisper.cpp speech worker share capture,
-        // conditioning, quality gates and finalization (plan 019).
-        let whisper_pipeline = uses_whisper_pipeline(&settings.active_model);
         // Fail on the press, not after the user has spoken a whole sentence: a
         // model only counts once its download finished and was registered (a
         // half-downloaded model must never reach a worker).
