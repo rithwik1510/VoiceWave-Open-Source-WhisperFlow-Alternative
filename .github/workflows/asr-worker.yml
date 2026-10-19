@@ -1,0 +1,42 @@
+name: Speech workers
+
+# Builds and smoke-tests the whisper.cpp / Parakeet speech workers whenever
+# their sources change, so a broken worker build is caught on the pull request
+# instead of at release time. The steps live in the shared composite action
+# .github/actions/asr-workers (release.yml runs the same ones). The whisper.cpp
+# version pin and the Parakeet patch application are in
+# src-tauri/windows/asr-worker/CMakeLists.txt.
+on:
+  pull_request:
+    paths:
+      - "src-tauri/windows/asr-worker/**"
+      - "scripts/asr-worker/**"
+      - ".github/actions/asr-workers/**"
+      - ".github/workflows/asr-worker.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src-tauri/windows/asr-worker/**"
+      - "scripts/asr-worker/**"
+      - ".github/actions/asr-workers/**"
+      - ".github/workflows/asr-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: asr-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  asr-workers:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and smoke-test speech workers
+        uses: ./.github/actions/asr-workers

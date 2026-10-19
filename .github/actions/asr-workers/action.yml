@@ -1,0 +1,98 @@
+name: Build and smoke-test the speech workers
+description: >-
+  Builds the whisper.cpp speech workers (voicewave-asr-vk / -cpu) with MSVC,
+  checks their DLL dependencies, and smoke-tests the CPU worker with whisper
+  tiny.en and NVIDIA Parakeet. Shared by release.yml and asr-worker.yml so a
+  release and a pull request exercise exactly the same steps. Needs a
+  windows-latest runner and a checked-out repository.
+
+runs:
+  using: composite
+  steps:
+    # Only this build machine needs the Vulkan SDK; users need nothing beyond
+    # their GPU driver.
+    - name: Install Vulkan SDK (pinned, cached)
+      # v1.7.0, pinned by commit SHA.
+      uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533
+      with:
+        vulkan_version: 1.4.341.1
+        install_runtime: false
+        cache: true
+        stripdown: true
+
+    - name: Build speech workers (MSVC)
+      shell: pwsh
+      run: ./scripts/asr-worker/build-asr-worker.ps1 -BuildRoot "$env:RUNNER_TEMP\asr-worker-build"
+
+    - name: Verify speech worker dependencies (dumpbin)
+      shell: pwsh
+      # Fails if the CPU worker imports vulkan-1.dll, the Vulkan worker
+      # imports it at load time instead of delay-loading it, or either one
+      # imports a VC++ runtime DLL (they must run without the redistributable).
+      run: ./scripts/asr-worker/check-asr-worker-deps.ps1
+
+    # The Parakeet revision and hash are read from the app's own model
+    # manifest, so the smoke test always checks the artifact users download.
+    - name: Resolve Parakeet model pin
+      id: parakeet
+      shell: pwsh
+      run: |
+        $src = Get-Content "src-tauri/src/model_manager/mod.rs" -Raw
+        $rev = [regex]::Match($src, 'PARAKEET_REPO_REVISION: &str = "([0-9a-f]{40})"')
+        $sha = [regex]::Match($src, 'model_id: PARAKEET_MODEL_ID\.to_string\(\),\s*version: "[^"]+"\.to_string\(\),\s*format: [A-Z_]+\.to_string\(\),\s*size: ([\d_]+),\s*sha256: "([0-9a-f]{64})"')
+        if (-not $rev.Success -or -not $sha.Success) { throw "Could not read the Parakeet pin from src-tauri/src/model_manager/mod.rs" }
+        "revision=$($rev.Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "size=$($sha.Groups[1].Value -replace '_', '')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "sha256=$($sha.Groups[2].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "dir=$env:RUNNER_TEMP\asr-smoke-models" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+    - name: Restore Parakeet model cache
+      id: parakeet-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.parakeet.outputs.dir }}
+        key: parakeet-tdt-0.6b-v3-q8_0-${{ steps.parakeet.outputs.sha256 }}
+
+    - name: Download Parakeet model (cache miss)
+      if: steps.parakeet-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        REVISION: ${{ steps.parakeet.outputs.revision }}
+        DIR: ${{ steps.parakeet.outputs.dir }}
+      run: |
+        New-Item -ItemType Directory -Force -Path $env:DIR | Out-Null
+        Invoke-WebRequest -UseBasicParsing -OutFile (Join-Path $env:DIR "parakeet.bin") `
+          -Uri "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/$env:REVISION/ggml-parakeet-tdt-0.6b-v3-q8_0.bin"
+
+    - name: Verify Parakeet model
+      shell: pwsh
+      env:
+        EXPECTED_SIZE: ${{ steps.parakeet.outputs.size }}
+        EXPECTED_SHA256: ${{ steps.parakeet.outputs.sha256 }}
+        DIR: ${{ steps.parakeet.outputs.dir }}
+      run: |
+        $model = Get-Item (Join-Path $env:DIR "parakeet.bin")
+        if ($model.Length -ne [int64]$env:EXPECTED_SIZE) { throw "parakeet.bin is $($model.Length) bytes, expected $env:EXPECTED_SIZE" }
+        $hash = (Get-FileHash -Algorithm SHA256 $model.FullName).Hash.ToLowerInvariant()
+        if ($hash -ne $env:EXPECTED_SHA256) { throw "parakeet.bin hash mismatch: $hash" }
+
+    # Saved only after the hash check, so a bad download is never cached.
+    - name: Save Parakeet model cache
+      if: steps.parakeet-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.parakeet.outputs.dir }}
+        key: parakeet-tdt-0.6b-v3-q8_0-${{ steps.parakeet.outputs.sha256 }}
+
+    - name: Smoke test speech workers (whisper + Parakeet, no GPU on the runner)
+      shell: pwsh
+      env:
+        PARAKEET_MODEL: ${{ steps.parakeet.outputs.dir }}\parakeet.bin
+      run: |
+        # Pinned tiny model, only to prove the CPU worker loads and decodes here.
+        $model = Join-Path $env:RUNNER_TEMP "ggml-tiny.en.bin"
+        Invoke-WebRequest -UseBasicParsing -OutFile $model `
+          -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin"
+        $hash = (Get-FileHash -Algorithm SHA256 $model).Hash.ToLowerInvariant()
+        if ($hash -ne "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f") { throw "ggml-tiny.en.bin hash mismatch: $hash" }
+        ./scripts/asr-worker/smoke-asr-worker.ps1 -ModelPath $model -ParakeetModelPath $env:PARAKEET_MODEL
