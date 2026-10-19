@@ -14,22 +14,18 @@ use post_process::{FormattedText, SpokenText};
 use transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::{
     clamp_max_utterance_ms, emit_pill_action_notice, emit_pill_notice, emit_pill_rescue,
-    emit_submit_notice, now_utc_ms, restore_snippet_candidate, sample_count_to_ms,
-    ControllerError, DictationControlMode, DictationLifecycleState, DictationMode,
-    LatencyBreakdownEvent, PillAction, RetainedAudio, VoiceWaveController, VoiceWaveHudState,
-    MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL, POLISH_PILL_ANNOUNCE_EVERY,
+    emit_submit_notice, now_utc_ms, sample_count_to_ms, ControllerError, DictationControlMode,
+    DictationLifecycleState, DictationMode, LatencyBreakdownEvent, PillAction, RetainedAudio,
+    VoiceWaveController, VoiceWaveHudState, MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL,
 };
 use crate::{
     diagnostics::LatencyMetricRecord,
     history::PolishHistoryMeta,
-    inference::{polish_gate::gate_polish_candidate, uses_whisper_pipeline},
-    settings::{InsertPath, PolishProfile, VoiceWaveSettings},
+    inference::uses_whisper_pipeline,
+    settings::VoiceWaveSettings,
 };
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
 use tauri::{AppHandle, Emitter};
@@ -134,10 +130,16 @@ impl VoiceWaveController {
         else {
             return Ok(());
         };
-        let delivery = resolve_delivery(&run, &text, &spoken, &transcription).await;
+        let mut delivery = resolve_delivery(&run, &text, &spoken, &transcription).await;
         let insertion = self
             .insert_transcript(&run, &delivery, &text, &spoken)
             .await;
+        self.spawn_background_polish(
+            &run,
+            &text,
+            &insertion,
+            delivery.late_polish_handle.take(),
+        );
         let Transcription {
             worker: final_worker,
             mode_choice:
@@ -167,12 +169,6 @@ impl VoiceWaveController {
             ..
         } = spoken;
         let FormattedText {
-            polish_profile,
-            profile_policy,
-            custom_terms,
-            exact_snippet_expansion,
-            inline_snippet_plan,
-            final_transcript,
             asr_integrity_percent,
             asr_raw_word_count,
             asr_final_word_count,
@@ -182,163 +178,21 @@ impl VoiceWaveController {
             inserted_text,
             polish_meta,
             polish_wait_ms,
-            late_polish_handle,
+            ..
         } = delivery;
         let Insertion {
             success: insertion_success,
             method: insertion_method,
             target_class: insertion_target_class,
             history_recorded: insertion_history_recorded,
-            record_id: insertion_record_id,
             blocked_by_elevation: insertion_blocked_by_elevation,
             submit_outcome,
             correction_candidates,
             post_started,
             post_before_insert_ms,
             insert_ms,
+            ..
         } = insertion;
-
-        // Off-by-default on-device LLM polish (plan 005, Phase 3) — Standard
-        // profile only (wait-validated profiles already made their single
-        // attempt inline, and Literal never calls the model). Only when the
-        // experimental flag is ON and the deterministic text actually landed.
-        // This runs in a background task spawned AFTER insertion, so it adds
-        // ZERO release-to-text latency and never touches the ASR worker/gate. It
-        // OFFERS the polished text via the pill's Copy action; it never
-        // overwrites the inserted text, and a rewrite is surfaced only if the
-        // fidelity validator passes. With the flag off (default) nothing spawns
-        // and behavior is byte-identical to before.
-        if insertion_success
-            && settings.llm_polish_enabled
-            && profile_policy.insert_path == InsertPath::Immediate
-            && exact_snippet_expansion.is_none()
-        {
-            let app_handle = app.clone();
-            let raw = final_transcript.clone();
-            let polish_count = Arc::clone(&self.polish_success_count);
-            let custom_terms_for_polish = custom_terms.clone();
-            let session_counter = Arc::clone(&self.session_counter);
-            let history_manager = Arc::clone(&self.history_manager);
-            let record_id_for_polish = insertion_record_id.clone();
-            let snippet_plan_for_polish = inline_snippet_plan.clone();
-            tauri::async_runtime::spawn(async move {
-                let polish_started = Instant::now();
-                if let Ok(Some(polished)) = crate::inference::llm_polish::polish_text_for_profile(
-                    raw.clone(),
-                    PolishProfile::Standard.as_str().to_string(),
-                )
-                .await
-                {
-                    // Re-apply the dictionary-term stabilizer to the LLM output,
-                    // then gate strictly on the fidelity validator.
-                    let Ok(stabilized) = gate_polish_candidate(
-                        &raw,
-                        &polished,
-                        &custom_terms_for_polish,
-                        PolishProfile::Standard,
-                    ) else {
-                        return;
-                    };
-                    if stabilized.trim() == raw.trim() {
-                        return;
-                    }
-                    let Ok(restored) =
-                        restore_snippet_candidate(snippet_plan_for_polish.as_deref(), &stabilized)
-                    else {
-                        return;
-                    };
-                    let polish_latency_ms = polish_started.elapsed().as_millis() as u64;
-                    // Enrich this dictation's History record (keyed by its
-                    // stable record id, so this is never stale) with the
-                    // validated candidate.
-                    if let Some(record_id) = record_id_for_polish {
-                        let update = PolishHistoryMeta {
-                            polished_text: Some(restored.clone()),
-                            polish_latency_ms: Some(polish_latency_ms),
-                            ..PolishHistoryMeta::default()
-                        };
-                        if history_manager
-                            .lock()
-                            .await
-                            .update_polish_meta(&record_id, &update)
-                            .is_ok()
-                        {
-                            let _ = app_handle.emit_to(
-                                MAIN_WINDOW_LABEL,
-                                "voicewave://history-updated",
-                                (),
-                            );
-                        }
-                    }
-                    // Session-aware offer: if a newer dictation started while
-                    // this polish ran, the offer is obsolete — drop it
-                    // silently (no stale pill offers).
-                    if session_counter.load(Ordering::Relaxed) != session_id {
-                        return;
-                    }
-                    // Polish succeeds on nearly every dictation, so we do NOT
-                    // pop the pill each time — that would bury the pill's
-                    // important fallback/error messages in noise. Announce
-                    // only once every POLISH_PILL_ANNOUNCE_EVERY validated
-                    // polishes as a quiet "on-device polishing is working"
-                    // signal. `fetch_add` returns the pre-increment value, so
-                    // the first success (0) announces immediately, then every
-                    // 50th thereafter.
-                    let nth = polish_count.fetch_add(1, Ordering::Relaxed);
-                    if nth % POLISH_PILL_ANNOUNCE_EVERY == 0 {
-                        emit_pill_rescue(
-                            &app_handle,
-                            "info",
-                            "Polished version ready",
-                            None,
-                            restored,
-                            Some("copyTranscript"),
-                        );
-                    }
-                }
-            });
-        }
-
-        // Wait-path attempt that missed the release budget: let it finish in
-        // the background and, if the gate accepts it, record the candidate on
-        // this dictation's History record (`polishedText` only — the outcome
-        // stays `fallbackTimeout` and the target app is never touched).
-        if let (Some(handle), Some(record_id)) = (late_polish_handle, insertion_record_id.clone()) {
-            let history_manager = Arc::clone(&self.history_manager);
-            let app_for_late = app.clone();
-            let raw = final_transcript.clone();
-            let custom_terms_late = custom_terms.clone();
-            let snippet_plan_late = inline_snippet_plan.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Ok(Some(candidate)) = handle.await {
-                    if let Ok(stabilized) =
-                        gate_polish_candidate(&raw, &candidate, &custom_terms_late, polish_profile)
-                    {
-                        let Ok(restored) =
-                            restore_snippet_candidate(snippet_plan_late.as_deref(), &stabilized)
-                        else {
-                            return;
-                        };
-                        let update = PolishHistoryMeta {
-                            polished_text: Some(restored),
-                            ..PolishHistoryMeta::default()
-                        };
-                        if history_manager
-                            .lock()
-                            .await
-                            .update_polish_meta(&record_id, &update)
-                            .is_ok()
-                        {
-                            let _ = app_for_late.emit_to(
-                                MAIN_WINDOW_LABEL,
-                                "voicewave://history-updated",
-                                (),
-                            );
-                        }
-                    }
-                }
-            });
-        }
 
         // Rescue pill (Wispr Flow fallback pattern): when the text did not
         // land in the target app, the pill expands with the transcript so the
