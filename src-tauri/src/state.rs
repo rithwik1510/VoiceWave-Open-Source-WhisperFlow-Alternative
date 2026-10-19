@@ -24,7 +24,7 @@ use crate::{
         RetentionPolicy, SessionHistoryQuery, SessionHistoryRecord,
     },
     hotkey::{
-        validate_push_to_talk, HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager,
+        validate_push_to_talk, HookEvent, HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager,
         HotkeyPhase, HotkeyRuntime, HotkeySnapshot,
     },
     inference::{
@@ -2345,12 +2345,20 @@ impl VoiceWaveController {
 
         let controller = self.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some(signal) = event_rx.recv().await {
-                if let Err(err) = controller
-                    .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
-                    .await
-                {
-                    tracing::warn!("hotkey action failed: {err}");
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    HookEvent::Signal(signal) => {
+                        if let Err(err) = controller
+                            .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
+                            .await
+                        {
+                            tracing::warn!("hotkey action failed: {err}");
+                        }
+                    }
+                    // Keys for the Settings shortcut recorder.
+                    HookEvent::Capture(key) => {
+                        let _ = app.emit("voicewave://hotkey-capture", key);
+                    }
                 }
             }
             tracing::warn!("global hotkey event channel closed");

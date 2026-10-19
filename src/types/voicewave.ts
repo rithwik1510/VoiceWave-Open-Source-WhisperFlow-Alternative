@@ -280,6 +280,14 @@ export interface HotkeyEvent {
   phase: HotkeyPhase;
 }
 
+/** A key edge from the keyboard hook while Settings records a shortcut.
+ * `key` is a canonical token ("Ctrl", "Windows", "F9", "Escape"), or null for
+ * a key that cannot be part of a shortcut. */
+export interface HotkeyCaptureKey {
+  key: string | null;
+  pressed: boolean;
+}
+
 export type MicrophonePermission = "granted" | "denied" | "unknown";
 export type InsertionCapability = "available" | "restricted";
 

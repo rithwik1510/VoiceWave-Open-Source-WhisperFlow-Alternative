@@ -72,6 +72,23 @@ pub struct HotkeySignal {
     pub phase: HotkeyPhase,
 }
 
+/// One key edge seen by the hook while Settings records a shortcut. `key` is
+/// the canonical token ("Ctrl", "Alt", "Shift", "Windows", "X", "F9",
+/// "Space", "Escape"), or None for a key that cannot be part of a shortcut.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureKey {
+    pub key: Option<String>,
+    pub pressed: bool,
+}
+
+/// What the hook thread reports to the controller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookEvent {
+    Signal(HotkeySignal),
+    Capture(CaptureKey),
+}
+
 #[derive(Debug, Clone)]
 struct ParsedHotkey {
     ctrl: bool,
@@ -115,10 +132,11 @@ impl ParsedHotkey {
     }
 }
 
-/// While set and in the future, the Settings recorder owns the keyboard: no
-/// dictation signals, no swallowed keys. A lease rather than a flag so a
-/// recorder that vanishes mid-capture cannot leave the hotkey dead.
-const CAPTURE_LEASE: Duration = Duration::from_secs(60);
+/// While set and in the future, and a VoiceWave window is in front, the
+/// Settings recorder owns the keyboard: the hook reports every key to it and
+/// keeps them from apps and the shell (so Win cannot open Start). A lease the
+/// UI keeps renewing, so a recorder that vanishes cannot hold the keyboard.
+const CAPTURE_LEASE: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct HotkeyEdgeTracker {
@@ -154,6 +172,47 @@ impl HotkeyEdgeTracker {
     fn capturing(&self) -> bool {
         self.capture_until
             .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Capture mode. Keys stay tracked so edges are consistent afterwards;
+    /// every fresh edge is reported, and presses are swallowed together with
+    /// their repeats and releases. No dictation signals.
+    fn capture_key_event(&mut self, vk: u16, pressed: bool) -> (bool, Option<CaptureKey>) {
+        if vk == VK_ESCAPE_ {
+            if !pressed {
+                if !self.escape_down {
+                    return (false, None);
+                }
+                self.escape_down = false;
+                return (std::mem::take(&mut self.escape_owned), None);
+            }
+            if self.escape_down {
+                return (self.escape_owned, None);
+            }
+            // Owned, so its release is swallowed even if capture ends first.
+            self.escape_down = true;
+            self.escape_owned = true;
+            let key = Some("Escape".to_string());
+            return (true, Some(CaptureKey { key, pressed }));
+        }
+
+        let fresh = if pressed {
+            self.keys_down.insert(vk)
+        } else {
+            self.keys_down.remove(&vk)
+        };
+        if !fresh {
+            // Auto-repeat, or the release of a key pressed before tracking.
+            return (pressed && self.swallowed.contains(&vk), None);
+        }
+        let consume = if pressed {
+            self.swallowed.insert(vk);
+            true
+        } else {
+            self.swallowed.remove(&vk)
+        };
+        let key = capture_key_name(vk);
+        (consume, Some(CaptureKey { key, pressed }))
     }
 
     fn key_event(&mut self, vk: u16, pressed: bool) -> Vec<HotkeySignal> {
@@ -215,17 +274,8 @@ impl HotkeyEdgeTracker {
         } else if !self.keys_down.remove(&vk) {
             return HotkeyEventOutcome::default();
         }
-        // A release always matches its press, even if capture began between.
+        // A release always matches its press, even if capture ended between.
         let mut consume = !pressed && self.swallowed.remove(&vk);
-
-        // Keep tracking keys while the recorder captures, so edges stay
-        // consistent afterwards, but stay invisible to it and to dictation.
-        if self.capturing() {
-            return HotkeyEventOutcome {
-                consume,
-                ..HotkeyEventOutcome::default()
-            };
-        }
 
         let mut signals = Vec::with_capacity(2);
         if pressed
@@ -278,6 +328,26 @@ fn parsed_is_active(parsed: &ParsedHotkey, keys_down: &HashSet<u16>) -> bool {
     parsed.modifier_only || keys_down.contains(&parsed.main_vk)
 }
 
+/// Canonical token for a virtual key, matching what `parse_combo` accepts.
+fn capture_key_name(vk: u16) -> Option<String> {
+    let name = match vk {
+        VK_CONTROL_ | VK_LCONTROL_ | VK_RCONTROL_ => "Ctrl",
+        VK_MENU_ | VK_LMENU_ | VK_RMENU_ => "Alt",
+        VK_SHIFT_ | VK_LSHIFT_ | VK_RSHIFT_ => "Shift",
+        VK_LWIN_ | VK_RWIN_ => "Windows",
+        // Digits and letters: the virtual-key code is the ASCII code.
+        0x30..=0x39 | 0x41..=0x5A => return Some(char::from(vk as u8).to_string()),
+        0x70..=0x87 => return Some(format!("F{}", vk - 0x6F)),
+        _ => {
+            return NAMED_MAIN_KEYS
+                .iter()
+                .find(|(_, code)| *code == vk)
+                .map(|(name, _)| name.to_string())
+        }
+    };
+    Some(name.to_string())
+}
+
 fn key_set_contains_any(keys_down: &HashSet<u16>, candidates: &[u16]) -> bool {
     candidates.iter().any(|vk| keys_down.contains(vk))
 }
@@ -308,7 +378,7 @@ pub struct HotkeyRuntime {
 impl HotkeyRuntime {
     pub fn start(
         config: HotkeyConfig,
-        sender: UnboundedSender<HotkeySignal>,
+        sender: UnboundedSender<HookEvent>,
     ) -> Result<Self, HotkeyError> {
         #[cfg(target_os = "windows")]
         {
@@ -345,8 +415,8 @@ impl HotkeyRuntime {
         Ok(())
     }
 
-    /// Pauses dictation triggers while Settings records a new shortcut. Each
-    /// `true` renews a short lease (see `CAPTURE_LEASE`).
+    /// Routes the keyboard to the Settings recorder (see `CAPTURE_LEASE`).
+    /// Each `true` renews the lease.
     pub fn set_capture(&self, active: bool) {
         let until = active.then(|| Instant::now() + CAPTURE_LEASE);
         with_hook_tracker(|tracker| tracker.capture_until = until);
@@ -385,7 +455,7 @@ impl Drop for HotkeyRuntime {
 #[cfg(target_os = "windows")]
 struct HookDispatch {
     tracker: HotkeyEdgeTracker,
-    sender: UnboundedSender<HotkeySignal>,
+    sender: UnboundedSender<HookEvent>,
     dictation_active: Arc<AtomicBool>,
 }
 
@@ -454,7 +524,7 @@ fn acquire_global_hook_mutex() -> Result<GlobalHookMutex, String> {
 #[cfg(target_os = "windows")]
 fn start_windows_hotkey_runtime(
     config: HotkeyConfig,
-    sender: UnboundedSender<HotkeySignal>,
+    sender: UnboundedSender<HookEvent>,
 ) -> Result<HotkeyRuntime, HotkeyError> {
     use std::sync::mpsc;
 
@@ -486,7 +556,7 @@ fn start_windows_hotkey_runtime(
 #[cfg(target_os = "windows")]
 fn windows_hotkey_thread(
     tracker: HotkeyEdgeTracker,
-    sender: UnboundedSender<HotkeySignal>,
+    sender: UnboundedSender<HookEvent>,
     dictation_active: Arc<AtomicBool>,
     ready: std::sync::mpsc::SyncSender<Result<u32, String>>,
 ) {
@@ -590,16 +660,25 @@ unsafe extern "system" fn low_level_keyboard_proc(
             if let Some(dispatch) = HOOK_DISPATCH.get() {
                 if let Ok(mut state) = dispatch.lock() {
                     if let Some(state) = state.as_mut() {
-                        let dictation_active = state.dictation_active.load(Ordering::Acquire);
-                        let outcome = state.tracker.handle_key_event(
-                            event.vkCode as u16,
-                            pressed,
-                            dictation_active,
-                        );
-                        for signal in outcome.signals {
-                            let _ = state.sender.send(signal);
-                        }
-                        if outcome.consume {
+                        let vk = event.vkCode as u16;
+                        // Capture only while a VoiceWave window is in front:
+                        // clicking away hands the keyboard back at once.
+                        let consume = if state.tracker.capturing() && foreground_is_ours() {
+                            let (consume, key) = state.tracker.capture_key_event(vk, pressed);
+                            if let Some(key) = key {
+                                let _ = state.sender.send(HookEvent::Capture(key));
+                            }
+                            consume
+                        } else {
+                            let dictation_active = state.dictation_active.load(Ordering::Acquire);
+                            let outcome =
+                                state.tracker.handle_key_event(vk, pressed, dictation_active);
+                            for signal in outcome.signals {
+                                let _ = state.sender.send(HookEvent::Signal(signal));
+                            }
+                            outcome.consume
+                        };
+                        if consume {
                             return 1;
                         }
                     }
@@ -608,6 +687,24 @@ unsafe extern "system" fn low_level_keyboard_proc(
         }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+#[cfg(target_os = "windows")]
+fn foreground_is_ours() -> bool {
+    use windows_sys::Win32::{
+        System::Threading::GetCurrentProcessId,
+        UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+    };
+    // SAFETY: plain queries; `pid` outlives the call.
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.is_null() {
+            return false;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, &mut pid);
+        pid == GetCurrentProcessId()
+    }
 }
 
 #[derive(Debug, Clone)]

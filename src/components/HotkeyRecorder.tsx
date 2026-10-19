@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatHotkey, hotkeyKeys } from "../lib/hotkeys";
+import { listenVoicewaveHotkeyCapture } from "../lib/tauri";
 
 type Modifier = "Ctrl" | "Alt" | "Shift" | "Windows";
 
@@ -22,8 +23,24 @@ const MODIFIER_CODES: Record<string, Modifier> = {
 // Same set the backend accepts (NAMED_MAIN_KEYS in hotkey/mod.rs).
 const NAMED_MAIN_KEYS = new Set(["Space", "Insert", "Home", "End", "PageUp", "PageDown", "Pause", "ScrollLock"]);
 
-/** Layout-independent main key name from `KeyboardEvent.code`, or null. */
-function mainKeyFromCode(code: string): string | null {
+const UNSUPPORTED_KEY = "That key can't be part of a shortcut. Try a letter, a number, an F key, or Space.";
+
+// The backend lease is 30 s; renew well inside it while recording.
+const CAPTURE_RENEW_MS = 10_000;
+
+function isModifier(token: string): token is Modifier {
+  return (MODIFIER_ORDER as string[]).includes(token);
+}
+
+/** Canonical token (same as the hook reports) from `KeyboardEvent.code`. */
+function tokenFromCode(code: string): string | null {
+  if (code === "Escape") {
+    return code;
+  }
+  const modifier = MODIFIER_CODES[code];
+  if (modifier) {
+    return modifier;
+  }
   const letterOrDigit = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code);
   if (letterOrDigit) {
     return letterOrDigit[1] ?? letterOrDigit[2];
@@ -63,6 +80,11 @@ interface HotkeyRecorderProps {
  * Settings row that records a new hold-to-talk shortcut. The combo is what is
  * held when the first key is let go, so modifier-only chords like Ctrl + Win
  * work. Esc cancels; a rejected combo keeps recording with the reason shown.
+ *
+ * Keys come from the global keyboard hook (it sees Win, and swallows keys so
+ * Start and shell shortcuts don't fire). DOM key events are the fallback for
+ * when the hook isn't running; while it is, the webview never sees the keys,
+ * so the two sources never double up.
  */
 export function HotkeyRecorder({ value, defaultValue, registrationError, onSave, onCaptureChange }: HotkeyRecorderProps) {
   const [recording, setRecording] = useState(false);
@@ -89,14 +111,18 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
     setRecording(true);
   };
 
-  // The global hotkey stays paused exactly while recording, including when
+  // The hook stays in capture mode exactly while recording, including when
   // Settings closes mid-recording (unmount runs the cleanup).
   useEffect(() => {
     if (!recording) {
       return;
     }
     onCaptureChange(true);
-    return () => onCaptureChange(false);
+    const renew = window.setInterval(() => onCaptureChange(true), CAPTURE_RENEW_MS);
+    return () => {
+      window.clearInterval(renew);
+      onCaptureChange(false);
+    };
   }, [recording, onCaptureChange]);
 
   const save = useCallback(
@@ -122,40 +148,32 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
       return;
     }
 
-    // Capture phase on window, and stop propagation, so the recorder sees
-    // keys before (and instead of) app shortcuts like Esc-closes-Settings.
-    const onKeyDown = (event: KeyboardEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.repeat || savingRef.current) {
+    // `id` tells physical keys apart for the held set (DOM code, or the token
+    // for hook events).
+    const handleKey = (token: string | null, pressed: boolean, id: string) => {
+      if (savingRef.current) {
         return;
       }
-      if (event.code === "Escape") {
-        stop();
+      if (pressed) {
+        if (token === "Escape") {
+          stop();
+          return;
+        }
+        if (!token) {
+          setMessage(UNSUPPORTED_KEY);
+          return;
+        }
+        heldRef.current.add(id);
+        if (isModifier(token)) {
+          captureRef.current.modifiers.add(token);
+        } else {
+          captureRef.current.main = token;
+        }
+        setMessage(null);
+        setPreview(hotkeyKeys(captureToCombo(captureRef.current)));
         return;
       }
-      const modifier = MODIFIER_CODES[event.code];
-      const main = modifier ? null : mainKeyFromCode(event.code);
-      if (!modifier && !main) {
-        setMessage("That key can't be part of a shortcut. Try a letter, a number, an F key, or Space.");
-        return;
-      }
-      // Renews the backend's capture lease for slow, deliberate recordings.
-      onCaptureChange(true);
-      heldRef.current.add(event.code);
-      if (modifier) {
-        captureRef.current.modifiers.add(modifier);
-      } else {
-        captureRef.current.main = main;
-      }
-      setMessage(null);
-      setPreview(hotkeyKeys(captureToCombo(captureRef.current)));
-    };
-
-    const onKeyUp = (event: KeyboardEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (savingRef.current || !heldRef.current.has(event.code)) {
+      if (!heldRef.current.has(id)) {
         return;
       }
       const combo = captureToCombo(captureRef.current);
@@ -167,18 +185,46 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
       });
     };
 
-    // Leaving the window mid-recording (Alt+Tab, Start menu) cancels cleanly.
+    // Capture phase on window, and stop propagation, so the fallback path
+    // sees keys before (and instead of) app shortcuts like Esc-closes-Settings.
+    const onKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) {
+        handleKey(tokenFromCode(event.code), true, event.code);
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handleKey(tokenFromCode(event.code), false, event.code);
+    };
+
+    let disposed = false;
+    let unlistenHook: (() => void) | null = null;
+    void listenVoicewaveHotkeyCapture(({ key, pressed }) => handleKey(key, pressed, key ?? "")).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlistenHook = unlisten;
+      }
+    });
+
+    // Clicking away mid-recording cancels cleanly (the hook also stops
+    // capturing as soon as VoiceWave is no longer in front).
     const onBlur = () => stop();
 
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("blur", onBlur);
     return () => {
+      disposed = true;
+      unlistenHook?.();
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onBlur);
     };
-  }, [recording, onCaptureChange, resetCapture, save, stop]);
+  }, [recording, resetCapture, save, stop]);
 
   const keys = recording ? preview : hotkeyKeys(value);
   const isDefault = value === defaultValue;
