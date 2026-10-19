@@ -683,6 +683,7 @@ fn spawn(rung: Rung, ready_deadline: Duration) -> Result<WorkerProcess, Fault> {
             format!("failed to start {}: {err}", exe.display()),
         )
     })?;
+    crate::job_object::assign(&child);
     lock(&LIVE_PIDS).push(child.id());
     let stdio = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let (request_tx, request_rx) = mpsc::channel::<String>();
@@ -778,6 +779,7 @@ pub(crate) fn list_devices() -> Result<Vec<Value>, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("failed to start {}: {err}", exe.display()))?;
+    crate::job_object::assign(&child);
     let mut stdout = child.stdout.take().ok_or("list-devices stdout unavailable")?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {

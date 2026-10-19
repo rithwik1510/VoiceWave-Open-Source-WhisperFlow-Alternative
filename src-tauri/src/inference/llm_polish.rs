@@ -379,6 +379,7 @@ fn spawn_polish_worker() -> Result<PolishWorkerProcess, InferenceError> {
         ))
     })?;
 
+    crate::job_object::assign(&child);
     let stdin = child
         .stdin
         .take()
