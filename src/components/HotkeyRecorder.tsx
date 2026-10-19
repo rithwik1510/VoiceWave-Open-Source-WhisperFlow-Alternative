@@ -178,7 +178,7 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onBlur);
     };
-  }, [recording, resetCapture, save, stop]);
+  }, [recording, onCaptureChange, resetCapture, save, stop]);
 
   const keys = recording ? preview : hotkeyKeys(value);
   const isDefault = value === defaultValue;
