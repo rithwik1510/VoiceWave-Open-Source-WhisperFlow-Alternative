@@ -1672,14 +1672,41 @@ impl VoiceWaveController {
     /// + CUDA context init + CTranslate2 kernel compile, typically 2-5 s).
     /// Fire-and-forget — errors are logged, never propagated. Safe to call
     /// before any hotkey press. Never downloads: on first launch (default
-    /// model not on disk yet) the cache-only prefetch fails fast and the
-    /// onboarding download, with its progress UI, is the only fetch.
+    /// model not on disk yet) it does nothing and the onboarding download,
+    /// with its progress UI, is the only fetch.
+    ///
+    /// The model then stays resident: no idle timer unloads the speech worker
+    /// (only a model switch, GPU Off, or a fault does). A dictation that
+    /// arrives mid-load waits on the worker's slot lock instead of loading a
+    /// second copy.
     pub async fn prewarm_active_model(&self) {
         let active_model = {
             let settings = self.settings.lock().await;
             settings.active_model.clone()
         };
+        let installed = self
+            .model_manager
+            .lock()
+            .await
+            .get_installed(&active_model)
+            .is_some();
+        if !installed {
+            tracing::info!("startup prewarm skipped: {active_model} is not installed yet");
+            return;
+        }
+        // Timestamps in the log show how long the first dictation would have
+        // waited without this.
+        tracing::info!("startup prewarm started for {active_model}");
+        let started = Instant::now();
+        self.prewarm_active_model_inner(&active_model).await;
+        tracing::info!(
+            "startup prewarm finished for {active_model} in {} ms",
+            started.elapsed().as_millis()
+        );
+    }
 
+    async fn prewarm_active_model_inner(&self, active_model: &str) {
+        let active_model = active_model.to_string();
         match warmup_plan_for_model(&active_model) {
             WarmupPlan::FasterWhisper => {
                 if let Err(err) = ensure_faster_whisper_ready().await {
