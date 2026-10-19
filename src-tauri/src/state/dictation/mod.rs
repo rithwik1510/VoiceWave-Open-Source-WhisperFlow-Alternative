@@ -1,5 +1,7 @@
 //! The dictation pipeline: one run from the accepted press to inserted text.
 
+mod preflight;
+
 use super::{
     asr_integrity_metrics, clamp_max_utterance_ms, clamp_release_tail_ms, clamp_vad_threshold,
     classify_insertion_target, decode_mode_key, derive_correction_candidates,
@@ -29,10 +31,8 @@ use crate::{
     diagnostics::LatencyMetricRecord,
     history::PolishHistoryMeta,
     inference::{
-        ensure_faster_whisper_ready, is_faster_whisper_model, is_whisper_cpp_model,
         note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success,
-        polish_gate::gate_polish_candidate, uses_whisper_pipeline, warmup_faster_whisper_model,
-        InferenceError,
+        polish_gate::gate_polish_candidate, uses_whisper_pipeline, InferenceError,
     },
     insertion::InsertTextRequest,
     phase1,
@@ -144,44 +144,7 @@ impl VoiceWaveController {
         // limits (HANDS_FREE_SILENCE_TIMEOUT_MS) via the capture switch.
         let silence_timeout_ms = ((max_capture_ms as f32) * 0.22).round() as u64;
         let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
-        let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
-        let use_asr_worker = is_whisper_cpp_model(&settings.active_model);
-        // Fail on the press, not after the user has spoken a whole sentence: a
-        // model only counts once its download finished and was registered (a
-        // half-downloaded model must never reach a worker).
-        if mode == DictationMode::Microphone
-            && whisper_pipeline
-            && self
-                .model_manager
-                .lock()
-                .await
-                .get_installed(&settings.active_model)
-                .is_none()
-        {
-            return Err(ControllerError::MissingModel(settings.active_model.clone()));
-        }
-        let fw_ready_task = if mode == DictationMode::Microphone && use_faster_whisper {
-            let warmup_model_id = settings.active_model.clone();
-            Some(tokio::spawn(async move {
-                let ready = ensure_faster_whisper_ready().await;
-                if ready.is_ok() {
-                    // GPU clock ramp + kernel warmup runs while the user is
-                    // still speaking, so the real decode at release starts on
-                    // a hot GPU instead of paying the idle penalty inline.
-                    // Skipped automatically when the GPU was active recently.
-                    let _ = warmup_faster_whisper_model(&warmup_model_id).await;
-                }
-                ready
-            }))
-        } else {
-            None
-        };
-        if mode == DictationMode::Microphone && use_asr_worker {
-            // Spawn/load the speech worker while the user speaks (startup
-            // prewarm missed, worker died, or a GPU failure dropped it). A
-            // no-op when it is already loaded.
-            self.spawn_asr_worker_prewarm(&settings.active_model).await;
-        }
+        let fw_ready_task = self.preflight(&run).await?;
 
         // OS mic-volume guard: external apps (browser auto-gain, call apps,
         // vendor utilities) silently lower the system capture volume and both
