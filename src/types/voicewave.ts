@@ -88,6 +88,10 @@ export interface VoiceWaveSettings {
    * "bullet point") independent of the format profile. Defaults to true. */
   spokenEditCommands: boolean;
   micVolumeGuard: MicVolumeGuardMode;
+  /** Keep the mic stream and its in-memory pre-roll running while the app
+   * runs, so even the first dictation after a break keeps its first word.
+   * Optional here since the backend supplies a `false` default. */
+  keepMicReady?: boolean;
   /** Opt-in one-tap "Add to dictionary?" pill suggestion. Off by default;
    * optional here since the backend supplies a default when absent. */
   pillActionSuggestions?: boolean;

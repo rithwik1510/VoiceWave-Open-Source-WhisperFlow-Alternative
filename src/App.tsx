@@ -680,6 +680,7 @@ function App() {
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
+    setKeepMicReady,
     setTheme,
     setProPostProcessingEnabled,
     setSessionStarred,
@@ -2642,6 +2643,26 @@ function App() {
                   {inputDevices.length === 0 && (
                     <p className="pb-3 text-xs text-status-danger-text">No input devices detected.</p>
                   )}
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Keep mic ready</p>
+                      <p className="vw-set-desc">
+                        {settings.keepMicReady
+                          ? "Your first word is caught even after a break. Windows shows the microphone-in-use icon while this is on. Audio stays in memory and is thrown away unless you press the hotkey."
+                          : "After each dictation the mic stays on for 2 minutes, then turns off, so a quick follow-up keeps its first word. Turn this on to keep it ready whenever VoiceWave is running."}
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Keep mic ready"
+                        checked={settings.keepMicReady ?? false}
+                        onChange={(event) => void setKeepMicReady(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
 
                   <div className="vw-set-row">
                     <div>

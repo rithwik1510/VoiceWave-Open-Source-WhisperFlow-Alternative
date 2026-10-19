@@ -206,6 +206,7 @@ const fallbackSettings: VoiceWaveSettings = {
   proPostProcessingEnabled: false,
   spokenEditCommands: true,
   micVolumeGuard: "warn",
+  keepMicReady: false,
   // True in the pre-load fallback so the onboarding flow never flashes before
   // real settings arrive; the backend value replaces this immediately.
   onboardingCompleted: true,
@@ -456,6 +457,7 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     proPostProcessingEnabled: settings.proPostProcessingEnabled ?? false,
     spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
+    keepMicReady: settings.keepMicReady ?? false,
     onboardingCompleted: settings.onboardingCompleted ?? false,
     theme: settings.theme ?? "system",
     gpuAcceleration: settings.gpuAcceleration ?? "auto",
@@ -1129,6 +1131,22 @@ export function useVoiceWave() {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
       } catch (persistErr) {
         setError(persistErr instanceof Error ? persistErr.message : "Failed to save mic volume guard");
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  const setKeepMicReady = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = normalizeSettings({ ...settings, keepMicReady: enabled });
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save keep mic ready");
       }
     },
     [settings, tauriAvailable]
@@ -2655,6 +2673,7 @@ export function useVoiceWave() {
     setReleaseTailMs,
     setDecodeMode,
     setMicVolumeGuard,
+    setKeepMicReady,
     setTheme,
     setFormatProfile,
     setDomainPacks,
