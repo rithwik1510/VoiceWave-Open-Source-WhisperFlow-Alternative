@@ -11,12 +11,21 @@ use crate::state::{
     classify_insertion_target, derive_correction_candidates, emit_pill_action_notice,
     emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
     return_focus_for_retry, CorrectionSession, DictationLifecycleState, DictationMode,
-    PillAction, TranscriptEvent, VoiceWaveController, VoiceWaveHudState,
+    PillAction, VoiceWaveController, VoiceWaveHudState,
     CORRECTION_SESSION_WINDOW_MS, SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
 };
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tokio::time::sleep;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptEvent {
+    text: String,
+    is_final: bool,
+    elapsed_ms: u64,
+}
 
 pub(super) struct Insertion {
     pub(super) success: bool,

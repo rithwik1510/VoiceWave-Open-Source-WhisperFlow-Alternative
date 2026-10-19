@@ -31,7 +31,7 @@ use crate::{
         is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model,
         prefetch_faster_whisper_model, prewarm_asr_worker, release_idle_asr_workers,
         set_gpu_acceleration, warmup_plan_for_model, AsrModel, InferenceWorker,
-        RuntimeDecodePolicy, StepDownKind, WarmupPlan,
+        RuntimeDecodePolicy, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
@@ -51,8 +51,8 @@ use crate::{
         VoiceWaveSettings, LOCKED_TOGGLE_HOTKEY,
     },
     snippet::{
-        ProtectionError, SnippetError, SnippetExpansionPlan, SnippetManager,
-        VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord,
+        SnippetError, SnippetManager, VoiceSnippet, VoiceSnippetReconcileResult,
+        VoiceSnippetSyncRecord,
     },
     stats::{StatsManager, StatsSummary},
     transcript::sanitize_user_transcript,
@@ -108,14 +108,6 @@ struct VoiceWaveStateEvent {
     state: VoiceWaveHudState,
     message: Option<String>,
     control_mode: Option<DictationControlMode>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TranscriptEvent {
-    text: String,
-    is_final: bool,
-    elapsed_ms: u64,
 }
 
 /// Generic payload for the pill's Dynamic Island notice surface
@@ -332,74 +324,10 @@ pub fn announce_store_resets(app: &AppHandle) {
     });
 }
 
-/// Copy for the once-per-session GPU step-down pill (plan 019). A Large
-/// Turbo dictation on the processor can take ~10 s, so say why, and point at
-/// Small, which is fast there. `Preparing` normally arrives here when a
-/// faster-whisper model decoded during the GPU check; without one the
-/// dictation waits for the check and its notice goes out up front.
-fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
-    let turbo = model_id.contains("large-v3-turbo");
-    match kind {
-        StepDownKind::Preparing => (
-            "Getting your graphics card ready",
-            "One-time setup, up to a minute. Until then dictation runs on your processor."
-                .to_string(),
-        ),
-        StepDownKind::Unavailable | StepDownKind::Fault => (
-            "Ran on your processor this time",
-            if turbo {
-                "Your graphics card wasn't available, so this took longer. Small is much faster on the processor; switch in Models."
-            } else {
-                "Your graphics card wasn't available, so this one took a little longer."
-            }
-            .to_string(),
-        ),
-    }
-}
-
 /// Cooldown between repeats of the same recurring pill warning (mic guard,
 /// poor audio) so a persistent condition doesn't nag on every
 /// single dictation.
 const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
-
-/// How often the background "Polished version ready" pill is allowed to
-/// surface: once per this many validated polishes. LLM polish improves nearly
-/// every dictation (a comma, a capital), so announcing each one buries the
-/// pill's important messages (fallback/error) in noise. Instead we surface it
-/// occasionally as a quiet reminder that on-device polishing is working; the
-/// polished text is always available via history regardless.
-const POLISH_PILL_ANNOUNCE_EVERY: u64 = 50;
-
-/// Hard release-to-insert budget for the wait-validated profiles
-/// (Coding/Writing/Casual, plan 010): measured from key release — the same
-/// zero point as the existing `release_to_inserted_ms` metric. If a single
-/// polish attempt has not produced an accepted result by this deadline, the
-/// deterministic floor text inserts and the outcome is recorded as
-/// `fallbackTimeout`. No blocking retry, ever.
-const WAIT_VALIDATED_RELEASE_BUDGET_MS: u64 = 3_500;
-
-/// History `polishOutcome` wire values (plan 010 interface contract).
-const POLISH_OUTCOME_ACCEPTED: &str = "accepted";
-const POLISH_OUTCOME_FALLBACK_TIMEOUT: &str = "fallbackTimeout";
-const POLISH_OUTCOME_FALLBACK_REJECTED: &str = "fallbackRejected";
-const POLISH_OUTCOME_LITERAL: &str = "literal";
-const POLISH_OUTCOME_DISABLED: &str = "disabled";
-const POLISH_OUTCOME_SNIPPET_EXACT: &str = "snippetExact";
-
-fn restore_snippet_candidate(
-    plan: Option<&SnippetExpansionPlan>,
-    candidate: &str,
-) -> Result<String, ProtectionError> {
-    let restored = match plan {
-        Some(plan) => plan.restore(candidate)?,
-        None => candidate.to_string(),
-    };
-    debug_assert!(
-        !restored.contains('\u{e000}') && !restored.contains('\u{e001}'),
-        "protected snippet marker escaped the delivery boundary"
-    );
-    Ok(restored)
-}
 
 /// Claims a warn slot if its cooldown has elapsed; the caller only emits a
 /// notice when this returns true. Each recurring warning owns its own slot.
@@ -414,68 +342,6 @@ fn take_notice_cooldown(last_warned_at: &StdMutex<Option<Instant>>) -> bool {
             true
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LatencyBreakdownEvent {
-    session_id: u64,
-    capture_ms: u64,
-    release_to_transcribing_ms: u64,
-    effective_release_watchdog_ms: u64,
-    watchdog_recovered: bool,
-    segments_captured: u32,
-    release_stop_detected_at_utc_ms: u64,
-    model_init_ms: u64,
-    audio_condition_ms: u64,
-    decode_compute_ms: u64,
-    runtime_cache_hit: bool,
-    backend_requested: String,
-    backend_used: String,
-    backend_fallback: bool,
-    asr_engine: String,
-    asr_step_down_reason: Option<String>,
-    hold_to_first_draft_ms: u64,
-    incremental_decode_ms: u64,
-    release_finalize_ms: u64,
-    incremental_windows_decoded: u32,
-    finalize_tail_audio_ms: u64,
-    asr_integrity_percent: f32,
-    asr_raw_word_count: u32,
-    asr_final_word_count: u32,
-    decode_ms: u64,
-    post_ms: u64,
-    insert_ms: u64,
-    total_ms: u64,
-    release_to_inserted_ms: u64,
-    audio_duration_ms: u64,
-    model_id: String,
-    decode_mode: DecodeMode,
-    decode_policy_mode_selected: DecodeMode,
-    decode_policy_reason: String,
-    fw_low_coherence: bool,
-    fw_retry_used: bool,
-    fw_literal_retry_used: bool,
-    audio_pipeline_version: String,
-    fw_avg_logprob: Option<f32>,
-    fw_no_speech_prob: Option<f32>,
-    fw_compression_ratio: Option<f32>,
-    fw_shadow_candidate_version: Option<String>,
-    fw_shadow_quality_delta: Option<f32>,
-    fw_shadow_candidate_avg_logprob: Option<f32>,
-    fw_shadow_candidate_no_speech_prob: Option<f32>,
-    fw_shadow_candidate_retry_used: Option<bool>,
-    fw_shadow_candidate_low_coherence: Option<bool>,
-    fw_shadow_candidate_decode_compute_ms: Option<u64>,
-    fw_shadow_candidate_won: Option<bool>,
-    audio_pipeline_fallback_engaged: bool,
-    audio_pipeline_fallback_remaining: u32,
-    warm_start_hit: bool,
-    worker_reused: bool,
-    correction_candidates_count: u32,
-    insertion_method: String,
-    insertion_target_class: String,
-    mic_input_volume_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

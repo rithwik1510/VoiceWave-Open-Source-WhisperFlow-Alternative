@@ -8,13 +8,13 @@ use super::DictationRun;
 use crate::audio::AudioQualityBand;
 use crate::inference::{
     note_audio_pipeline_decode_hard_failure, note_audio_pipeline_decode_success, DecodeTelemetry,
-    InferenceError, InferenceWorker,
+    InferenceError, InferenceWorker, StepDownKind,
 };
 use crate::settings::DecodeMode;
 use crate::state::{
     decode_mode_key, dictation_retry_instruction, effective_release_watchdog_threshold_ms,
     emit_pill_notice, final_decode_timeout, floor_decode_mode, fw_min_decode_audio_ms,
-    gpu_step_down_notice, is_likely_low_quality_input_name, release_watchdog_recovered,
+    is_likely_low_quality_input_name, release_watchdog_recovered,
     sample_count_to_ms, ControllerError, DictationLifecycleState, DictationMode,
     VoiceWaveController, VoiceWaveHudState, ENGINE_WAIT_NOTICE_GRACE_MS,
     HANDS_FREE_MAX_CAPTURE_MS,
@@ -520,4 +520,29 @@ async fn wait_for_faster_whisper(
         }
     }
     Ok(fw_runtime_ready)
+}
+
+/// Copy for the once-per-session GPU step-down pill (plan 019). A Large
+/// Turbo dictation on the processor can take ~10 s, so say why, and point at
+/// Small, which is fast there. `Preparing` normally arrives here when a
+/// faster-whisper model decoded during the GPU check; without one the
+/// dictation waits for the check and its notice goes out up front.
+fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
+    let turbo = model_id.contains("large-v3-turbo");
+    match kind {
+        StepDownKind::Preparing => (
+            "Getting your graphics card ready",
+            "One-time setup, up to a minute. Until then dictation runs on your processor."
+                .to_string(),
+        ),
+        StepDownKind::Unavailable | StepDownKind::Fault => (
+            "Ran on your processor this time",
+            if turbo {
+                "Your graphics card wasn't available, so this took longer. Small is much faster on the processor; switch in Models."
+            } else {
+                "Your graphics card wasn't available, so this one took a little longer."
+            }
+            .to_string(),
+        ),
+    }
 }

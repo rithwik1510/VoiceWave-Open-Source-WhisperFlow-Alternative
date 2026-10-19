@@ -8,17 +8,52 @@ use super::DictationRun;
 use crate::history::PolishHistoryMeta;
 use crate::inference::polish_gate::gate_polish_candidate;
 use crate::settings::{InsertPath, PolishProfile};
-use crate::state::{
-    emit_pill_rescue, restore_snippet_candidate, VoiceWaveController, MAIN_WINDOW_LABEL,
-    POLISH_OUTCOME_ACCEPTED, POLISH_OUTCOME_DISABLED, POLISH_OUTCOME_FALLBACK_REJECTED,
-    POLISH_OUTCOME_FALLBACK_TIMEOUT, POLISH_OUTCOME_LITERAL, POLISH_OUTCOME_SNIPPET_EXACT,
-    POLISH_PILL_ANNOUNCE_EVERY, WAIT_VALIDATED_RELEASE_BUDGET_MS,
-};
+use crate::snippet::{ProtectionError, SnippetExpansionPlan};
+use crate::state::{emit_pill_rescue, VoiceWaveController, MAIN_WINDOW_LABEL};
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+/// How often the background "Polished version ready" pill is allowed to
+/// surface: once per this many validated polishes. LLM polish improves nearly
+/// every dictation (a comma, a capital), so announcing each one buries the
+/// pill's important messages (fallback/error) in noise. Instead we surface it
+/// occasionally as a quiet reminder that on-device polishing is working; the
+/// polished text is always available via history regardless.
+const POLISH_PILL_ANNOUNCE_EVERY: u64 = 50;
+
+/// Hard release-to-insert budget for the wait-validated profiles
+/// (Coding/Writing/Casual, plan 010): measured from key release — the same
+/// zero point as the existing `release_to_inserted_ms` metric. If a single
+/// polish attempt has not produced an accepted result by this deadline, the
+/// deterministic floor text inserts and the outcome is recorded as
+/// `fallbackTimeout`. No blocking retry, ever.
+const WAIT_VALIDATED_RELEASE_BUDGET_MS: u64 = 3_500;
+
+/// History `polishOutcome` wire values (plan 010 interface contract).
+const POLISH_OUTCOME_ACCEPTED: &str = "accepted";
+const POLISH_OUTCOME_FALLBACK_TIMEOUT: &str = "fallbackTimeout";
+const POLISH_OUTCOME_FALLBACK_REJECTED: &str = "fallbackRejected";
+const POLISH_OUTCOME_LITERAL: &str = "literal";
+const POLISH_OUTCOME_DISABLED: &str = "disabled";
+const POLISH_OUTCOME_SNIPPET_EXACT: &str = "snippetExact";
+
+fn restore_snippet_candidate(
+    plan: Option<&SnippetExpansionPlan>,
+    candidate: &str,
+) -> Result<String, ProtectionError> {
+    let restored = match plan {
+        Some(plan) => plan.restore(candidate)?,
+        None => candidate.to_string(),
+    };
+    debug_assert!(
+        !restored.contains('\u{e000}') && !restored.contains('\u{e001}'),
+        "protected snippet marker escaped the delivery boundary"
+    );
+    Ok(restored)
+}
 
 /// What gets inserted, and the polish facts History records about it.
 pub(super) struct Delivery {

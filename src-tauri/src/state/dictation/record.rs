@@ -10,12 +10,76 @@ use super::transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcript
 use super::DictationRun;
 use crate::diagnostics::LatencyMetricRecord;
 use crate::history::PolishHistoryMeta;
+use crate::settings::DecodeMode;
 use crate::state::{
-    now_utc_ms, sample_count_to_ms, DictationMode, LatencyBreakdownEvent, VoiceWaveController,
-    MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL,
+    now_utc_ms, sample_count_to_ms, DictationMode, VoiceWaveController, MAIN_WINDOW_LABEL,
+    PILL_WINDOW_LABEL,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Emitter;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatencyBreakdownEvent {
+    session_id: u64,
+    capture_ms: u64,
+    release_to_transcribing_ms: u64,
+    effective_release_watchdog_ms: u64,
+    watchdog_recovered: bool,
+    segments_captured: u32,
+    release_stop_detected_at_utc_ms: u64,
+    model_init_ms: u64,
+    audio_condition_ms: u64,
+    decode_compute_ms: u64,
+    runtime_cache_hit: bool,
+    backend_requested: String,
+    backend_used: String,
+    backend_fallback: bool,
+    asr_engine: String,
+    asr_step_down_reason: Option<String>,
+    hold_to_first_draft_ms: u64,
+    incremental_decode_ms: u64,
+    release_finalize_ms: u64,
+    incremental_windows_decoded: u32,
+    finalize_tail_audio_ms: u64,
+    asr_integrity_percent: f32,
+    asr_raw_word_count: u32,
+    asr_final_word_count: u32,
+    decode_ms: u64,
+    post_ms: u64,
+    insert_ms: u64,
+    total_ms: u64,
+    release_to_inserted_ms: u64,
+    audio_duration_ms: u64,
+    model_id: String,
+    decode_mode: DecodeMode,
+    decode_policy_mode_selected: DecodeMode,
+    decode_policy_reason: String,
+    fw_low_coherence: bool,
+    fw_retry_used: bool,
+    fw_literal_retry_used: bool,
+    audio_pipeline_version: String,
+    fw_avg_logprob: Option<f32>,
+    fw_no_speech_prob: Option<f32>,
+    fw_compression_ratio: Option<f32>,
+    fw_shadow_candidate_version: Option<String>,
+    fw_shadow_quality_delta: Option<f32>,
+    fw_shadow_candidate_avg_logprob: Option<f32>,
+    fw_shadow_candidate_no_speech_prob: Option<f32>,
+    fw_shadow_candidate_retry_used: Option<bool>,
+    fw_shadow_candidate_low_coherence: Option<bool>,
+    fw_shadow_candidate_decode_compute_ms: Option<u64>,
+    fw_shadow_candidate_won: Option<bool>,
+    audio_pipeline_fallback_engaged: bool,
+    audio_pipeline_fallback_remaining: u32,
+    warm_start_hit: bool,
+    worker_reused: bool,
+    correction_candidates_count: u32,
+    insertion_method: String,
+    insertion_target_class: String,
+    mic_input_volume_percent: Option<u8>,
+}
 
 impl VoiceWaveController {
     /// Runs after the session is marked Inserted, for successful and failed
