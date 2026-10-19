@@ -526,8 +526,12 @@ parakeet_full_params parakeet_decode_params(int threads) {
 // A completed term is re-cased to the dictionary spelling only when the bonus
 // changed at least one decision inside it.
 
+// Raw-logit bonuses, tuned on the plan 021 test set (TTS clean and 10 dB
+// noise, 34- and 200-term dictionaries): the highest that changed no trap
+// sentence. A start bonus beyond ~2 lets a term's first piece displace common
+// words under noise; a continuation bonus beyond ~8 spells "cloud" as "claud".
 constexpr float kBoostStart = 1.5f;  // bonus for a piece that starts a term
-constexpr float kBoostCont = 3.0f;   // bonus for a piece that continues one
+constexpr float kBoostCont = 7.0f;   // bonus for a piece that continues one
 constexpr int kBoostTopK = 16;       // candidates considered per step
 constexpr size_t kMaxBoostTerms = 200;
 constexpr size_t kMaxActiveMatches = 16;
@@ -625,7 +629,8 @@ struct Booster {
 
     // Normalizes and filters the requested terms into the trie. Skipped:
     // under 3 characters, acronyms (no lowercase letter), and single words
-    // the model already has as one vocab piece ("these", "Small").
+    // the model already has as one vocab piece ("these"; its multilingual
+    // vocab holds few whole English words, so most terms pass).
     void add_terms(const json &list) {
         std::unordered_set<std::string> seen;
         for (const auto &item : list) {
@@ -705,15 +710,20 @@ struct Booster {
 
     enum Kind : char { kNone, kStart, kCont };
 
+    // One piece is a prefix of the other ignoring case, but not with it.
+    static bool case_conflict(int a, int b) {
+        const std::string &la = g_pieces.lower[a], &lb = g_pieces.lower[b];
+        if (la.size() > lb.size()) return case_conflict(b, a);
+        return lb.rfind(la, 0) == 0 && g_pieces.raw[b].rfind(g_pieces.raw[a], 0) != 0;
+    }
+
     // Which bonus `token` earns when the model's own choice is `top`.
     Kind kind(int token, int top) const {
         if (token >= (int) g_pieces.lower.size()) return kNone;
         const std::string &piece = g_pieces.lower[token];
-        // A re-cased prefix of the model's choice ("▁T" over "▁tem") spells
-        // nothing new, it only changes casing: never boosted.
-        if (token != top && g_pieces.lower[top].rfind(piece, 0) == 0 && g_pieces.raw[top].rfind(g_pieces.raw[token], 0) != 0) {
-            return kNone;
-        }
+        // Same letters as the model's choice in another case ("▁T" over
+        // "▁tem", "▁cl" over "▁C"): winning would only re-case the word.
+        if (token != top && case_conflict(token, top)) return kNone;
         for (const Match &m : active) {
             if (trie.walk(m.node, piece) >= 0) return kCont;
         }
@@ -738,8 +748,11 @@ struct Booster {
             scratch.clear();
             auto keep = [this](int node, int first, bool flipped) {
                 if (node < 0 || scratch.size() >= kMaxActiveMatches) return;
-                for (const Match &m : scratch) {
-                    if (m.node == node) return;
+                for (Match &m : scratch) {
+                    if (m.node == node) {  // same prefix, so the same start
+                        m.flipped |= flipped;
+                        return;
+                    }
                 }
                 scratch.push_back({node, first, flipped});
             };
