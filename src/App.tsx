@@ -31,11 +31,13 @@ import {
   subscribeCloudAuth
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
+import { DEFAULT_PUSH_TO_TALK_HOTKEY, formatHotkey } from "./lib/hotkeys";
 import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard, getSupportContext, openIssueReport, openLogsFolder } from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
+import { HotkeyRecorder } from "./components/HotkeyRecorder";
 import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
@@ -632,6 +634,7 @@ function App() {
     exportHistoryPreset,
     exportDiagnosticsBundle,
     historyPolicy,
+    hotkeys,
     inputDevices,
     installModel,
     installAndActivateModel,
@@ -650,6 +653,7 @@ function App() {
     pauseModelInstall,
     pruneHistory,
     refreshPhase3Data,
+    refreshHotkeys,
     refreshInputDevices,
     resumeModelInstall,
     rejectDictionaryQueueEntry,
@@ -672,6 +676,8 @@ function App() {
     setPreferClipboardFallback,
     setSpokenEditCommands,
     setGpuAcceleration,
+    setHotkeyCapture,
+    setPushToTalkHotkey,
     speechEngine,
     answerUpgradeOffer,
     removeInstalledModel,
@@ -1231,6 +1237,13 @@ function App() {
     };
   }, [activeOverlay]);
 
+  const shortcutRowVisible = activeOverlay === "settings" && settingsSection === "dictation";
+  useEffect(() => {
+    if (shortcutRowVisible) {
+      void refreshHotkeys();
+    }
+  }, [refreshHotkeys, shortcutRowVisible]);
+
   const reportRowVisible =
     activeOverlay === "help" || (activeOverlay === "settings" && settingsSection === "diagnostics");
   useEffect(() => {
@@ -1565,7 +1578,7 @@ function App() {
                 partialTranscript={snapshot.lastPartial}
                 finalTranscript={snapshot.lastFinal}
                 recentSentences={recentSentences}
-                pushToTalkHotkey={settings.pushToTalkHotkey}
+                pushToTalkHotkey={formatHotkey(settings.pushToTalkHotkey)}
                 controlMode={snapshot.controlMode}
                 userName={demoProfile?.name}
                 historyOff={historyPolicy === "off"}
@@ -2737,6 +2750,14 @@ function App() {
 
               {settingsSection === "dictation" && (
                 <div>
+                  <HotkeyRecorder
+                    value={settings.pushToTalkHotkey}
+                    defaultValue={DEFAULT_PUSH_TO_TALK_HOTKEY}
+                    registrationError={hotkeys.registrationError}
+                    onSave={setPushToTalkHotkey}
+                    onCaptureChange={setHotkeyCapture}
+                  />
+
                   <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">Permissions</p>
@@ -3578,7 +3599,7 @@ function App() {
           inputDevices={inputDevices}
           inputDevice={settings.inputDevice}
           setInputDevice={setInputDevice}
-          hotkeyLabel={settings.pushToTalkHotkey}
+          hotkeyLabel={formatHotkey(settings.pushToTalkHotkey)}
           snapshot={snapshot}
           usageOptIn={settings.anonymousUsageOptIn}
           onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}

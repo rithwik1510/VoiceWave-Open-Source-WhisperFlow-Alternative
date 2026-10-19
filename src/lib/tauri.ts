@@ -19,6 +19,7 @@ import type {
   EntitlementSnapshot,
   FormatProfile,
   HotkeyAction,
+  HotkeyCaptureKey,
   HotkeyConfig,
   HotkeyEvent,
   HotkeyPhase,
@@ -155,6 +156,16 @@ export async function listenVoicewavePermission(
   }
   const { listen } = await import("@tauri-apps/api/event");
   return listen("voicewave://permission", (event: Event<PermissionSnapshot>) => callback(event.payload));
+}
+
+export async function listenVoicewaveHotkeyCapture(
+  callback: (payload: HotkeyCaptureKey) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://hotkey-capture", (event: Event<HotkeyCaptureKey>) => callback(event.payload));
 }
 
 export async function listenVoicewaveHotkey(
@@ -380,6 +391,11 @@ export async function loadHotkeyConfig(): Promise<HotkeySnapshot> {
 
 export async function updateHotkeyConfig(config: HotkeyConfig): Promise<HotkeySnapshot> {
   return invokeVoicewave<HotkeySnapshot>("update_hotkey_config", { config });
+}
+
+/** Pauses the global hotkey while the Settings recorder listens for a new one. */
+export async function setHotkeyCapture(active: boolean): Promise<void> {
+  await invokeVoicewave<void>("set_hotkey_capture", { active });
 }
 
 export async function getPermissionSnapshot(): Promise<PermissionSnapshot> {

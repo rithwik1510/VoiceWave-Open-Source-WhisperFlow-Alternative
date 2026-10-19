@@ -48,6 +48,11 @@ dictation that lands in terminals and survives a failed transcription.
   dictation ran on the GPU or the CPU, failed model downloads, and GPU-to-CPU
   fallbacks. Each carries one category and nothing else. The existing switch
   in setup and Settings → Diagnostics turns all of it off.
+- **Choose your own dictation shortcut.** Settings → Dictation → Dictation
+  shortcut: click Change, press the keys you want, and let go. It works right
+  away, no restart. Esc cancels, and Reset to default brings back Ctrl + Win.
+  Shortcuts that would fire while you type, or that Windows keeps for itself,
+  are refused with the reason. Home, setup and Settings show your shortcut.
 
 ### Changed
 

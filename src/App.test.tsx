@@ -174,7 +174,9 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     stopDictation: vi.fn(),
     tauriAvailable: false,
     undoInsertion: vi.fn(),
-    updateHotkeys: vi.fn(),
+    setPushToTalkHotkey: vi.fn(),
+    setHotkeyCapture: vi.fn(),
+    refreshHotkeys: vi.fn(),
     refreshEntitlement: vi.fn(),
     updateRetentionPolicy: vi.fn(),
     ...overrides

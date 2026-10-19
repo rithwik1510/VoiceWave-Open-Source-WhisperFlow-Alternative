@@ -25,8 +25,8 @@ use crate::{
         RetentionPolicy, SessionHistoryQuery, SessionHistoryRecord,
     },
     hotkey::{
-        HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager, HotkeyPhase, HotkeyRuntime,
-        HotkeySnapshot,
+        validate_push_to_talk, HookEvent, HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager,
+        HotkeyPhase, HotkeyRuntime, HotkeySnapshot,
     },
     inference::{
         cancel_faster_whisper_download, download_faster_whisper_model, ensure_faster_whisper_ready,
@@ -55,7 +55,7 @@ use crate::{
         AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
         DomainPackId, FormatProfile, GpuAcceleration, InsertPath, PolishProfile, SettingsError,
         SettingsStore,
-        VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
+        VoiceWaveSettings, LOCKED_TOGGLE_HOTKEY,
     },
     snippet::{
         ProtectionError, ProtectionOutcome, SnippetError, SnippetExpansionPlan, SnippetManager,
@@ -544,7 +544,8 @@ pub enum ControllerError {
     AlreadyRunning,
     #[error("settings error: {0}")]
     Settings(#[from] SettingsError),
-    #[error("hotkey config error: {0}")]
+    // Bare message: the Settings shortcut recorder shows it to the user as-is.
+    #[error("{0}")]
     Hotkey(#[from] HotkeyError),
     #[error("audio error: {0}")]
     Audio(#[from] AudioError),
@@ -1596,11 +1597,14 @@ impl VoiceWaveController {
         settings.vad_threshold = clamp_vad_threshold(settings.vad_threshold);
         settings.max_utterance_ms = clamp_max_utterance_ms(settings.max_utterance_ms);
         settings.release_tail_ms = clamp_release_tail_ms(settings.release_tail_ms);
-        normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
-        self.settings_store.save(&settings)?;
         {
+            // Hotkeys have one writer, update_hotkey_config, so a UI settings
+            // copy that predates a rebind can never revert it.
             let mut current = self.settings.lock().await;
+            settings.toggle_hotkey = current.toggle_hotkey.clone();
+            settings.push_to_talk_hotkey = current.push_to_talk_hotkey.clone();
+            self.settings_store.save(&settings)?;
             *current = settings.clone();
         }
         {
@@ -1608,12 +1612,6 @@ impl VoiceWaveController {
             snapshot.active_model = settings.active_model.clone();
         }
 
-        let mut hotkey_manager = self.hotkey_manager.lock().await;
-        hotkey_manager.update_config(HotkeyConfig {
-            toggle: settings.toggle_hotkey.clone(),
-            push_to_talk: settings.push_to_talk_hotkey.clone(),
-        })?;
-        drop(hotkey_manager);
         set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
         self.mic
             .configure(settings.input_device.clone(), settings.keep_mic_ready);
@@ -2369,6 +2367,10 @@ impl VoiceWaveController {
                 } else {
                     "Restart VoiceWave. If this continues, export diagnostics from Settings."
                 };
+                self.hotkey_manager
+                    .lock()
+                    .await
+                    .set_registration_error(Some(detail.to_string()));
                 emit_pill_notice(
                     &app,
                     "error",
@@ -2383,38 +2385,60 @@ impl VoiceWaveController {
 
         let controller = self.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some(signal) = event_rx.recv().await {
-                if let Err(err) = controller
-                    .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
-                    .await
-                {
-                    tracing::warn!("hotkey action failed: {err}");
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    HookEvent::Signal(signal) => {
+                        if let Err(err) = controller
+                            .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
+                            .await
+                        {
+                            tracing::warn!("hotkey action failed: {err}");
+                        }
+                    }
+                    // Keys for the Settings shortcut recorder.
+                    HookEvent::Capture(key) => {
+                        let _ = app.emit("voicewave://hotkey-capture", key);
+                    }
                 }
             }
             tracing::warn!("global hotkey event channel closed");
         });
     }
 
+    /// Rebinds hold-to-talk live: validate, persist, then swap the running
+    /// hook's combo. The hands-free toggle stays fixed whatever is sent.
     pub async fn update_hotkey_config(
         &self,
-        _config: HotkeyConfig,
+        config: HotkeyConfig,
     ) -> Result<HotkeySnapshot, ControllerError> {
         let config = HotkeyConfig {
             toggle: LOCKED_TOGGLE_HOTKEY.to_string(),
-            push_to_talk: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
-        };
-        let snapshot = {
-            let mut manager = self.hotkey_manager.lock().await;
-            manager.update_config(config.clone())?
+            push_to_talk: validate_push_to_talk(&config.push_to_talk)?,
         };
 
-        let mut settings = self.settings.lock().await.clone();
-        settings.toggle_hotkey = config.toggle;
-        settings.push_to_talk_hotkey = config.push_to_talk;
-        self.settings_store.save(&settings)?;
-        *self.settings.lock().await = settings;
+        {
+            let mut settings = self.settings.lock().await;
+            let mut next = settings.clone();
+            next.toggle_hotkey = config.toggle.clone();
+            next.push_to_talk_hotkey = config.push_to_talk.clone();
+            self.settings_store.save(&next)?;
+            *settings = next;
+        }
 
+        let snapshot = self.hotkey_manager.lock().await.update_config(config)?;
+        if let Some(runtime) = self.hotkey_runtime.lock().await.as_ref() {
+            runtime.update_config(&snapshot.config)?;
+        }
+        tracing::info!("hold-to-talk shortcut set to {}", snapshot.config.push_to_talk);
         Ok(snapshot)
+    }
+
+    /// Settings is recording a new shortcut: keep the global hotkey from
+    /// starting a dictation meanwhile.
+    pub async fn set_hotkey_capture(&self, active: bool) {
+        if let Some(runtime) = self.hotkey_runtime.lock().await.as_ref() {
+            runtime.set_capture(active);
+        }
     }
 
     pub async fn permission_snapshot(&self) -> PermissionSnapshot {

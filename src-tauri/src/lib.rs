@@ -1605,6 +1605,14 @@ async fn update_hotkey_config(
         .map_err(|err| AppError::Controller(err).into())
 }
 
+/// Pauses the global hotkey while Settings records a new shortcut.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_hotkey_capture(runtime: State<'_, RuntimeContext>, active: bool) -> Result<(), String> {
+    runtime.controller.set_hotkey_capture(active).await;
+    Ok(())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn get_permission_snapshot(
@@ -2529,6 +2537,7 @@ pub fn run() {
             stop_dictation,
             load_hotkey_config,
             update_hotkey_config,
+            set_hotkey_capture,
             get_permission_snapshot,
             list_input_devices,
             request_microphone_access,

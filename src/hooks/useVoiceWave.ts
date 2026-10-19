@@ -65,6 +65,7 @@ import {
   runModelBenchmark,
   setActiveModel,
   setHistoryRetention,
+  setHotkeyCapture as setHotkeyCaptureCommand,
   setOwnerDeviceOverride as setOwnerDeviceOverrideCommand,
   startMicLevelMonitor,
   startProCheckout as startProCheckoutCommand,
@@ -84,6 +85,7 @@ import {
   type PolishModelProgress
 } from "../lib/tauri";
 import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
+import { DEFAULT_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY } from "../lib/hotkeys";
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
 import {
   ANALYTICS_CONSENT_VERSION,
@@ -108,7 +110,6 @@ import type {
   DictionaryImportSummary,
   DictionaryQueueItem,
   DictionaryTerm,
-  HotkeyConfig,
   HotkeyEvent,
   HotkeySnapshot,
   InsertResult,
@@ -185,8 +186,8 @@ const fallbackSettings: VoiceWaveSettings = {
   // Current in the pre-load fallback for the same reason as
   // onboardingCompleted below: the consent notice must not flash pre-load.
   analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
-  toggleHotkey: "Ctrl+Alt+X",
-  pushToTalkHotkey: "Ctrl+Windows",
+  toggleHotkey: LOCKED_TOGGLE_HOTKEY,
+  pushToTalkHotkey: DEFAULT_PUSH_TO_TALK_HOTKEY,
   preferClipboardFallback: false,
   formatProfile: "default",
   activeDomainPacks: [],
@@ -224,8 +225,8 @@ const fallbackSnapshot: VoiceWaveSnapshot = {
 
 const fallbackHotkeys: HotkeySnapshot = {
   config: {
-    toggle: "Ctrl+Alt+X",
-    pushToTalk: "Ctrl+Windows"
+    toggle: LOCKED_TOGGLE_HOTKEY,
+    pushToTalk: DEFAULT_PUSH_TO_TALK_HOTKEY
   },
   conflicts: [],
   registrationSupported: true,
@@ -301,8 +302,6 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
 const RECOMMENDED_VAD_THRESHOLD = 0.014;
 const MIN_VAD_THRESHOLD = 0.005;
 const MAX_VAD_THRESHOLD = 0.04;
-const LOCKED_TOGGLE_HOTKEY = "Ctrl+Alt+X";
-const LOCKED_PUSH_TO_TALK_HOTKEY = "Ctrl+Windows";
 const MODIFIER_TOKENS = [
   "CTRL",
   "CONTROL",
@@ -464,8 +463,8 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     // polishProfile / polishProfileCustomized are deliberately NOT defaulted:
     // their absence is the "legacy backend" signal the UI uses to fall back
     // to inferring a profile from the old deterministic fields (plan 010).
-    toggleHotkey: LOCKED_TOGGLE_HOTKEY,
-    pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
+    // pushToTalkHotkey passes through: the backend already validated it.
+    toggleHotkey: LOCKED_TOGGLE_HOTKEY
   };
 }
 
@@ -1536,29 +1535,43 @@ export function useVoiceWave() {
     }
   }, [tauriAvailable]);
 
-  const updateHotkeys = useCallback(
-    async (_config: HotkeyConfig) => {
-      const lockedConfig = {
-        toggle: LOCKED_TOGGLE_HOTKEY,
-        pushToTalk: LOCKED_PUSH_TO_TALK_HOTKEY
-      };
-      setHotkeys((prev) => ({ ...prev, config: lockedConfig }));
-      setSettings((prev) => ({
-        ...prev,
-        toggleHotkey: LOCKED_TOGGLE_HOTKEY,
-        pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
-      }));
-      if (!tauriAvailable) {
-        return;
-      }
-      try {
-        setHotkeys(await updateHotkeyConfig(lockedConfig));
-      } catch (hotkeyErr) {
-        setError(hotkeyErr instanceof Error ? hotkeyErr.message : "Failed to update hotkeys");
-      }
+  /** Rebinds hold-to-talk. Throws the backend's plain-language reason when
+   * the combo is rejected, for the Settings recorder to show inline. */
+  const setPushToTalkHotkey = useCallback(
+    async (pushToTalk: string) => {
+      const snapshot = tauriAvailable
+        ? await updateHotkeyConfig({ toggle: LOCKED_TOGGLE_HOTKEY, pushToTalk })
+        : { ...fallbackHotkeys, config: { toggle: LOCKED_TOGGLE_HOTKEY, pushToTalk } };
+      setHotkeys(snapshot);
+      setSettings((prev) => ({ ...prev, pushToTalkHotkey: snapshot.config.pushToTalk }));
     },
     [tauriAvailable]
   );
+
+  const setHotkeyCapture = useCallback(
+    (active: boolean) => {
+      if (!tauriAvailable) {
+        return;
+      }
+      void setHotkeyCaptureCommand(active).catch(() => {
+        // Best effort: the backend capture lease expires on its own.
+      });
+    },
+    [tauriAvailable]
+  );
+
+  // The keyboard hook starts after the first load, so Settings re-reads its
+  // status to report a failed start honestly.
+  const refreshHotkeys = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setHotkeys(await loadHotkeyConfig());
+    } catch {
+      // Keep the last known snapshot.
+    }
+  }, [tauriAvailable]);
 
   const requestMicAccess = useCallback(async () => {
     if (!tauriAvailable) {
@@ -2696,7 +2709,9 @@ export function useVoiceWave() {
     resolveAnalyticsConsent,
     setLlmPolishEnabled,
     polishModelProgress,
-    updateHotkeys,
+    setPushToTalkHotkey,
+    setHotkeyCapture,
+    refreshHotkeys,
     requestMicAccess,
     runAudioQualityDiagnostic,
     undoInsertion,
