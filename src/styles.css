@@ -746,6 +746,49 @@ body {
   max-width: 34rem;
 }
 
+/* Shortcut recorder: bare keycaps at rest, a blue focus ring while listening
+   (same ring as .vw-field:focus). The border is always present so the row
+   never shifts when recording starts. */
+.vw-hotkey-field {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 2rem;
+  min-width: 6.5rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: var(--vw-radius-sm);
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+.vw-hotkey-field-recording {
+  justify-content: center;
+  border-color: rgba(27, 142, 255, 0.8);
+  background: var(--vw-color-surface);
+  box-shadow: 0 0 0 3px rgba(27, 142, 255, 0.14);
+}
+
+.vw-keycap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75rem;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--vw-color-border-strong);
+  border-bottom-width: 2px;
+  border-radius: 7px;
+  background: var(--vw-color-surface);
+  font-family: "Manrope", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--vw-ink-strong);
+}
+
+.vw-hotkey-field-recording .vw-keycap {
+  border-color: var(--vw-accent-blue-600);
+}
+
 @media (max-width: 760px) {
   .vw-settings-shell {
     grid-template-columns: 1fr;

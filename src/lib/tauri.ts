@@ -382,6 +382,11 @@ export async function updateHotkeyConfig(config: HotkeyConfig): Promise<HotkeySn
   return invokeVoicewave<HotkeySnapshot>("update_hotkey_config", { config });
 }
 
+/** Pauses the global hotkey while the Settings recorder listens for a new one. */
+export async function setHotkeyCapture(active: boolean): Promise<void> {
+  await invokeVoicewave<void>("set_hotkey_capture", { active });
+}
+
 export async function getPermissionSnapshot(): Promise<PermissionSnapshot> {
   return invokeVoicewave<PermissionSnapshot>("get_permission_snapshot");
 }
