@@ -8,14 +8,13 @@ mod preflight;
 mod transcribe;
 
 use capture::CapturedAudio;
-use insert::Insertion;
+use insert::{announce_insertion, Insertion};
 use polish::{resolve_delivery, Delivery};
-use post_process::{FormattedText, SpokenText};
+use post_process::FormattedText;
 use transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::{
-    clamp_max_utterance_ms, emit_pill_action_notice, emit_pill_notice, emit_pill_rescue,
-    emit_submit_notice, now_utc_ms, sample_count_to_ms, ControllerError, DictationControlMode,
-    DictationLifecycleState, DictationMode, LatencyBreakdownEvent, PillAction, RetainedAudio,
+    clamp_max_utterance_ms, now_utc_ms, sample_count_to_ms, ControllerError, DictationControlMode,
+    DictationLifecycleState, DictationMode, LatencyBreakdownEvent, RetainedAudio,
     VoiceWaveController, VoiceWaveHudState, MAIN_WINDOW_LABEL, PILL_WINDOW_LABEL,
 };
 use crate::{
@@ -140,6 +139,9 @@ impl VoiceWaveController {
             &insertion,
             delivery.late_polish_handle.take(),
         );
+        announce_insertion(&run, &delivery, &text, &spoken, &insertion);
+        self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
+            .await;
         let Transcription {
             worker: final_worker,
             mode_choice:
@@ -164,10 +166,6 @@ impl VoiceWaveController {
                     ..
                 },
         } = transcription;
-        let SpokenText {
-            submit_requested,
-            ..
-        } = spoken;
         let FormattedText {
             asr_integrity_percent,
             asr_raw_word_count,
@@ -185,96 +183,12 @@ impl VoiceWaveController {
             method: insertion_method,
             target_class: insertion_target_class,
             history_recorded: insertion_history_recorded,
-            blocked_by_elevation: insertion_blocked_by_elevation,
-            submit_outcome,
             correction_candidates,
             post_started,
             post_before_insert_ms,
             insert_ms,
             ..
         } = insertion;
-
-        // Rescue pill (Wispr Flow fallback pattern): when the text did not
-        // land in the target app, the pill expands with the transcript so the
-        // words are visibly safe and one keystroke/click away.
-        if mode == DictationMode::Microphone {
-            if !insertion_success {
-                emit_pill_rescue(
-                    &app,
-                    "warning",
-                    "Couldn't insert — your text is safe",
-                    Some("Click Copy, then paste it where you need it.".to_string()),
-                    inserted_text.clone(),
-                    Some("copyTranscript"),
-                );
-            } else if insertion_method == "clipboardOnly" {
-                let paste_hint = if submit_requested {
-                    "Press Ctrl+V to paste it, then Enter."
-                } else {
-                    "Press Ctrl+V to paste it here."
-                };
-                if insertion_blocked_by_elevation {
-                    emit_pill_rescue(
-                        &app,
-                        "info",
-                        "This app runs as administrator",
-                        Some(format!(
-                            "VoiceWave can't type into it, so your text is on the clipboard. {paste_hint}"
-                        )),
-                        inserted_text.clone(),
-                        None,
-                    );
-                } else {
-                    emit_pill_rescue(
-                        &app,
-                        "info",
-                        "Copied to clipboard",
-                        Some(paste_hint.to_string()),
-                        inserted_text.clone(),
-                        None,
-                    );
-                }
-            } else if let Some(Err(err)) = &submit_outcome {
-                emit_submit_notice(&app, err);
-            } else if asr_final_word_count >= 30 {
-                // Success stays quiet for everyday dictations (Wispr-style
-                // restraint); only big ones earn a word-count confirmation.
-                emit_pill_notice(
-                    &app,
-                    "info",
-                    format!("Inserted · {asr_final_word_count} words"),
-                    None,
-                    2_600,
-                );
-            }
-
-            // Opt-in one-tap "Add to dictionary?" suggestion. Restraint gate:
-            // off by default (setting), and only when there is exactly one
-            // high-confidence correction candidate — the dictionary review
-            // popup already ingests these independently, so this never
-            // double-surfaces on the default calm UX.
-            if settings.pill_action_suggestions
-                && insertion_success
-                && correction_candidates.len() == 1
-            {
-                let term = correction_candidates[0].clone();
-                emit_pill_action_notice(
-                    &app,
-                    "info",
-                    "Add to dictionary?",
-                    None,
-                    PillAction {
-                        kind: "addDictionaryTerm".to_string(),
-                        label: format!("Add \"{term}\""),
-                        value: Some(term),
-                    },
-                    6_000,
-                );
-            }
-        }
-
-        self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
-            .await;
 
         let post_after_insert_ms = post_started.elapsed().as_millis() as u64;
         let post_after_only_ms = post_after_insert_ms

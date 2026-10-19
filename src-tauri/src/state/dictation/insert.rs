@@ -1,17 +1,18 @@
 //! Insertion: put the text into the target app (paste or typing; elevated
 //! targets fall back to the clipboard inside `insert_text`), press Enter
-//! for a spoken submit, and track quick re-dictations as dictionary
-//! correction candidates.
+//! for a spoken submit, track quick re-dictations as dictionary correction
+//! candidates, and tell the user how it went.
 
 use super::polish::Delivery;
 use super::post_process::{FormattedText, SpokenText};
 use super::DictationRun;
 use crate::insertion::{InsertTextRequest, SubmitError};
 use crate::state::{
-    classify_insertion_target, derive_correction_candidates, insertion_method_key, now_utc_ms,
-    return_focus_for_retry, CorrectionSession, DictationLifecycleState, TranscriptEvent,
-    VoiceWaveController, VoiceWaveHudState, CORRECTION_SESSION_WINDOW_MS,
-    SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
+    classify_insertion_target, derive_correction_candidates, emit_pill_action_notice,
+    emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
+    return_focus_for_retry, CorrectionSession, DictationLifecycleState, DictationMode,
+    PillAction, TranscriptEvent, VoiceWaveController, VoiceWaveHudState,
+    CORRECTION_SESSION_WINDOW_MS, SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
 };
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -185,6 +186,114 @@ impl VoiceWaveController {
             post_started,
             post_before_insert_ms,
             insert_ms,
+        }
+    }
+}
+
+/// The pill after a microphone insertion: the rescue card with the text
+/// when it did not land, clipboard hints (with the admin-app explanation),
+/// a failed spoken Enter, a word count for long dictations, and the opt-in
+/// "Add to dictionary?" suggestion.
+pub(super) fn announce_insertion(
+    run: &DictationRun,
+    delivery: &Delivery,
+    text: &FormattedText,
+    spoken: &SpokenText,
+    insertion: &Insertion,
+) {
+    let DictationRun {
+        ref app,
+        mode,
+        ref settings,
+        ..
+    } = *run;
+    let inserted_text = &delivery.inserted_text;
+    let asr_final_word_count = text.asr_final_word_count;
+    let submit_requested = spoken.submit_requested;
+    let Insertion {
+        success: insertion_success,
+        method: ref insertion_method,
+        blocked_by_elevation: insertion_blocked_by_elevation,
+        ref submit_outcome,
+        ref correction_candidates,
+        ..
+    } = *insertion;
+    // Rescue pill (Wispr Flow fallback pattern): when the text did not
+    // land in the target app, the pill expands with the transcript so the
+    // words are visibly safe and one keystroke/click away.
+    if mode == DictationMode::Microphone {
+        if !insertion_success {
+            emit_pill_rescue(
+                &app,
+                "warning",
+                "Couldn't insert — your text is safe",
+                Some("Click Copy, then paste it where you need it.".to_string()),
+                inserted_text.clone(),
+                Some("copyTranscript"),
+            );
+        } else if insertion_method == "clipboardOnly" {
+            let paste_hint = if submit_requested {
+                "Press Ctrl+V to paste it, then Enter."
+            } else {
+                "Press Ctrl+V to paste it here."
+            };
+            if insertion_blocked_by_elevation {
+                emit_pill_rescue(
+                    &app,
+                    "info",
+                    "This app runs as administrator",
+                    Some(format!(
+                        "VoiceWave can't type into it, so your text is on the clipboard. {paste_hint}"
+                    )),
+                    inserted_text.clone(),
+                    None,
+                );
+            } else {
+                emit_pill_rescue(
+                    &app,
+                    "info",
+                    "Copied to clipboard",
+                    Some(paste_hint.to_string()),
+                    inserted_text.clone(),
+                    None,
+                );
+            }
+        } else if let Some(Err(err)) = &submit_outcome {
+            emit_submit_notice(&app, err);
+        } else if asr_final_word_count >= 30 {
+            // Success stays quiet for everyday dictations (Wispr-style
+            // restraint); only big ones earn a word-count confirmation.
+            emit_pill_notice(
+                &app,
+                "info",
+                format!("Inserted · {asr_final_word_count} words"),
+                None,
+                2_600,
+            );
+        }
+
+        // Opt-in one-tap "Add to dictionary?" suggestion. Restraint gate:
+        // off by default (setting), and only when there is exactly one
+        // high-confidence correction candidate — the dictionary review
+        // popup already ingests these independently, so this never
+        // double-surfaces on the default calm UX.
+        if settings.pill_action_suggestions
+            && insertion_success
+            && correction_candidates.len() == 1
+        {
+            let term = correction_candidates[0].clone();
+            emit_pill_action_notice(
+                &app,
+                "info",
+                "Add to dictionary?",
+                None,
+                PillAction {
+                    kind: "addDictionaryTerm".to_string(),
+                    label: format!("Add \"{term}\""),
+                    value: Some(term),
+                },
+                6_000,
+            );
         }
     }
 }
