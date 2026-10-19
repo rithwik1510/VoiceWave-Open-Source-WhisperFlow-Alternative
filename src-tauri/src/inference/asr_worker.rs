@@ -1099,6 +1099,8 @@ struct TranscribeJob {
     audio_ms: u64,
     beam_size: u32,
     initial_prompt: Option<String>,
+    /// Parakeet only: dictionary terms its decoder boosts (plan 021).
+    boost_terms: Vec<String>,
 }
 
 fn transcribe_blocking(
@@ -1132,6 +1134,9 @@ fn transcribe_blocking(
             if let Some(prompt) = &job.initial_prompt {
                 body["initialPrompt"] = json!(prompt);
             }
+            if !job.boost_terms.is_empty() {
+                body["boostTerms"] = json!(job.boost_terms);
+            }
             let reply = with_worker(&mut guard, |worker| {
                 // Only dictation decodes count: the qualification's two clip
                 // lengths leave the user's own lengths still to compile.
@@ -1145,6 +1150,17 @@ fn transcribe_blocking(
             note_report(model_path, &reply);
             if rung == Rung::Gpu {
                 lock(&SESSION).gpu_failures = 0;
+            }
+            // Counts only: never a term or transcript text in the log.
+            if let Some(boost) = reply.get("boost") {
+                tracing::debug!(
+                    "parakeet boost: {} terms, {} skipped, {} matched, {} changed, {} ms",
+                    boost["terms"],
+                    boost["skipped"],
+                    boost["completed"],
+                    boost["flipped"],
+                    boost["ms"]
+                );
             }
             let text = reply["text"]
                 .as_str()
@@ -1680,8 +1696,9 @@ pub(crate) async fn wait_for_gpu_check(
 }
 
 /// One decode on `rung`. `overrides` carries the shared pipeline's beam size
-/// and prompt (Parakeet ignores both); the worker always decodes at
-/// temperature 0 without previous text conditioning. `load_deadline`
+/// and prompt (Parakeet ignores both; it takes `boost_terms` instead, which
+/// whisper models never send); the worker always decodes at temperature 0
+/// without previous text conditioning. `load_deadline`
 /// overrides the rung's default (the fresh-worker retry after a GPU fault
 /// uses a short one).
 pub(crate) async fn transcribe(
@@ -1691,6 +1708,7 @@ pub(crate) async fn transcribe(
     samples: &[f32],
     decode_mode: DecodeMode,
     overrides: &FasterWhisperRequestOverrides,
+    boost_terms: &[String],
     cancel: &CancellationToken,
 ) -> Result<FasterWhisperDecodeOutput, InferenceError> {
     if cancel.is_cancelled() {
@@ -1712,6 +1730,11 @@ pub(crate) async fn transcribe(
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty())
             .map(str::to_string),
+        boost_terms: if model.is_parakeet() {
+            boost_terms.to_vec()
+        } else {
+            Vec::new()
+        },
     };
     let model = model.clone();
     let cancel = cancel.clone();

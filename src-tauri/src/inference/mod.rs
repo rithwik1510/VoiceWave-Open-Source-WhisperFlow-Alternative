@@ -207,6 +207,9 @@ enum InferenceBackend {
         model: AsrModel,
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
+        /// Dictionary terms for Parakeet's decoder (plan 021); empty for
+        /// whisper models, which take `terminology_hint` as a prompt.
+        boost_terms: Vec<String>,
         /// Installed faster-whisper model: the CPU rung when the GPU path is
         /// unavailable or fails. Without one the CPU worker decodes the same
         /// GGML file.
@@ -276,6 +279,7 @@ impl InferenceWorker {
         model: AsrModel,
         decode_mode: DecodeMode,
         terminology_hint: Option<String>,
+        boost_terms: Vec<String>,
         fw_fallback_model: Option<String>,
     ) -> Self {
         let active_model = model.id.clone();
@@ -291,6 +295,7 @@ impl InferenceWorker {
                 terminology_hint: terminology_hint
                     .map(|hint| hint.trim().to_string())
                     .filter(|hint| !hint.is_empty()),
+                boost_terms,
                 fw_fallback_model,
             },
         }
@@ -424,6 +429,7 @@ impl InferenceWorker {
                 model,
                 decode_mode,
                 terminology_hint,
+                boost_terms,
                 fw_fallback_model,
             } => {
                 let decode = transcribe_with_asr_worker(
@@ -431,6 +437,7 @@ impl InferenceWorker {
                     model,
                     *decode_mode,
                     terminology_hint.as_deref(),
+                    boost_terms,
                     fw_fallback_model.as_deref(),
                     cancel_token,
                 )
@@ -688,6 +695,8 @@ enum WhisperEngine<'a> {
         model: &'a AsrModel,
         /// None = the rung's default load deadline.
         load_deadline: Option<std::time::Duration>,
+        /// Sent to Parakeet only (plan 021).
+        boost_terms: &'a [String],
     },
 }
 
@@ -725,6 +734,7 @@ impl WhisperEngine<'_> {
                 rung,
                 model,
                 load_deadline,
+                boost_terms,
             } => {
                 asr_worker::transcribe(
                     *rung,
@@ -733,6 +743,7 @@ impl WhisperEngine<'_> {
                     samples,
                     decode_mode,
                     &overrides,
+                    boost_terms,
                     cancel_token,
                 )
                 .await
@@ -755,6 +766,7 @@ async fn transcribe_with_asr_worker(
     model: &AsrModel,
     decode_mode: DecodeMode,
     terminology_hint: Option<&str>,
+    boost_terms: &[String],
     fw_fallback_model: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> Result<WhisperDecodeOutput, InferenceError> {
@@ -781,6 +793,7 @@ async fn transcribe_with_asr_worker(
             rung: asr_worker::Rung::Cpu,
             model,
             load_deadline: None,
+            boost_terms,
         },
     };
     let primary_engine = match primary {
@@ -788,6 +801,7 @@ async fn transcribe_with_asr_worker(
             rung: asr_worker::Rung::Gpu,
             model,
             load_deadline: None,
+            boost_terms,
         },
         asr_worker::Rung::Cpu => cpu_rung,
     };
@@ -869,6 +883,7 @@ async fn transcribe_with_asr_worker(
             rung: asr_worker::Rung::Gpu,
             model,
             load_deadline: Some(asr_worker::GPU_RETRY_LOAD_DEADLINE),
+            boost_terms,
         };
         match transcribe_with_whisper_pipeline(
             samples,
@@ -1121,8 +1136,8 @@ async fn run_whisper_decode_with_conditioned(
         ],
     );
 
-    // Parakeet takes no prompt; dictionary terms reach its text only through
-    // the post-processing every engine shares.
+    // Parakeet takes no prompt; dictionary terms steer its decoder as boost
+    // terms instead (sent by the engine), and post-processing still runs.
     let parakeet = engine.is_parakeet();
     let primary_overrides = if parakeet {
         FasterWhisperRequestOverrides::default()

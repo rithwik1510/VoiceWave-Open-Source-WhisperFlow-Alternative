@@ -881,11 +881,23 @@ fn should_reject_low_confidence_transcript_as_no_speech(
 }
 
 fn build_terminology_hint_from_texts(terms: &[String], limit: usize) -> Option<String> {
-    if terms.is_empty() || limit == 0 {
-        return None;
+    let chosen = select_terminology_terms(terms, limit);
+    if chosen.is_empty() {
+        None
+    } else {
+        Some(chosen.join(", "))
     }
+}
+
+/// Up to `limit` dictionary terms, newest first (the list is in ascending
+/// priority), unique case-insensitively, 3..=40 bytes. Feeds both the Whisper
+/// prompt and Parakeet's boost terms.
+fn select_terminology_terms(terms: &[String], limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut chosen = Vec::new();
+    if limit == 0 {
+        return chosen;
+    }
     for term in terms.iter().rev() {
         let normalized = term.trim();
         if normalized.len() < 3 || normalized.len() > 40 {
@@ -900,11 +912,7 @@ fn build_terminology_hint_from_texts(terms: &[String], limit: usize) -> Option<S
             break;
         }
     }
-    if chosen.is_empty() {
-        None
-    } else {
-        Some(chosen.join(", "))
-    }
+    chosen
 }
 
 fn env_technical_terms() -> Vec<String> {
@@ -5531,14 +5539,21 @@ impl VoiceWaveController {
         match mode {
             DictationMode::Fixture => Ok(InferenceWorker::new_fixture(model_id.to_string())),
             DictationMode::Microphone => {
-                let hint = {
+                let (hint, boost_terms) = {
                     let manager = self.dictionary_manager.lock().await;
                     // Build in ascending priority because hint builder reads terms in reverse:
                     // environment terms < approved dictionary terms. Pending suggestions
                     // are untrusted and must never bias decoding before approval.
                     let mut terms = env_technical_terms();
                     terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
-                    build_terminology_hint_from_texts(&terms, 10)
+                    // Parakeet has no prompt; the same terms steer its decoder
+                    // instead (plan 021), up to the worker's cap of 200.
+                    let boost_terms = if is_parakeet_model(model_id) {
+                        select_terminology_terms(&terms, 200)
+                    } else {
+                        Vec::new()
+                    };
+                    (build_terminology_hint_from_texts(&terms, 10), boost_terms)
                 };
                 if is_faster_whisper_model(model_id) {
                     if !assume_fw_ready {
@@ -5568,6 +5583,7 @@ impl VoiceWaveController {
                         },
                         decode_mode,
                         hint,
+                        boost_terms,
                         self.installed_fw_fallback(model_id).await,
                     ))
                 }
