@@ -40,6 +40,7 @@ import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/On
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
+import { useAutostart } from "./hooks/useAutostart";
 import { useVoiceWave } from "./hooks/useVoiceWave";
 import { THEMES } from "./prototype/constants";
 import { Dashboard } from "./prototype/components/Dashboard";
@@ -703,6 +704,7 @@ function App() {
     tauriAvailable,
     updateRetentionPolicy
   } = useVoiceWave();
+  const { enabled: autostartEnabled, setEnabled: setAutostartEnabled } = useAutostart();
 
   const status = useMemo<DictationState>(() => activeState, [activeState]);
   const isRecording = status === "listening" || status === "transcribing";
@@ -2610,6 +2612,27 @@ function App() {
                       ))}
                     </div>
                   </div>
+
+                  {autostartEnabled !== null && (
+                    <div className="vw-set-row">
+                      <div>
+                        <p className="vw-set-title">Start with Windows</p>
+                        <p className="vw-set-desc">
+                          Open VoiceWave in the tray when you sign in, with the speech model already loaded, so
+                          your first dictation is as fast as any other.
+                        </p>
+                      </div>
+                      <span className="vw-switch">
+                        <input
+                          type="checkbox"
+                          aria-label="Start VoiceWave with Windows"
+                          checked={autostartEnabled}
+                          onChange={(event) => void setAutostartEnabled(event.target.checked)}
+                        />
+                        <span className="vw-switch-track" aria-hidden="true" />
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3538,6 +3561,8 @@ function App() {
           snapshot={snapshot}
           usageOptIn={settings.anonymousUsageOptIn}
           onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}
+          autostart={autostartEnabled}
+          onAutostartChange={(enabled) => void setAutostartEnabled(enabled)}
           onComplete={() => void completeOnboarding()}
         />
       )}

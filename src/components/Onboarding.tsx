@@ -51,6 +51,10 @@ interface OnboardingProps {
    * Setup funnel events read the value current when each one fires. */
   usageOptIn: boolean;
   onUsageOptInChange: (enabled: boolean) => void;
+  /** "Start with Windows" on the final step. Off unless the user opts in;
+   * null (not offered) outside the desktop app. */
+  autostart?: boolean | null;
+  onAutostartChange?: (enabled: boolean) => void;
   onComplete: () => void;
   /** Test/host override. Desktop normally resolves the internal rollout flag
    * from the native snapshot so onboarding never advertises a disabled card. */
@@ -369,6 +373,8 @@ export function Onboarding({
   snapshot,
   usageOptIn,
   onUsageOptInChange,
+  autostart,
+  onAutostartChange,
   onComplete,
   quickControlsAvailable: quickControlsAvailableOverride
 }: OnboardingProps) {
@@ -934,6 +940,25 @@ export function Onboarding({
                     AI polish · waiting in Settings
                   </span>
                 </div>
+                {autostart != null && onAutostartChange ? (
+                  <div className="mt-6 flex w-full max-w-[26rem] items-start justify-between gap-6 text-left">
+                    <div>
+                      <p className="vw-set-title">Start with Windows</p>
+                      <p className="vw-set-desc">
+                        Opens in the tray at sign-in with the model loaded. Change it anytime in Settings.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Start VoiceWave with Windows"
+                        checked={autostart}
+                        onChange={(event) => onAutostartChange(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+                ) : null}
                 <button type="button" className="vw-btn-primary mt-8" onClick={() => leaveSetup("finished")}>
                   Start dictating
                 </button>
