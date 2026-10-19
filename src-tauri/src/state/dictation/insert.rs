@@ -104,7 +104,7 @@ impl VoiceWaveController {
             insertion_record_id,
             insertion_blocked_by_elevation,
         ) = match self
-            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(&polish_meta))
+            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(polish_meta))
             .await
         {
             Ok((result, record_id)) => (
@@ -121,7 +121,7 @@ impl VoiceWaveController {
             ),
             Err(err) => {
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Error,
                     Some(format!("Insertion failed: {err}")),
                 )
@@ -166,7 +166,7 @@ impl VoiceWaveController {
                     && inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
                         <= CORRECTION_SESSION_WINDOW_MS
                 {
-                    derive_correction_candidates(&previous.inserted_text, &inserted_text)
+                    derive_correction_candidates(&previous.inserted_text, inserted_text)
                 } else {
                     Vec::new()
                 }
@@ -238,7 +238,7 @@ pub(super) fn announce_insertion(
     if mode == DictationMode::Microphone {
         if !insertion_success {
             emit_pill_rescue(
-                &app,
+                app,
                 "warning",
                 "Couldn't insert — your text is safe",
                 Some("Click Copy, then paste it where you need it.".to_string()),
@@ -253,7 +253,7 @@ pub(super) fn announce_insertion(
             };
             if insertion_blocked_by_elevation {
                 emit_pill_rescue(
-                    &app,
+                    app,
                     "info",
                     "This app runs as administrator",
                     Some(format!(
@@ -264,7 +264,7 @@ pub(super) fn announce_insertion(
                 );
             } else {
                 emit_pill_rescue(
-                    &app,
+                    app,
                     "info",
                     "Copied to clipboard",
                     Some(paste_hint.to_string()),
@@ -273,12 +273,12 @@ pub(super) fn announce_insertion(
                 );
             }
         } else if let Some(Err(err)) = &submit_outcome {
-            emit_submit_notice(&app, err);
+            emit_submit_notice(app, err);
         } else if asr_final_word_count >= 30 {
             // Success stays quiet for everyday dictations (Wispr-style
             // restraint); only big ones earn a word-count confirmation.
             emit_pill_notice(
-                &app,
+                app,
                 "info",
                 format!("Inserted · {asr_final_word_count} words"),
                 None,
@@ -295,7 +295,7 @@ pub(super) fn announce_insertion(
         {
             let term = correction_candidates[0].clone();
             emit_pill_action_notice(
-                &app,
+                app,
                 "info",
                 "Add to dictionary?",
                 None,

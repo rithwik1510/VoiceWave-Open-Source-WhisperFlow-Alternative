@@ -215,7 +215,7 @@ impl VoiceWaveController {
         // Hands-free users may still be talking when the cap stops capture.
         if cap_hit && hands_free_capture {
             emit_pill_notice(
-                &app,
+                app,
                 "info",
                 format!(
                     "Reached the {}-minute limit",
@@ -254,7 +254,7 @@ impl VoiceWaveController {
         )
         .await;
         self.update_state(
-            &app,
+            app,
             VoiceWaveHudState::Transcribing,
             Some(format!("{transcribing_message}{watchdog_note}")),
         )
@@ -295,7 +295,7 @@ impl VoiceWaveController {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Idle,
                     Some(format!(
                         "Capture was too short to transcribe reliably. {}",
@@ -332,7 +332,7 @@ impl VoiceWaveController {
             && !self.gpu_notice_sent.swap(true, Ordering::Relaxed);
         if gpu_wait_notice {
             emit_pill_notice(
-                &app,
+                app,
                 "info",
                 "Getting your graphics card ready",
                 Some(
@@ -366,7 +366,7 @@ impl VoiceWaveController {
             finalize_timeout,
             final_worker.transcribe_segment(
                 finalize_samples_ref,
-                &cancel_token,
+                cancel_token,
                 |_text, _is_final, _elapsed_ms| {},
             ),
         )
@@ -378,7 +378,7 @@ impl VoiceWaveController {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Idle,
                     Some("Dictation cancelled.".to_string()),
                 )
@@ -441,11 +441,11 @@ impl VoiceWaveController {
                 .filter(|_| !self.gpu_notice_sent.swap(true, Ordering::Relaxed))
             {
                 let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
-                emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
+                emit_pill_notice(app, "warning", title, Some(detail), 6_500);
             } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
             {
                 emit_pill_notice(
-                    &app,
+                    app,
                     "info",
                     "Engine was cold",
                     Some(
@@ -491,7 +491,7 @@ async fn wait_for_faster_whisper(
                 Ok(joined) => joined,
                 Err(_) => {
                     emit_pill_notice(
-                        &app,
+                        app,
                         "info",
                         "Loading the speech model",
                         Some(

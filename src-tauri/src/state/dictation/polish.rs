@@ -102,7 +102,7 @@ pub(super) async fn resolve_delivery(
     let mut inserted_text = if let Some(expansion) = &exact_snippet_expansion {
         expansion.clone()
     } else {
-        restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript).unwrap_or_else(
+        restore_snippet_candidate(inline_snippet_plan.as_deref(), final_transcript).unwrap_or_else(
             |error| {
                 tracing::warn!("snippet restoration failed before insertion: {error}");
                 baseline_transcript.clone()
@@ -170,9 +170,9 @@ pub(super) async fn resolve_delivery(
                                 polish_wait_ms = wait_started.elapsed().as_millis() as u64;
                                 polish_meta.polish_latency_ms = Some(polish_wait_ms);
                                 match gate_polish_candidate(
-                                    &final_transcript,
+                                    final_transcript,
                                     &candidate,
-                                    &custom_terms,
+                                    custom_terms,
                                     polish_profile,
                                 ) {
                                     Ok(stabilized) => match restore_snippet_candidate(

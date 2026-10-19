@@ -80,7 +80,7 @@ impl VoiceWaveController {
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
-                &app,
+                app,
                 VoiceWaveHudState::Idle,
                 Some("Dictation cancelled.".to_string()),
             )
@@ -91,7 +91,7 @@ impl VoiceWaveController {
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
-                &app,
+                app,
                 VoiceWaveHudState::Idle,
                 Some(format!(
                     "No speech captured yet. {}",
@@ -100,7 +100,7 @@ impl VoiceWaveController {
             )
             .await;
             emit_pill_notice(
-                &app,
+                app,
                 "info",
                 "Didn't catch that",
                 Some(dictation_retry_instruction(control_mode).to_string()),
@@ -210,7 +210,7 @@ impl VoiceWaveController {
                 release_tail: Duration::from_millis(*release_tail_ms),
             },
             hands_free: Some(HandsFreeSwitch {
-                active: Arc::clone(&hands_free),
+                active: Arc::clone(hands_free),
                 limits: HandsFreeLimits {
                     max_capture_duration: Duration::from_millis(HANDS_FREE_MAX_CAPTURE_MS),
                     silence_timeout: Duration::from_millis(HANDS_FREE_SILENCE_TIMEOUT_MS),
@@ -269,7 +269,7 @@ impl VoiceWaveController {
             // Sound cue is driven from the pill renderer for precise
             // sync with the visible listening onset.
             self.update_state(
-                &app,
+                app,
                 VoiceWaveHudState::Listening,
                 Some("Listening for speech...".to_string()),
             )
@@ -286,12 +286,12 @@ impl VoiceWaveController {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Idle,
                     Some("Dictation cancelled.".to_string()),
                 )
                 .await;
-                return Ok(None);
+                Ok(None)
             }
             Err(AudioError::NoSpeechDetected) => {
                 tracing::info!("capture ended with no speech (session={session_id})");
@@ -308,7 +308,7 @@ impl VoiceWaveController {
                     String::new()
                 };
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Idle,
                     Some(format!(
                         "No speech on '{}'{}. {} Try lowering VAD threshold in Settings if this persists.",
@@ -319,17 +319,17 @@ impl VoiceWaveController {
                 )
                 .await;
                 emit_pill_notice(
-                    &app,
+                    app,
                     "info",
                     "Didn't catch that",
                     Some(dictation_retry_instruction(control_mode).to_string()),
                     3_800,
                 );
-                return Ok(None);
+                Ok(None)
             }
             Err(err) => {
                 tracing::error!("capture failed (session={session_id}): {err}");
-                return Err(ControllerError::Audio(err));
+                Err(ControllerError::Audio(err))
             }
         }
     }
@@ -442,7 +442,7 @@ impl VoiceWaveController {
             ..
         } = *run;
         let audio_quality = analyze_captured_segments(
-            &segments,
+            segments,
             self.audio.target_sample_rate,
             clamp_vad_threshold(settings.vad_threshold),
         );
@@ -454,7 +454,7 @@ impl VoiceWaveController {
                 && take_notice_cooldown(&self.poor_audio_notice_last_at)
             {
                 emit_pill_notice(
-                    &app,
+                    app,
                     "warning",
                     "Audio quality looks poor",
                     Some(
@@ -471,7 +471,7 @@ impl VoiceWaveController {
                 && !self.mic_profile_notice_sent.swap(true, Ordering::Relaxed)
             {
                 emit_pill_notice(
-                    &app,
+                    app,
                     "warning",
                     "Headset hands-free profile detected",
                     Some(

@@ -84,7 +84,7 @@ impl VoiceWaveController {
                 && should_reject_low_confidence_transcript_as_no_speech(
                     whisper_pipeline,
                     captured_audio_ms,
-                    &finalize_text,
+                    finalize_text,
                     decode_telemetry.fw_no_speech_prob,
                 );
             let outcome = if unheard {
@@ -108,9 +108,9 @@ impl VoiceWaveController {
             } else {
                 VoiceWaveHudState::Idle
             };
-            self.update_state(&app, hud_state, Some(message)).await;
+            self.update_state(app, hud_state, Some(message)).await;
             if let Some(Err(err)) = &outcome {
-                emit_submit_notice(&app, err);
+                emit_submit_notice(app, err);
             }
             return None;
         }
@@ -158,7 +158,7 @@ impl VoiceWaveController {
         // snapshot taken at flow start so a mid-flight profile switch cannot
         // produce a hybrid.
         let polish_profile = settings.effective_polish_profile();
-        let profile_policy = resolve_profile(polish_profile, &settings);
+        let profile_policy = resolve_profile(polish_profile, settings);
         // Dictionary terms feed every branch below (Literal stabilization,
         // the pro deterministic stack, and the polish gate) — fetch once.
         let custom_terms = self
@@ -170,12 +170,12 @@ impl VoiceWaveController {
             .map(|row| row.term)
             .collect::<Vec<_>>();
         let active_snippets = self.snippet_manager.lock().await.list_snippets(None);
-        let protection = match SnippetExpansionPlan::protect(&baseline_transcript, &active_snippets)
+        let protection = match SnippetExpansionPlan::protect(baseline_transcript, &active_snippets)
         {
             Ok(outcome) => outcome,
             Err(ProtectionError::TooManyMatches) => {
                 emit_pill_notice(
-                    &app,
+                    app,
                     "warning",
                     "Too many snippet triggers",
                     Some("No snippets were expanded in this dictation.".to_string()),
@@ -197,11 +197,11 @@ impl VoiceWaveController {
         let deterministic_input = inline_snippet_plan
             .as_ref()
             .map(|plan| plan.protected_text())
-            .unwrap_or(&merged_transcript);
+            .unwrap_or(merged_transcript);
         let literal_input = inline_snippet_plan
             .as_ref()
             .map(|plan| plan.protected_text())
-            .unwrap_or(&baseline_transcript);
+            .unwrap_or(baseline_transcript);
         let entitlement = self.billing_manager.lock().await.snapshot();
         let deterministic_transcript = if let Some(expansion) = &exact_snippet_expansion {
             expansion.clone()
@@ -214,7 +214,7 @@ impl VoiceWaveController {
             // corrections, format profiles, or code mode.
             finalize_literal_transcript(literal_input, settings.spoken_edit_commands, &custom_terms)
         } else if entitlement.is_pro {
-            let app_profile_behavior = Self::active_profile_behavior(&settings);
+            let app_profile_behavior = Self::active_profile_behavior(settings);
             finalize_pro_transcript(
                 deterministic_input,
                 &ProTranscriptOptions {
@@ -244,14 +244,14 @@ impl VoiceWaveController {
             deterministic_transcript
         };
         let (asr_integrity_percent, asr_raw_word_count, asr_final_word_count) =
-            asr_integrity_metrics(&finalize_text, &baseline_transcript);
+            asr_integrity_metrics(finalize_text, baseline_transcript);
 
         if final_transcript.trim().is_empty() {
             if cancel_token.is_cancelled() {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
                 self.update_state(
-                    &app,
+                    app,
                     VoiceWaveHudState::Idle,
                     Some("Dictation cancelled.".to_string()),
                 )
@@ -272,14 +272,14 @@ impl VoiceWaveController {
             && should_reject_low_confidence_transcript_as_no_speech(
                 whisper_pipeline,
                 captured_audio_ms,
-                &baseline_transcript,
+                baseline_transcript,
                 decode_telemetry.fw_no_speech_prob,
             )
         {
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(
-                &app,
+                app,
                 VoiceWaveHudState::Idle,
                 Some(format!(
                     "No speech detected. {}",
