@@ -1235,6 +1235,9 @@ struct RetainedAudio {
     /// The window the user dictated into, so a retry clicked from the pill
     /// can hand focus back to it.
     target_window: Option<isize>,
+    /// The capture's quality report, reused by the retry (its segment count
+    /// and duration too) instead of re-assessing the same audio.
+    audio_quality: AudioQualityReport,
 }
 
 #[derive(Debug)]

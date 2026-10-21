@@ -102,7 +102,7 @@ impl VoiceWaveController {
             ..
         } = *run;
         let CapturedAudio {
-            ref segments,
+            segment_count,
             ref source_samples,
             capture_ms,
             ref mic_input_volume_slot,
@@ -181,7 +181,7 @@ impl VoiceWaveController {
         }
         let audio_duration_ms =
             sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-        let segments_captured = segments.len() as u32;
+        let segments_captured = segment_count;
         let release_stop_detected_at_utc_ms = self
             .session_release_stop_detected_at_utc_ms(session_id)
             .await
