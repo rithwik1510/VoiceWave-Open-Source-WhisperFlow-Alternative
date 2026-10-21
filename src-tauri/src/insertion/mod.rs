@@ -39,6 +39,13 @@ pub struct InsertResult {
     pub blocked_by_elevation: bool,
 }
 
+/// `dwExtraInfo` tag on every keystroke VoiceWave sends (typing, paste
+/// chords, Enter, undo). The hotkey hook passes these straight through, so
+/// a paste chord that happens to match the user's hotkey does not start a
+/// session. Other injected input (AutoHotkey, PowerToys remaps) carries no
+/// tag and still reaches the hotkey logic.
+pub const VOICEWAVE_INPUT_MARKER: usize = 0x5657_4156; // "VWAV"
+
 /// HUD message for an elevated target; the pill carries the same facts.
 const ELEVATED_TARGET_MESSAGE: &str =
     "This app runs as administrator, so VoiceWave can't type into it. Press Ctrl+V.";
@@ -1080,7 +1087,7 @@ fn send_unicode_text(text: &str) -> Result<(), String> {
                 wScan: code_unit,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: VOICEWAVE_INPUT_MARKER,
             },
         },
     };
@@ -1145,7 +1152,7 @@ fn send_key_chord(modifiers: &[u16], key: u16) -> Result<(), String> {
                     wScan: scan,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: VOICEWAVE_INPUT_MARKER,
                 },
             },
         }
