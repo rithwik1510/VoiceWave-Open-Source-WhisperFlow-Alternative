@@ -25,7 +25,8 @@
 // initialPrompt and flashAttention; its noSpeechProb is always 0. Instead of a
 // prompt it takes dictionary terms as boostTerms (plan 021, see "boosting"
 // below); its transcribe reply then adds
-// "boost":{"terms","skipped","completed","flipped","ms"}. Whisper ignores them.
+// "boost":{"terms","skipped","steps","completed","flipped","ms"}. Whisper
+// ignores them.
 //
 // Every response echoes the request id. Failures are
 // {"id":..,"ok":false,"errorClass":"artifact"|"resource"|"backend"|"protocol","error":..}.
@@ -622,6 +623,7 @@ struct Booster {
     std::vector<int> cand;
     std::vector<char> kinds;  // Kind per candidate
     int greedy_choice = -1;  // argmax before the bonus, for the step in flight
+    int steps = 0;           // logits-filter calls: proves the patched hook ran
     int completed = 0, flipped = 0;
     double ms = 0;
 
@@ -678,6 +680,7 @@ struct Booster {
     // already chosen to emit one, so boosting never inserts a word.
     void filter(float *logits, int n) {
         const double t0 = now_ms();
+        steps++;
         const int blank = n - 1;
         const int best = (int) (std::max_element(logits, logits + n) - logits);
         greedy_choice = best;
@@ -1142,6 +1145,7 @@ json handle_transcribe(const json &req) {
         // Counts only: no term or transcript text leaves through diagnostics.
         out["boost"] = {{"terms", booster.terms.size()},
                         {"skipped", booster.skipped},
+                        {"steps", booster.steps},
                         {"completed", booster.completed},
                         {"flipped", booster.flipped},
                         {"ms", std::round(booster.ms * 100) / 100}};
