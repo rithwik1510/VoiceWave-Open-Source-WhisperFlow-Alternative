@@ -1744,21 +1744,6 @@ async fn get_speech_engine_status(
     Ok(runtime.controller.speech_engine_status().await)
 }
 
-/// Answer the one-time GPU upgrade notice; returns the model to download
-/// when accepted.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn answer_gpu_upgrade(
-    runtime: State<'_, RuntimeContext>,
-    accept: bool,
-) -> Result<Option<String>, String> {
-    runtime
-        .controller
-        .answer_gpu_upgrade(accept)
-        .await
-        .map_err(|err| AppError::Controller(err).into())
-}
-
 /// Qualify the accepted upgrade model and switch to it (no-op otherwise).
 /// Can take a minute on first GPU use; the UI polls the engine status.
 #[cfg(feature = "desktop")]
@@ -2551,7 +2536,6 @@ pub fn run() {
             trigger_hotkey_action,
             list_model_catalog,
             get_speech_engine_status,
-            answer_gpu_upgrade,
             finish_gpu_upgrade,
             remove_model,
             list_installed_models,

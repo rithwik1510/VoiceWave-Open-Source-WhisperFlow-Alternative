@@ -244,6 +244,12 @@ pub struct VoiceWaveSettings {
     /// GPU acceleration for dictation; Auto by default.
     #[serde(default)]
     pub gpu_acceleration: GpuAcceleration,
+    /// The one-time Home card offering existing users the switch to Parakeet
+    /// (0.8.0) was answered: "Not now", or Parakeet was made active (the
+    /// card or Models). Finishing onboarding sets it too, since setup already
+    /// offers Parakeet. False for settings files that predate it.
+    #[serde(default)]
+    pub parakeet_offer_answered: bool,
 }
 
 impl VoiceWaveSettings {
@@ -287,6 +293,7 @@ impl Default for VoiceWaveSettings {
             polish_profile: Some(PolishProfile::Standard),
             polish_profile_customized: false,
             gpu_acceleration: GpuAcceleration::Auto,
+            parakeet_offer_answered: false,
         }
     }
 }

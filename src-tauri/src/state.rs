@@ -2766,11 +2766,15 @@ impl VoiceWaveController {
 
     pub async fn list_model_catalog(&self) -> Vec<ModelCatalogItem> {
         let hardware = hardware_profile_async().await;
-        let active_model = self.settings.lock().await.active_model.clone();
+        let (active_model, gpu_acceleration) = {
+            let settings = self.settings.lock().await;
+            (settings.active_model.clone(), settings.gpu_acceleration)
+        };
+        let parakeet_on = self.parakeet_running_on(&hardware, gpu_acceleration).await;
         self.model_manager
             .lock()
             .await
-            .list_catalog(&hardware, &active_model)
+            .list_catalog(&hardware, &active_model, parakeet_on)
     }
 
     pub async fn list_installed_models(&self) -> Vec<InstalledModel> {
@@ -3388,6 +3392,10 @@ impl VoiceWaveController {
 
         let mut settings = self.settings.lock().await.clone();
         settings.active_model = model_id.clone();
+        // Choosing Parakeet anywhere answers the one-time offer to switch.
+        if is_parakeet_model(&model_id) {
+            settings.parakeet_offer_answered = true;
+        }
         self.settings_store.save(&settings)?;
         *self.settings.lock().await = settings.clone();
         self.snapshot.lock().await.active_model = model_id.clone();

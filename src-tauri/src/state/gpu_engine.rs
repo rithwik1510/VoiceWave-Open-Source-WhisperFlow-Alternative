@@ -1,15 +1,15 @@
 //! Controller surface for plan 019's engine selection: the status the UI
-//! shows ("Running on …", "Getting your graphics card ready", the upgrade
-//! offer, the switch to a processor model when the GPU is unusable), the
-//! one-time upgrade for GPU-capable existing users, and removing a model's
-//! files.
+//! shows ("Running on …", "Getting your graphics card ready", the switch to
+//! a processor model when the GPU is unusable), finishing a GPU upgrade
+//! accepted before 0.8.0 (the Parakeet offer replaced that notice), and
+//! removing a model's files.
 
 use super::{ControllerError, VoiceWaveController};
 use crate::inference::{
     asr_engine_view,
     gpu_select::{
-        answer_upgrade_offer, clear_pending_upgrade, driver_disabled, hardware_profile_async,
-        model_tier, pending_upgrade, upgrade_offer_answered, CpuSupport, ModelTier, QualOutcome,
+        clear_pending_upgrade, driver_disabled, hardware_profile_async, model_tier,
+        pending_upgrade, CpuSupport, HardwareProfile, ModelTier, QualOutcome, PARAKEET_MODEL_ID,
     },
     is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model, qualify_gpu, AsrRung,
     RunningOn,
@@ -19,8 +19,8 @@ use crate::settings::GpuAcceleration;
 use serde::Serialize;
 use tauri::AppHandle;
 
-/// A model the UI offers to download: the GPU upgrade, or the processor
-/// model for a whisper.cpp model stuck on the CPU.
+/// A model the UI offers to download: the processor model for a whisper.cpp
+/// model stuck on the CPU.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOffer {
@@ -50,10 +50,8 @@ pub struct SpeechEngineStatus {
     pub preparing: bool,
     pub qualification: Option<QualOutcome>,
     pub qualification_detail: Option<String>,
-    /// One-time "your graphics card can make dictation faster" notice.
-    pub upgrade_offer: Option<ModelOffer>,
-    /// GGML model the user accepted; switched to after it installs and
-    /// qualifies.
+    /// GGML model the user accepted the old GPU upgrade to; switched to after
+    /// it installs and qualifies.
     pub pending_upgrade: Option<String>,
     /// Set when the active whisper.cpp model is stuck on the processor (GPU
     /// check failed or retrying next session, GPU cooldown, driver disabled,
@@ -114,38 +112,13 @@ impl VoiceWaveController {
         // is waiting for; otherwise the active model's.
         let qualification_view = pending_view.as_ref().or(active_view.as_ref());
 
-        let (fw_installed, ggml_installed) = {
-            let installed = self.model_manager.lock().await.list_installed();
-            (
-                installed.iter().any(|row| is_faster_whisper_model(&row.model_id)),
-                installed.iter().any(|row| is_whisper_cpp_model(&row.model_id)),
-            )
-        };
-        // A GGML model on disk or downloading means this user already took
-        // the GPU path. It also covers a new user whose onboarding download
-        // lands after setup finished: until the chain activates it, they
-        // still sit on the default faster-whisper model.
-        let ggml_downloading = self
-            .model_download_cancels
+        let fw_installed = self
+            .model_manager
             .lock()
             .await
-            .keys()
-            .any(|model_id| is_whisper_cpp_model(model_id));
-
-        // GPU-path existing users still on faster-whisper, once.
-        let offer_due = hardware.gpu_path()
-            && gpu_enabled
-            && settings.onboarding_completed
-            && is_faster_whisper_model(&settings.active_model)
-            && !ggml_installed
-            && !ggml_downloading
-            && pending.is_none()
-            && !upgrade_offer_answered();
-        let upgrade_offer = if offer_due {
-            self.model_offer(hardware.recommended_model_id()).await
-        } else {
-            None
-        };
+            .list_installed()
+            .iter()
+            .any(|row| is_faster_whisper_model(&row.model_id));
 
         // Parakeet is meant to run on the processor too, so it gets no offer
         // to switch to faster-whisper Small.
@@ -170,10 +143,31 @@ impl VoiceWaveController {
             preparing,
             qualification: qualification_view.and_then(|view| view.qualification),
             qualification_detail: qualification_view.and_then(|view| view.qualification_detail.clone()),
-            upgrade_offer,
             pending_upgrade: pending,
             cpu_model_offer,
         }
+    }
+
+    /// Where Parakeet runs, for its Models note: the processor without a GPU
+    /// or with GPU acceleration off, otherwise what its own GPU check
+    /// decided. `None` while that is unknown (not installed, check not run
+    /// yet or running).
+    pub(super) async fn parakeet_running_on(
+        &self,
+        hardware: &HardwareProfile,
+        gpu_acceleration: GpuAcceleration,
+    ) -> Option<AsrRung> {
+        if hardware.gpu.is_none() || gpu_acceleration == GpuAcceleration::Off {
+            return Some(AsrRung::Cpu);
+        }
+        let model = self.installed_asr_model(PARAKEET_MODEL_ID).await?;
+        let view = tokio::task::spawn_blocking(move || asr_engine_view(&model))
+            .await
+            .ok()?;
+        if view.preparing || view.qualification.is_none() {
+            return None;
+        }
+        view.running_on.map(|running| running.device)
     }
 
     async fn model_offer(&self, model_id: &str) -> Option<ModelOffer> {
@@ -188,25 +182,6 @@ impl VoiceWaveController {
             tier,
             size_bytes,
         })
-    }
-
-    /// The user's answer to the upgrade notice. Accepting records the model
-    /// to switch to (returned); the frontend downloads it with the normal
-    /// downloader, then calls `finish_gpu_upgrade`. Declining is final.
-    pub async fn answer_gpu_upgrade(&self, accept: bool) -> Result<Option<String>, ControllerError> {
-        if !accept {
-            answer_upgrade_offer(None);
-            return Ok(None);
-        }
-        let hardware = hardware_profile_async().await;
-        if !hardware.gpu_path() {
-            return Err(ControllerError::Runtime(
-                "This PC has no graphics card VoiceWave can use.".to_string(),
-            ));
-        }
-        let model_id = hardware.recommended_model_id().to_string();
-        answer_upgrade_offer(Some(model_id.clone()));
-        Ok(Some(model_id))
     }
 
     /// Finish an accepted upgrade once its model is installed: qualify it,
