@@ -91,12 +91,16 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
   const [preview, setPreview] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const captureRef = useRef<Capture>({ modifiers: new Set(), main: null });
-  const heldRef = useRef(new Set<string>());
+  // Physically held keys: id -> token.
+  const heldRef = useRef(new Map<string, string>());
+  // A key went down since the last save, so the next release saves.
+  const armedRef = useRef(false);
   const savingRef = useRef(false);
 
   const resetCapture = useCallback(() => {
     captureRef.current = { modifiers: new Set(), main: null };
-    heldRef.current = new Set();
+    heldRef.current = new Map();
+    armedRef.current = false;
     setPreview([]);
   }, []);
 
@@ -151,10 +155,10 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
     // `id` tells physical keys apart for the held set (DOM code, or the token
     // for hook events).
     const handleKey = (token: string | null, pressed: boolean, id: string) => {
-      if (savingRef.current) {
-        return;
-      }
       if (pressed) {
+        if (savingRef.current) {
+          return;
+        }
         if (token === "Escape") {
           stop();
           return;
@@ -163,7 +167,8 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
           setMessage(UNSUPPORTED_KEY);
           return;
         }
-        heldRef.current.add(id);
+        heldRef.current.set(id, token);
+        armedRef.current = true;
         if (isModifier(token)) {
           captureRef.current.modifiers.add(token);
         } else {
@@ -176,8 +181,22 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
       if (!heldRef.current.has(id)) {
         return;
       }
+      // Releases are tracked even mid-save, so after a rejection the capture
+      // still holds exactly the keys that are down and the next combo builds
+      // on them.
       const combo = captureToCombo(captureRef.current);
-      resetCapture();
+      heldRef.current.delete(id);
+      const held = [...heldRef.current.values()];
+      const capture = captureRef.current;
+      capture.modifiers = new Set(held.filter(isModifier));
+      if (capture.main && !held.includes(capture.main)) {
+        capture.main = null;
+      }
+      setPreview(hotkeyKeys(captureToCombo(capture)));
+      if (!armedRef.current) {
+        return;
+      }
+      armedRef.current = false;
       void save(combo).then((saved) => {
         if (saved) {
           stop();
@@ -224,7 +243,7 @@ export function HotkeyRecorder({ value, defaultValue, registrationError, onSave,
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onBlur);
     };
-  }, [recording, resetCapture, save, stop]);
+  }, [recording, save, stop]);
 
   const keys = recording ? preview : hotkeyKeys(value);
   const isDefault = value === defaultValue;
