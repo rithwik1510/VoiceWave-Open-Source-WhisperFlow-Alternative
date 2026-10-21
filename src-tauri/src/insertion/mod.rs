@@ -335,7 +335,9 @@ impl InsertionEngine {
         } else {
             None
         };
-        self.record_history(&result, &text);
+        // History keeps what was said, not the flattened terminal copy, so it
+        // matches the main History and copies back with its line breaks.
+        self.record_history(&result, &request.text);
         // Undo always refers to the latest landed insertion. One that can't be
         // undone (a terminal paste, clipboard only) clears the older record,
         // so Ctrl+Z is never sent on behalf of text from an earlier app.
