@@ -5,8 +5,8 @@
 #     1 s of silence over the JSON protocol, and exits when stdin closes
 #   - with -ParakeetModelPath: the CPU worker loads the Parakeet model
 #     ("engine":"parakeet"), decodes the bundled LibriSpeech clip and must return
-#     text containing "furniture", then decodes it again with boostTerms so the
-#     patched logits-filter callback path runs
+#     text containing "furniture", then decodes it again with boostTerms and
+#     checks the reply shows the patched logits filter ran and a term matched
 # Usage: ./scripts/asr-worker/smoke-asr-worker.ps1 [-BinDir <dir>] [-ModelPath <ggml .bin>]
 #          [-ParakeetModelPath <parakeet ggml .bin>] [-ClipPath <16 kHz mono wav>] [-CpuOnly]
 # -CpuOnly skips the Vulkan worker (e.g. on a machine where it should not be started).
@@ -146,12 +146,16 @@ if ($ParakeetModelPath) {
     Write-Host "cpu parakeet decode OK (decode $($plain.decodeComputeMs) ms): $($plain.text)"
 
     # Same clip with dictionary terms: runs the patched logits-filter and token callbacks.
+    # "furniture" and "pictures" are not single vocab pieces, so they survive the
+    # known-word skip and must match during the decode.
     Send-Request $p @{ id = 4; command = "transcribe"; audioPcm16B64 = $clip; boostTerms = @("furniture", "pictures", "Voicewave") }
     $boosted = Read-Reply $p
     if (-not $boosted.ok -or $boosted.id -ne 4) { throw "parakeet boosted transcribe failed: $($boosted | ConvertTo-Json -Compress)" }
     if ($boosted.text -notmatch '(?i)furniture') { throw "boosted parakeet transcript missing 'furniture': '$($boosted.text)'" }
-    if (-not $boosted.PSObject.Properties["boost"] -or $boosted.boost.terms -lt 1) {
-      throw "boosted reply has no boost stats: $($boosted | ConvertTo-Json -Compress)"
+    # steps counts logits-filter calls (zero if the patch's hook is not wired);
+    # completed counts terms matched through the token callback.
+    if (-not $boosted.PSObject.Properties["boost"] -or $boosted.boost.steps -lt 1 -or $boosted.boost.completed -lt 1) {
+      throw "boosted decode did not run the booster: $($boosted | ConvertTo-Json -Compress)"
     }
     Write-Host "cpu parakeet boosted decode OK (decode $($boosted.decodeComputeMs) ms, boost $($boosted.boost | ConvertTo-Json -Compress)): $($boosted.text)"
   }

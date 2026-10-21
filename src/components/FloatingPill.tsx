@@ -416,6 +416,17 @@ export function FloatingPill() {
     }
   }, [loadReviewQueue, rawState, refreshActiveProfile, resetReview]);
 
+  // A new dictation supersedes the last one's Try again card (recovery
+  // notices outrank the live status). If the new one fails, its own card
+  // arrives later with a fresh dismiss timer.
+  const retryNoticeShown = notice?.action?.kind === "retryDictation";
+  useEffect(() => {
+    if (rawState === "listening" && retryNoticeShown) {
+      clearNoticeDismiss();
+      setNotice(null);
+    }
+  }, [clearNoticeDismiss, rawState, retryNoticeShown]);
+
   const pillDisplayMode = derivePillDisplayMode({
     visualState,
     quickControlsEnabled,

@@ -5,7 +5,8 @@
 # Vulkan SDK (VULKAN_SDK, or -VulkanSdk); the CPU variant is configured with
 # VULKAN_SDK removed from the environment so nothing Vulkan can leak in.
 # The fetched whisper.cpp gets parakeet-logits-filter.patch (plan 021); a
-# -WhisperSource checkout must already carry it.
+# -WhisperSource checkout must already carry it. The patch applies once per
+# fetch, so after editing it rebuild with -Clean.
 #
 # Usage: ./scripts/asr-worker/build-asr-worker.ps1 [-Variant all|vk|cpu] [-BuildRoot <dir>]
 #          [-OutDir <dir>] [-VulkanSdk <dir>] [-WhisperSource <local whisper.cpp 1.9.5 dir>] [-Clean]

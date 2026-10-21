@@ -25,7 +25,8 @@
 // initialPrompt and flashAttention; its noSpeechProb is always 0. Instead of a
 // prompt it takes dictionary terms as boostTerms (plan 021, see "boosting"
 // below); its transcribe reply then adds
-// "boost":{"terms","skipped","completed","flipped","ms"}. Whisper ignores them.
+// "boost":{"terms","skipped","steps","completed","flipped","ms"}. Whisper
+// ignores them.
 //
 // Every response echoes the request id. Failures are
 // {"id":..,"ok":false,"errorClass":"artifact"|"resource"|"backend"|"protocol","error":..}.
@@ -530,8 +531,8 @@ parakeet_full_params parakeet_decode_params(int threads) {
 // noise, 34- and 200-term dictionaries): the highest that changed no trap
 // sentence. A start bonus beyond ~2 lets a term's first piece displace common
 // words under noise; a continuation bonus beyond ~8 spells "cloud" as "claud".
-constexpr float kBoostStart = 1.5f;  // bonus for a piece that starts a term
-constexpr float kBoostCont = 7.0f;   // bonus for a piece that continues one
+constexpr float kBoostStart = 1.5f;  // bonus for a piece that starts a term, or a later word of one
+constexpr float kBoostCont = 7.0f;   // bonus for a piece that continues a word of one
 constexpr int kBoostTopK = 16;       // candidates considered per step
 constexpr size_t kMaxBoostTerms = 200;
 constexpr size_t kMaxActiveMatches = 16;
@@ -622,6 +623,7 @@ struct Booster {
     std::vector<int> cand;
     std::vector<char> kinds;  // Kind per candidate
     int greedy_choice = -1;  // argmax before the bonus, for the step in flight
+    int steps = 0;           // logits-filter calls: proves the patched hook ran
     int completed = 0, flipped = 0;
     double ms = 0;
 
@@ -678,6 +680,7 @@ struct Booster {
     // already chosen to emit one, so boosting never inserts a word.
     void filter(float *logits, int n) {
         const double t0 = now_ms();
+        steps++;
         const int blank = n - 1;
         const int best = (int) (std::max_element(logits, logits + n) - logits);
         greedy_choice = best;
@@ -692,7 +695,8 @@ struct Booster {
                                   [logits](int a, int b) { return logits[a] > logits[b]; });
                 cand.resize(kBoostTopK);
             }
-            // A continuation outranks starting a new term: when one is on
+            // Continuing a word outranks starting one (a new term, or the
+            // next word of a multi-word term): when a continuation is on
             // offer, start bonuses sit this step out ("▁goat|co" over "▁Co").
             kinds.resize(cand.size());
             bool continuing = false;
@@ -724,8 +728,14 @@ struct Booster {
         // Same letters as the model's choice in another case ("▁T" over
         // "▁tem", "▁cl" over "▁C"): winning would only re-case the word.
         if (token != top && case_conflict(token, top)) return kNone;
+        const bool word_start = g_pieces.word_start[token];
         for (const Match &m : active) {
-            if (trie.walk(m.node, piece) >= 0) return kCont;
+            if (trie.walk(m.node, piece) < 0) continue;
+            if (!word_start) return kCont;
+            // The next word of a multi-word term is a new word the audio has
+            // to carry, so it earns only the start bonus: after "▁Claude",
+            // "▁co" must not turn "called" into "Code".
+            if (g_pieces.start_bonus[token]) return kStart;
         }
         if (g_pieces.start_bonus[token] && trie.walk(0, piece) >= 0) return kStart;
         return kNone;
@@ -1135,6 +1145,7 @@ json handle_transcribe(const json &req) {
         // Counts only: no term or transcript text leaves through diagnostics.
         out["boost"] = {{"terms", booster.terms.size()},
                         {"skipped", booster.skipped},
+                        {"steps", booster.steps},
                         {"completed", booster.completed},
                         {"flipped", booster.flipped},
                         {"ms", std::round(booster.ms * 100) / 100}};

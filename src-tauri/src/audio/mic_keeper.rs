@@ -49,6 +49,10 @@ const PREROLL_MS: usize = 600;
 const PREROLL_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * PREROLL_MS / 1000;
 /// Idle health check cadence while the stream is open.
 const HEALTH_TICK: Duration = Duration::from_secs(2);
+/// Idle cadence for the device-identity check (default mic changed, chosen
+/// mic back). It enumerates audio endpoints, so it runs far less often than
+/// the stall check; a press always checks.
+const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(20);
 /// No callback for this long means the stream died quietly (sleep/resume,
 /// driver reset), so it is reopened instead of trusted.
 const STALL_LIMIT: Duration = Duration::from_millis(1_500);
@@ -307,6 +311,7 @@ struct Keeper {
     warm_until: Option<Instant>,
     retry_at: Option<Instant>,
     retry_backoff: Duration,
+    device_checked_at: Instant,
 }
 
 impl Keeper {
@@ -330,6 +335,7 @@ impl Keeper {
             warm_until: None,
             retry_at: None,
             retry_backoff: REOPEN_BACKOFF_MIN,
+            device_checked_at: Instant::now(),
         }
     }
 
@@ -456,7 +462,8 @@ impl Keeper {
     /// Returns how long opening took, or None when a healthy stream on the
     /// right device was already running.
     fn ensure_open_for_press(&mut self) -> Result<Option<u64>, AudioError> {
-        if let Some(reason) = self.stale_reason() {
+        self.device_checked_at = Instant::now();
+        if let Some(reason) = self.stale_reason(true) {
             self.close(reason);
         }
         if self.open.is_some() {
@@ -496,7 +503,11 @@ impl Keeper {
         if self.capturing.is_some() {
             return;
         }
-        if let Some(reason) = self.stale_reason() {
+        let check_device = self.device_checked_at.elapsed() >= DEVICE_CHECK_INTERVAL;
+        if check_device {
+            self.device_checked_at = Instant::now();
+        }
+        if let Some(reason) = self.stale_reason(check_device) {
             self.close(reason);
         }
         if self.open.is_some() && !self.wants_stream() {
@@ -511,8 +522,9 @@ impl Keeper {
         }
     }
 
-    /// Why the open stream should not be used, if anything.
-    fn stale_reason(&self) -> Option<&'static str> {
+    /// Why the open stream should not be used, if anything. `check_device`
+    /// adds the endpoint enumeration (see `DEVICE_CHECK_INTERVAL`).
+    fn stale_reason(&self, check_device: bool) -> Option<&'static str> {
         let open = self.open.as_ref()?;
         if open.requested != self.device {
             return Some("input device changed in Settings");
@@ -525,6 +537,9 @@ impl Keeper {
             .unwrap_or(open.opened_at);
         if last_audio.elapsed() > STALL_LIMIT {
             return Some("stream stopped delivering audio");
+        }
+        if !check_device {
+            return None;
         }
         let still_current = match open.requested.as_deref() {
             // Following the Windows default: did it change?
@@ -607,6 +622,8 @@ impl Keeper {
                     self.keep_ready
                 );
                 self.open = Some(open);
+                // Just resolved, so the device is current.
+                self.device_checked_at = Instant::now();
                 self.retry_at = None;
                 self.retry_backoff = REOPEN_BACKOFF_MIN;
                 Ok(())

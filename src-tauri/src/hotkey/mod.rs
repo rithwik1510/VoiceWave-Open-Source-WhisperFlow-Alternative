@@ -657,6 +657,10 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let released = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
         if pressed || released {
             let event = &*(lparam as *const KBDLLHOOKSTRUCT);
+            // Our own paste chords and typing pass through untouched.
+            if event.dwExtraInfo == crate::insertion::VOICEWAVE_INPUT_MARKER {
+                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+            }
             if let Some(dispatch) = HOOK_DISPATCH.get() {
                 if let Ok(mut state) = dispatch.lock() {
                     if let Some(state) = state.as_mut() {

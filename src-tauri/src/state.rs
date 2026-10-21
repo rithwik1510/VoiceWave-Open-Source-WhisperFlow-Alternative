@@ -208,6 +208,14 @@ fn emit_pill_rescue(
     );
 }
 
+/// What the pill says about a failed dictation (see
+/// `dictation_failure_notice`).
+struct FailureNotice {
+    title: &'static str,
+    detail: String,
+    retry: bool,
+}
+
 /// Failure notice with a Try again button (plan 020): the capture's audio is
 /// still in memory, so the user can rerun transcription on it.
 fn emit_pill_retry(app: &AppHandle, title: &str, detail: String) {
@@ -1227,6 +1235,9 @@ struct RetainedAudio {
     /// The window the user dictated into, so a retry clicked from the pill
     /// can hand focus back to it.
     target_window: Option<isize>,
+    /// The capture's quality report, reused by the retry (its segment count
+    /// and duration too) instead of re-assessing the same audio.
+    audio_quality: AudioQualityReport,
 }
 
 #[derive(Debug)]
@@ -1984,7 +1995,7 @@ impl VoiceWaveController {
             // Plan 020: captured audio stays in memory only while this
             // session's transcription has failed. Success (or nothing heard,
             // or a cancel) clears it, and so does any later dictation.
-            let can_retry = if still_owns_session {
+            let audio_kept = if still_owns_session {
                 let mut retained = controller.retained_capture.lock().await;
                 let kept_for_this_session = retained
                     .as_ref()
@@ -2005,8 +2016,11 @@ impl VoiceWaveController {
                 }
                 // The pill's error color-flash carries no text; the notice is
                 // the only place the user actually learns what went wrong.
-                let (notice_title, notice_detail) =
-                    controller.dictation_failure_notice(&err, can_retry).await;
+                let FailureNotice {
+                    title: notice_title,
+                    detail: notice_detail,
+                    retry,
+                } = controller.dictation_failure_notice(&err, audio_kept).await;
                 controller
                     .set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
@@ -2017,7 +2031,7 @@ impl VoiceWaveController {
                         Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
-                if can_retry {
+                if retry {
                     emit_pill_retry(&app, notice_title, notice_detail);
                 } else {
                     emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
@@ -2037,21 +2051,30 @@ impl VoiceWaveController {
         Ok(())
     }
 
-    /// Pill copy for a failed dictation. Setup problems (no model, model
-    /// still downloading, microphone unavailable, speech engine down) say what
-    /// to do next. A failed transcription whose audio is kept (`can_retry`)
-    /// says so; anything else unexpected keeps the raw error.
+    /// Pill copy for a failed dictation, and whether it offers Try again,
+    /// decided together so the button never contradicts the text. Setup
+    /// problems (no model, microphone unavailable, speech engine down) say
+    /// what to do next and offer no retry. A failed decode whose audio is
+    /// kept (`audio_kept`) offers one, and so does a model that is still
+    /// downloading. Anything else unexpected keeps the raw error.
     async fn dictation_failure_notice(
         &self,
         err: &ControllerError,
-        can_retry: bool,
-    ) -> (&'static str, String) {
+        audio_kept: bool,
+    ) -> FailureNotice {
+        let mut retry = false;
         let (title, detail) = match err {
             ControllerError::MissingModel(_) => {
                 if self.model_download_cancels.lock().await.is_empty() {
                     (
                         "Finish setting up VoiceWave",
                         "Choose a speech model in the VoiceWave window to start dictating.",
+                    )
+                } else if audio_kept {
+                    retry = true;
+                    (
+                        "Speech model is still downloading",
+                        "Your recording is kept. Try again when the download finishes.",
                     )
                 } else {
                     (
@@ -2077,25 +2100,41 @@ impl VoiceWaveController {
                 "Couldn't open the microphone",
                 "Check that Windows lets desktop apps use the microphone (Settings > Privacy > Microphone) and that no other app is holding it.",
             ),
+            // Not ready, or warmup failed: a retry would hit the same wall.
             ControllerError::Runtime(message)
-                if message.starts_with("Faster-Whisper runtime is not ready") =>
+                if message.starts_with("Faster-Whisper runtime")
+                    || message.starts_with("Faster-Whisper warmup") =>
             {
                 (
                     "Speech engine didn't start",
                     "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
                 )
             }
-            ControllerError::Runtime(message) if can_retry => (
-                if message.contains("timed out") {
-                    "Transcription took too long"
-                } else {
-                    "Couldn't transcribe that"
-                },
-                "Your recording is kept until your next dictation.",
-            ),
-            _ => return ("Dictation failed", err.to_string()),
+            // Decode failed, timed out, or came back empty.
+            ControllerError::Runtime(message) if audio_kept => {
+                retry = true;
+                (
+                    if message.contains("timed out") {
+                        "Transcription took too long"
+                    } else {
+                        "Couldn't transcribe that"
+                    },
+                    "Your recording is kept until your next dictation.",
+                )
+            }
+            _ => {
+                return FailureNotice {
+                    title: "Dictation failed",
+                    detail: err.to_string(),
+                    retry: false,
+                }
+            }
         };
-        (title, detail.to_string())
+        FailureNotice {
+            title,
+            detail: detail.to_string(),
+            retry,
+        }
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {

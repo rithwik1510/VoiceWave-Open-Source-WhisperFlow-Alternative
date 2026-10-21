@@ -25,7 +25,7 @@ use tauri::Emitter;
 use tokio::sync::oneshot;
 
 pub(super) struct CapturedAudio {
-    pub(super) segments: Vec<Vec<f32>>,
+    pub(super) segment_count: u32,
     /// The segments joined with 50 ms gaps: what gets decoded, and what is
     /// kept for Try again.
     pub(super) source_samples: Arc<Vec<f32>>,
@@ -63,7 +63,8 @@ impl VoiceWaveController {
         );
         let capture_started = Instant::now();
         let segments = match (mode, retry_audio.as_ref()) {
-            (_, Some(retained)) => vec![retained.samples.to_vec()],
+            // A retry reuses the kept audio as-is, below.
+            (_, Some(_)) => Vec::new(),
             (DictationMode::Fixture, None) => {
                 phase1::build_fixture_segments(settings.vad_threshold)
             }
@@ -86,6 +87,24 @@ impl VoiceWaveController {
             )
             .await;
             return Ok(None);
+        }
+        if let Some(retained) = retry_audio {
+            // Already merged and assessed by the failed run: no copy, and no
+            // second audio-quality report. Re-bind it to this session (an Arc
+            // clone) so a failed retry can still offer Try again.
+            *self.retained_capture.lock().await = Some(RetainedCapture {
+                session_id,
+                audio: retained.clone(),
+            });
+            return Ok(Some(CapturedAudio {
+                segment_count: retained.audio_quality.segment_count,
+                source_samples: Arc::clone(&retained.samples),
+                capture_ms,
+                captured_audio_ms: retained.audio_quality.duration_ms,
+                release_tail_ms,
+                audio_quality: retained.audio_quality.clone(),
+                mic_input_volume_slot,
+            }));
         }
         if segments.is_empty() {
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
@@ -120,28 +139,24 @@ impl VoiceWaveController {
             merged_samples.extend_from_slice(segment);
         }
         let source_samples = Arc::new(merged_samples);
+        let audio_quality = self.assess_capture(run, &segments);
         if mode == DictationMode::Microphone {
-            let target_window = match &retry_audio {
-                Some(retained) => retained.target_window,
-                None => crate::insertion::foreground_window_id(),
-            };
             *self.retained_capture.lock().await = Some(RetainedCapture {
                 session_id,
                 audio: RetainedAudio {
                     samples: Arc::clone(&source_samples),
-                    target_window,
+                    target_window: crate::insertion::foreground_window_id(),
+                    audio_quality: audio_quality.clone(),
                 },
             });
         }
-
-        let audio_quality = self.assess_capture(run, &segments);
 
         let total_captured_samples = segments.iter().map(|segment| segment.len()).sum::<usize>();
         let captured_audio_ms =
             ((total_captured_samples as f64 / self.audio.target_sample_rate as f64) * 1000.0)
                 .round() as u64;
         Ok(Some(CapturedAudio {
-            segments,
+            segment_count: segments.len() as u32,
             source_samples,
             capture_ms,
             captured_audio_ms,
@@ -437,7 +452,6 @@ impl VoiceWaveController {
         let DictationRun {
             ref app,
             mode,
-            ref retry_audio,
             ref settings,
             ..
         } = *run;
@@ -448,8 +462,8 @@ impl VoiceWaveController {
         );
         let _ = app.emit("voicewave://audio-quality", audio_quality.clone());
 
-        // A retry already showed these for its original capture.
-        if mode == DictationMode::Microphone && retry_audio.is_none() {
+        // A retry never gets here: its original capture showed these.
+        if mode == DictationMode::Microphone {
             if audio_quality.quality == AudioQualityBand::Poor
                 && take_notice_cooldown(&self.poor_audio_notice_last_at)
             {

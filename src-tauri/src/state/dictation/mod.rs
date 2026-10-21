@@ -128,7 +128,14 @@ impl VoiceWaveController {
             .insert_transcript(&run, &delivery, &text, &spoken)
             .await;
         self.spawn_background_polish(&run, &text, &insertion, delivery.late_polish_handle.take());
-        announce_insertion(&run, &delivery, &text, &spoken, &insertion);
+        announce_insertion(
+            &run,
+            &delivery,
+            &text,
+            &spoken,
+            &insertion,
+            transcription.start.hands_free_cap_hit,
+        );
         self.set_session_state(
             run.session_id,
             DictationLifecycleState::Inserted,
