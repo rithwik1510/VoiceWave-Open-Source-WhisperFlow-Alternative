@@ -49,6 +49,9 @@ pub(super) struct TranscribingStart {
     pub(super) release_to_transcribing_ms: u64,
     pub(super) effective_release_watchdog_ms: u64,
     pub(super) watchdog_recovered: bool,
+    /// A hands-free capture ran into its cap; the pill says so once the
+    /// text lands (`announce_insertion`).
+    pub(super) hands_free_cap_hit: bool,
 }
 
 pub(super) struct Decoded {
@@ -205,26 +208,15 @@ impl VoiceWaveController {
             && !stop_flag.load(Ordering::Relaxed)
             && captured_audio_ms.saturating_add(150) >= capture_cap_ms;
         let transcribing_message = if cap_hit {
-            format!(
-                "Transcribing locally (max utterance {}s reached)...",
-                capture_cap_ms / 1000
-            )
+            let limit = if capture_cap_ms % 60_000 == 0 {
+                format!("{}-minute", capture_cap_ms / 60_000)
+            } else {
+                format!("{}-second", capture_cap_ms / 1000)
+            };
+            format!("Transcribing locally (reached the {limit} limit)...")
         } else {
             "Transcribing locally...".to_string()
         };
-        // Hands-free users may still be talking when the cap stops capture.
-        if cap_hit && hands_free_capture {
-            emit_pill_notice(
-                app,
-                "info",
-                format!(
-                    "Reached the {}-minute limit",
-                    HANDS_FREE_MAX_CAPTURE_MS / 60_000
-                ),
-                Some("Transcribing what you said so far.".to_string()),
-                4_500,
-            );
-        }
 
         let transcribing_started = Instant::now();
         let release_to_transcribing_ms = self
@@ -264,6 +256,7 @@ impl VoiceWaveController {
             release_to_transcribing_ms,
             effective_release_watchdog_ms,
             watchdog_recovered,
+            hands_free_cap_hit: cap_hit && hands_free_capture,
         }
     }
 

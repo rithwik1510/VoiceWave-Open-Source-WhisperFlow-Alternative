@@ -12,7 +12,7 @@ use crate::state::{
     emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
     return_focus_for_retry, CorrectionSession, DictationLifecycleState, DictationMode, PillAction,
     VoiceWaveController, VoiceWaveHudState, CORRECTION_SESSION_WINDOW_MS,
-    SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
+    HANDS_FREE_MAX_CAPTURE_MS, SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -214,6 +214,7 @@ pub(super) fn announce_insertion(
     text: &FormattedText,
     spoken: &SpokenText,
     insertion: &Insertion,
+    hands_free_cap_hit: bool,
 ) {
     let DictationRun {
         ref app,
@@ -274,6 +275,19 @@ pub(super) fn announce_insertion(
             }
         } else if let Some(Err(err)) = &submit_outcome {
             emit_submit_notice(app, err);
+        } else if hands_free_cap_hit {
+            // Said here rather than at the cap: the Transcribing state would
+            // hide it, and a long decode outlasts any notice timer.
+            emit_pill_notice(
+                app,
+                "info",
+                format!(
+                    "Reached the {}-minute limit",
+                    HANDS_FREE_MAX_CAPTURE_MS / 60_000
+                ),
+                Some("Dictation stopped there. What you said before it was inserted.".to_string()),
+                5_000,
+            );
         } else if asr_final_word_count >= 30 {
             // Success stays quiet for everyday dictations (Wispr-style
             // restraint); only big ones earn a word-count confirmation.
