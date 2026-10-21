@@ -104,7 +104,7 @@ function buildHookMock(overrides: Record<string, unknown> = {}) {
     setPreferClipboardFallback: vi.fn(),
     setSpokenEditCommands: vi.fn(),
     setGpuAcceleration: vi.fn(),
-    answerUpgradeOffer: vi.fn(),
+    answerParakeetOffer: vi.fn(),
     removeInstalledModel: vi.fn(),
     completeOnboarding: vi.fn(),
     resolveAnalyticsConsent: vi.fn(),

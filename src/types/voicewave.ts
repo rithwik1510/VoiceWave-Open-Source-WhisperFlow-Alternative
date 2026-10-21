@@ -115,6 +115,10 @@ export interface VoiceWaveSettings {
   /** Settings → Dictation → GPU acceleration (plan 019). Off keeps dictation
    * on the processor. The backend defaults it to "auto". */
   gpuAcceleration?: GpuAccelerationMode;
+  /** The one-time Home card offering existing users Parakeet was answered
+   * ("Not now", Parakeet made active, or onboarding finished). The backend
+   * defaults it to false. */
+  parakeetOfferAnswered?: boolean;
 }
 
 export type GpuAccelerationMode = "auto" | "off";
@@ -420,17 +424,17 @@ export interface ModelCatalogItem {
   /** One-line, hardware-specific note shown next to the model. */
   hardwareNote: string;
   /** "Small" or "Large Turbo", whichever engine family the row belongs to, or
-   * the opt-in Parakeet model (never primary or recommended). */
+   * Parakeet (one file for both; recommended wherever it runs). */
   tier: ModelTier;
-  /** One of the two rows offered on this PC. False for an installed model of
-   * the other family (e.g. an upgrader's processor fallback), listed only so
-   * it can be used or removed. */
+  /** One of the rows setup offers on this PC (Parakeet, Small, Large Turbo).
+   * False for an installed model of the other family (e.g. an upgrader's
+   * processor fallback), listed only so it can be used or removed. */
   primary: boolean;
 }
 
 export type ModelTier = "small" | "largeTurbo" | "parakeet";
 
-/** A model the backend offers to download (GPU upgrade, or the processor model). */
+/** A model the backend offers to download (the processor model). */
 export interface ModelOffer {
   modelId: string;
   tier: ModelTier;
@@ -453,7 +457,7 @@ export interface SpeechEngineStatus {
   preparing: boolean;
   qualification: "passed" | "failed" | "retry" | null;
   qualificationDetail: string | null;
-  upgradeOffer: ModelOffer | null;
+  /** A GPU upgrade accepted before 0.8.0, switched to once it qualifies. */
   pendingUpgrade: string | null;
   /** The active graphics-card model is stuck on the processor (check failed,
    * GPU cooling down or gone, acceleration off) with no processor model

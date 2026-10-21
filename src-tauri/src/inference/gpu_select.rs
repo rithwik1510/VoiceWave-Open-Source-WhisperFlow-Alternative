@@ -1,7 +1,7 @@
 //! Plan 019 engine selection: CPU eligibility, the model-free GPU pick behind
 //! the first recommendation, and the small persistent store that remembers
 //! per-machine decisions (chosen device, qualification results, per-driver
-//! disable, upgrade offer).
+//! disable, an accepted GPU upgrade).
 //!
 //! The hardware profile is decided once per app session. The Vulkan speech
 //! worker's `--list-devices` is the source of truth for GPUs; DXGI is only a
@@ -133,9 +133,10 @@ impl GpuDevice {
     }
 }
 
-/// The two sizes users choose between, each in both model families, plus
-/// Parakeet: an opt-in extra (one GGML file for every PC) that setup never
-/// offers and the hardware never recommends.
+/// Parakeet (one GGML file for every PC that can run the speech workers, on
+/// the GPU or the CPU) plus the two Whisper sizes, each in both model
+/// families. Parakeet is the default since 0.8.0; Small and Large Turbo stay
+/// as alternatives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelTier {
@@ -162,12 +163,18 @@ pub struct HardwareProfile {
     pub total_ram_bytes: u64,
     /// The GPU dictation runs on. `None` = a faster-whisper (CPU) machine.
     pub gpu: Option<GpuDevice>,
+    /// Parakeet wherever the speech workers run (`CpuSupport::Full`), Small
+    /// elsewhere. Never Large Turbo.
     pub recommended: ModelTier,
+    /// The GPU has the memory (and the PC the RAM) for Large Turbo; picks the
+    /// Small vs. Large Turbo copy on GPU-path machines.
+    pub turbo_fits: bool,
 }
 
 impl HardwareProfile {
     /// GPU-path machines see whisper.cpp (GGML) models, everyone else the
-    /// faster-whisper ones; users always see just "Small" and "Large Turbo".
+    /// faster-whisper ones; users always see just "Small" and "Large Turbo"
+    /// (plus Parakeet, which has one file for both).
     /// A GPU that failed its check or is disabled for its driver stays in
     /// `gpu` (the UI names it) but is off the GPU path.
     pub fn gpu_path(&self) -> bool {
@@ -185,13 +192,7 @@ impl HardwareProfile {
     }
 
     pub fn recommended_model_id(&self) -> &'static str {
-        // Large Turbo is only ever recommended on the GPU path.
-        let tier = if self.gpu_path() {
-            self.recommended
-        } else {
-            ModelTier::Small
-        };
-        self.model_id(tier)
+        self.model_id(self.recommended)
     }
 }
 
@@ -217,6 +218,7 @@ pub async fn hardware_profile_async() -> HardwareProfile {
             total_ram_bytes: 0,
             gpu: None,
             recommended: ModelTier::Small,
+            turbo_fits: false,
         })
 }
 
@@ -230,14 +232,18 @@ fn detect_profile() -> HardwareProfile {
         None
     };
     let low_ram = total_ram_bytes > 0 && total_ram_bytes < LOW_RAM_BYTES;
-    let recommended = match &gpu {
-        Some(device) if !low_ram && device.discrete && device.memory_bytes >= TURBO_VRAM_BYTES => {
-            ModelTier::LargeTurbo
-        }
-        _ => ModelTier::Small,
+    let turbo_fits = gpu.as_ref().is_some_and(|device| {
+        !low_ram && device.discrete && device.memory_bytes >= TURBO_VRAM_BYTES
+    });
+    // Parakeet runs on the GPU when its own check passes and fast on the CPU
+    // otherwise, so every PC that can run the workers gets it.
+    let recommended = if cpu == CpuSupport::Full {
+        ModelTier::Parakeet
+    } else {
+        ModelTier::Small
     };
     tracing::info!(
-        "hardware profile cpu={cpu:?} ram={} MB gpu={} recommended={recommended:?}",
+        "hardware profile cpu={cpu:?} ram={} MB gpu={} recommended={recommended:?} turbo_fits={turbo_fits}",
         total_ram_bytes / 1_048_576,
         gpu.as_ref()
             .map(|device| format!("'{}' ({} MB)", device.name, device.memory_bytes / 1_048_576))
@@ -248,6 +254,7 @@ fn detect_profile() -> HardwareProfile {
         total_ram_bytes,
         gpu,
         recommended,
+        turbo_fits,
     }
 }
 
@@ -490,11 +497,10 @@ pub struct EngineStore {
     qualifications: Vec<QualificationRecord>,
     backend_failures: Vec<BackendFailure>,
     driver_disables: Vec<DriverDisable>,
-    /// The one-time "your graphics card can make dictation faster" notice
-    /// was accepted or declined.
-    upgrade_offer_answered: bool,
-    /// GGML model the user accepted the upgrade to; switched to once it is
-    /// installed and qualified. Survives restarts.
+    /// GGML model the user accepted the old "your graphics card can make
+    /// dictation faster" upgrade to (offered up to 0.7.x; the Parakeet offer
+    /// replaced it); switched to once it is installed and qualified.
+    /// Survives restarts.
     pending_upgrade: Option<String>,
 }
 
@@ -721,21 +727,8 @@ pub fn driver_disabled(device: &GpuDevice) -> bool {
     })
 }
 
-pub fn upgrade_offer_answered() -> bool {
-    read_store(|store| store.upgrade_offer_answered)
-}
-
 pub fn pending_upgrade() -> Option<String> {
     read_store(|store| store.pending_upgrade.clone())
-}
-
-/// Record the user's answer to the upgrade notice; `accepted` names the
-/// model to switch to once it is installed and qualified.
-pub fn answer_upgrade_offer(accepted: Option<String>) {
-    update_store(|store| {
-        store.upgrade_offer_answered = true;
-        store.pending_upgrade = accepted;
-    });
 }
 
 pub fn clear_pending_upgrade() {

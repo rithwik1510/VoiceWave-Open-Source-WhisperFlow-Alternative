@@ -11,9 +11,10 @@ import { canUseTauri } from "../lib/tauri";
 type CheckPhase = "idle" | "checking" | "up-to-date" | "available" | "installing" | "error";
 
 /**
- * The Settings → Updates pane: shows the installed version and lets the user
- * check for (and install) updates on demand, instead of only relying on the
- * silent launch-time check. Reuses the same updater plumbing as UpdatePrompt,
+ * The Settings → Updates pane: shows the installed version and the speech
+ * model credits, and lets the user check for (and install) updates on
+ * demand, instead of only relying on the silent launch-time check. Reuses
+ * the same updater plumbing as UpdatePrompt,
  * so an install started here follows the identical signed-update path.
  */
 export function UpdateSection() {
@@ -94,6 +95,18 @@ export function UpdateSection() {
           <p className="vw-set-desc">VoiceWave Local Core, installed on this machine.</p>
         </div>
         <span className="vw-chip">{appVersion ? `v${appVersion}` : "dev build"}</span>
+      </div>
+
+      {/* Attribution CC BY 4.0 requires for Parakeet. */}
+      <div className="vw-set-row">
+        <div>
+          <p className="vw-set-title">Speech model credits</p>
+          <p className="vw-set-desc">
+            Parakeet TDT 0.6B v3 by NVIDIA, licensed under CC BY 4.0
+            (https://creativecommons.org/licenses/by/4.0/). VoiceWave uses the GGUF conversion by ggml-org as
+            published, without changes. Whisper by OpenAI, MIT license.
+          </p>
+        </div>
       </div>
 
       <div className="vw-set-row">

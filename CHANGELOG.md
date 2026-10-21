@@ -7,10 +7,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ## [Unreleased]
 
-A smaller installer, no more Pro screens, an easy way to report problems, and
-dictation that lands in terminals and survives a failed transcription.
+Parakeet becomes the default speech model, with your dictionary words built
+in. Also a smaller installer, no more Pro screens, an easy way to report
+problems, and dictation that lands in terminals and survives a failed
+transcription.
 
 ### Added
+
+- **Parakeet, the new default speech model.** NVIDIA's Parakeet TDT 0.6B v3
+  is now what setup recommends on every PC that can run it. It is several times faster than Large Turbo on a graphics card and
+  faster than Small on a processor, and returns nothing instead of made-up
+  words when you say nothing. It runs on your graphics card once its own
+  one-time check passes, and on your processor otherwise. It understands
+  English and 24 European languages and has no language setting. Small and
+  Large Turbo are still in Models.
+- **Your dictionary words steer Parakeet.** Words from your dictionary are
+  favoured while Parakeet decides what you said, so names like "Claude" come
+  out right more often instead of being fixed up afterwards. Common words
+  and all-caps acronyms are left alone, so ordinary speech isn't pushed
+  around.
+- **A one-time offer for existing users.** If you used VoiceWave before, Home
+  shows a card explaining the switch to Parakeet, with Switch to Parakeet and
+  Not now. Your current model keeps dictating until Parakeet is downloaded,
+  and you can switch back anytime in Models. It is never shown again after
+  you answer.
 
 - **Start with Windows.** A new switch in Settings > General (and on the last
   setup screen) opens VoiceWave in the tray when you sign in, with the speech
