@@ -10,6 +10,8 @@ on:
   pull_request:
     paths:
       - "src-tauri/windows/asr-worker/**"
+      # The composite action reads the Parakeet model pin from here.
+      - "src-tauri/src/model_manager/mod.rs"
       - "scripts/asr-worker/**"
       - ".github/actions/asr-workers/**"
       - ".github/workflows/asr-worker.yml"
@@ -18,6 +20,8 @@ on:
       - main
     paths:
       - "src-tauri/windows/asr-worker/**"
+      # The composite action reads the Parakeet model pin from here.
+      - "src-tauri/src/model_manager/mod.rs"
       - "scripts/asr-worker/**"
       - ".github/actions/asr-workers/**"
       - ".github/workflows/asr-worker.yml"
