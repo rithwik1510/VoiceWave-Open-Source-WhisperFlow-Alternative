@@ -1548,14 +1548,20 @@ export function useVoiceWave() {
     [tauriAvailable]
   );
 
+  // Tauri runs each invoke as its own task, so a quick Change -> Cancel could
+  // land `true` after `false` and leave the lease armed. Chaining each call
+  // on the previous one keeps them in order.
+  const hotkeyCaptureQueueRef = useRef<Promise<void>>(Promise.resolve());
   const setHotkeyCapture = useCallback(
     (active: boolean) => {
       if (!tauriAvailable) {
         return;
       }
-      void setHotkeyCaptureCommand(active).catch(() => {
-        // Best effort: the backend capture lease expires on its own.
-      });
+      hotkeyCaptureQueueRef.current = hotkeyCaptureQueueRef.current
+        .then(() => setHotkeyCaptureCommand(active))
+        .catch(() => {
+          // Best effort: the backend capture lease expires on its own.
+        });
     },
     [tauriAvailable]
   );
