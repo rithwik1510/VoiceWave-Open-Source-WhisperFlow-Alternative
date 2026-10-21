@@ -36,6 +36,7 @@ import { applyTheme } from "./lib/theme";
 import { copyTextToClipboard, getSupportContext, openIssueReport, openLogsFolder } from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
+import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
 import { HotkeyRecorder } from "./components/HotkeyRecorder";
 import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/Onboarding";
@@ -57,6 +58,7 @@ import type {
   MicVolumeGuardMode,
   ModelCatalogItem,
   ModelStatus,
+  ModelTier,
   PolishOutcome,
   PolishProfile,
   RetentionPolicy,
@@ -75,6 +77,13 @@ type AuthMode = "signin" | "signup";
 type SettingsSection = "general" | "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
 type DictionarySyncStatus = "device-local" | "syncing" | "synced" | "pending";
 type SnippetSyncStatus = DictionarySyncStatus | "limit-exceeded";
+
+/** Model gate tab titles (display names carry a family suffix instead). */
+const MODEL_TIER_LABEL: Record<ModelTier, string> = {
+  parakeet: "Parakeet",
+  small: "Small",
+  largeTurbo: "Large Turbo"
+};
 
 function snippetErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) {
@@ -679,7 +688,7 @@ function App() {
     setHotkeyCapture,
     setPushToTalkHotkey,
     speechEngine,
-    answerUpgradeOffer,
+    answerParakeetOffer,
     removeInstalledModel,
     completeOnboarding,
     restartOnboarding,
@@ -760,10 +769,17 @@ function App() {
   const hasInstalledModel = installedModels.length > 0;
   // AI polish (llama.cpp) is built for AVX2 processors.
   const polishUnsupported = speechEngine !== null && speechEngine.cpuSupport !== "full";
-  // This PC's two rows, "Small" and "Large Turbo" (whisper.cpp on GPU-path
-  // machines, faster-whisper elsewhere). Onboarding, the gate and the Models
-  // page all read the same backend catalog.
-  const setupCatalog = useMemo(() => modelCatalog.filter((row) => row.primary), [modelCatalog]);
+  // The rows setup offers on this PC, recommended first: Parakeet where the
+  // speech workers run, then "Small" and "Large Turbo" (whisper.cpp on
+  // GPU-path machines, faster-whisper elsewhere). Onboarding, the gate and the
+  // Models page all read the same backend catalog.
+  const setupCatalog = useMemo(
+    () =>
+      modelCatalog
+        .filter((row) => row.primary)
+        .sort((left, right) => Number(right.recommended) - Number(left.recommended)),
+    [modelCatalog]
+  );
   const cpuUnsupported = speechEngine?.cpuSupport === "unsupported";
   const showOnboarding = tauriAvailable && !settings.onboardingCompleted;
   // The plain model gate stays as the fallback for users who skipped
@@ -778,11 +794,27 @@ function App() {
     !showOnboarding &&
     !showModelSetupGate &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
-  // One-time GPU upgrade notice for existing faster-whisper users (plan 019);
-  // never stacked on the other first-run dialogs.
-  const upgradeOffer = speechEngine?.upgradeOffer ?? null;
-  const showUpgradeNotice =
-    tauriAvailable && !showOnboarding && !showModelSetupGate && !showAnalyticsConsent && upgradeOffer !== null;
+  // Home view: the one-time offer to switch to Parakeet for existing users
+  // (0.8.0). Only where Parakeet runs (the backend lists it only there), never
+  // during first-run flows, and not while another model downloads or a GPU
+  // upgrade accepted before 0.8.0 is still pending. A Parakeet download in
+  // progress keeps the card up so it can show progress and Retry.
+  const parakeetRow = modelCatalog.find((row) => row.tier === "parakeet") ?? null;
+  const otherModelDownloading = Object.values(modelStatuses).some(
+    (row) => row.modelId !== parakeetRow?.modelId && (row.state === "downloading" || row.state === "paused")
+  );
+  const parakeetOffer =
+    tauriAvailable &&
+    !showOnboarding &&
+    !showModelSetupGate &&
+    parakeetRow !== null &&
+    !settings.parakeetOfferAnswered &&
+    settings.activeModel !== parakeetRow.modelId &&
+    !installedModelSet.has(parakeetRow.modelId) &&
+    !otherModelDownloading &&
+    !speechEngine?.pendingUpgrade
+      ? parakeetRow
+      : null;
   // Home view: a graphics-card model stuck on the processor, with the
   // processor model to install (non-modal, dismissible per session).
   const cpuModelOffer =
@@ -1567,6 +1599,15 @@ function App() {
                   onDownload={() => void installModel(cpuModelOffer.modelId)}
                   onCancel={() => void cancelModelInstall(cpuModelOffer.modelId)}
                   onDismiss={() => setCpuNoticeDismissed(true)}
+                />
+              )}
+              {parakeetOffer && (
+                <ParakeetOffer
+                  model={parakeetOffer}
+                  status={modelStatuses[parakeetOffer.modelId]}
+                  onSwitch={() => void answerParakeetOffer(true)}
+                  onCancel={() => void cancelModelInstall(parakeetOffer.modelId)}
+                  onDecline={() => void answerParakeetOffer(false)}
                 />
               )}
               <Dashboard
@@ -3641,43 +3682,6 @@ function App() {
         </div>
       )}
 
-      {showUpgradeNotice && upgradeOffer && (
-        <div className="vw-model-gate-backdrop">
-          <section
-            className="vw-model-gate-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Faster dictation with your graphics card"
-          >
-            <header>
-              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
-                {upgradeOffer.tier === "largeTurbo"
-                  ? "Your graphics card can make dictation up to 10× faster"
-                  : "Your graphics card can make dictation faster"}
-              </h3>
-              <p className="mt-1 text-sm text-faint">
-                One-time download ({formatBytes(upgradeOffer.sizeBytes)}) of the{" "}
-                {upgradeOffer.tier === "largeTurbo" ? "Large Turbo" : "Small"} model built for your{" "}
-                {speechEngine?.gpuName ?? "graphics card"}.
-              </p>
-            </header>
-            <p className="mt-4 text-sm leading-relaxed text-label">
-              Dictation keeps working as it does now while it downloads. VoiceWave runs a quick check on your
-              graphics card, then switches over. If anything goes wrong you stay on your current model, which also
-              stays installed as a backup.
-            </p>
-            <div className="mt-5 flex flex-wrap items-center gap-2">
-              <button type="button" className="vw-btn-primary" onClick={() => void answerUpgradeOffer(true)}>
-                Download ({formatBytes(upgradeOffer.sizeBytes)})
-              </button>
-              <button type="button" className="vw-btn-secondary" onClick={() => void answerUpgradeOffer(false)}>
-                Not now
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
-
       {showModelSetupGate && (
         <div className="vw-model-gate-backdrop">
           <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Enable Dictation">
@@ -3711,9 +3715,7 @@ function App() {
                   disabled={downloadingSetupModelId !== null}
                 >
                   {row.recommended && <span className="vw-model-gate-badge">Recommended</span>}
-                  <span className="vw-model-gate-tab-title">
-                    {row.tier === "small" ? "Small" : "Large Turbo"}
-                  </span>
+                  <span className="vw-model-gate-tab-title">{MODEL_TIER_LABEL[row.tier]}</span>
                   <span className="vw-model-gate-tab-copy">{row.hardwareNote}</span>
                 </button>
               ))}
@@ -3735,7 +3737,7 @@ function App() {
                 />
               ) : (
                 <button type="button" className="vw-btn-primary" onClick={() => void handleSetupModelInstall()}>
-                  {selectedSetupCatalogRow?.tier === "largeTurbo" ? "Download Large Model" : "Download Small Model"}
+                  {selectedSetupCatalogRow ? `Download ${MODEL_TIER_LABEL[selectedSetupCatalogRow.tier]}` : "Download"}
                 </button>
               )}
             </div>

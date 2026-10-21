@@ -30,7 +30,8 @@ const HEARD_LEVEL = 0.045;
 const HEARD_HOLD_MS = 600;
 
 interface OnboardingProps {
-  /** This PC's two primary rows (Small, Large Turbo) from the per-machine catalog. */
+  /** The rows setup offers on this PC (Parakeet where it runs, Small, Large
+   * Turbo), recommended first, from the per-machine catalog. */
   catalog: ModelCatalogItem[];
   /** Plan 019 engine state: unsupported CPUs, and the one-time graphics card check. */
   speechEngine: SpeechEngineStatus | null;
@@ -458,6 +459,7 @@ export function Onboarding({
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
+  const parakeetRow = catalog.find((row) => row.tier === "parakeet");
   const smallRow = catalog.find((row) => row.tier === "small");
   const turboRow = catalog.find((row) => row.tier === "largeTurbo");
   const gpuMachine = speechEngine?.gpuName != null;
@@ -665,6 +667,15 @@ export function Onboarding({
                       Speech model
                     </p>
                     <div className="vw-seg mt-2 inline-flex" role="group" aria-label="Speech model choice">
+                      {parakeetRow && (
+                        <button
+                          type="button"
+                          className={`vw-seg-btn ${modelChoice === parakeetRow.modelId ? "vw-seg-btn-active" : ""}`}
+                          onClick={() => chooseModel(parakeetRow.modelId)}
+                        >
+                          {parakeetRow.recommended ? "Parakeet · recommended" : "Parakeet"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={`vw-seg-btn ${modelChoice === smallRow.modelId ? "vw-seg-btn-active" : ""}`}

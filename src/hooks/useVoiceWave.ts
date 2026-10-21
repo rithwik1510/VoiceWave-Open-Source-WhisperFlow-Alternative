@@ -35,7 +35,6 @@ import {
   listInputDevices,
   listModelCatalog,
   listVoiceSnippets,
-  answerGpuUpgrade,
   finishGpuUpgrade,
   getSpeechEngineStatus,
   removeModel,
@@ -147,8 +146,8 @@ const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
 // Both model families are valid (plan 019): faster-whisper (fw-*) and
 // whisper.cpp GGML (wcpp-*). The backend's catalog shows each PC one family as
-// its two primary rows ("Small", "Large Turbo"), plus installed models of the
-// other family, plus the opt-in Parakeet row (run by the same speech workers).
+// its "Small" and "Large Turbo" rows, plus installed models of the other
+// family, plus the recommended Parakeet row (run by the same speech workers).
 const SUPPORTED_MODEL_IDS = [
   "fw-small.en",
   "fw-large-v3-turbo",
@@ -211,6 +210,8 @@ const fallbackSettings: VoiceWaveSettings = {
   // True in the pre-load fallback so the onboarding flow never flashes before
   // real settings arrive; the backend value replaces this immediately.
   onboardingCompleted: true,
+  // Same reason: the Parakeet offer card must not flash pre-load.
+  parakeetOfferAnswered: true,
   theme: "system",
   polishProfile: "standard",
   polishProfileCustomized: false
@@ -1326,12 +1327,14 @@ export function useVoiceWave() {
   );
 
   // Onboarding shows the analytics disclosure on its first screen, so finishing
-  // or skipping it also counts as having seen the notice.
+  // or skipping it also counts as having seen the notice. Its model step
+  // already offers Parakeet, so the existing-user Parakeet card never follows.
   const completeOnboarding = useCallback(async () => {
     const nextSettings = {
       ...settings,
       onboardingCompleted: true,
-      analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+      analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
+      parakeetOfferAnswered: true
     };
     setSettings(nextSettings);
     if (!tauriAvailable) {
@@ -1733,36 +1736,6 @@ export function useVoiceWave() {
     [modelCatalog, refreshPhase3Data, refreshSpeechEngine, settings.activeModel, tauriAvailable]
   );
 
-  /** One-time "your graphics card can make dictation faster" notice. Accept
-   * downloads the GGML model with the normal downloader; the backend then
-   * qualifies it and switches. Decline, cancel or failure leave the current
-   * model dictating. */
-  const answerUpgradeOffer = useCallback(
-    async (accept: boolean) => {
-      if (!tauriAvailable) {
-        return;
-      }
-      try {
-        const modelId = await answerGpuUpgrade(accept);
-        await refreshSpeechEngine();
-        if (!modelId) {
-          return;
-        }
-        if (installedModels.some((row) => row.modelId === modelId)) {
-          void finishGpuUpgrade()
-            .catch(() => undefined)
-            .finally(() => void refreshPhase3Data());
-          void refreshSpeechEngine();
-        } else {
-          await installModel(modelId);
-        }
-      } catch (upgradeErr) {
-        setError(upgradeErr instanceof Error ? upgradeErr.message : "The upgrade could not start");
-      }
-    },
-    [installModel, installedModels, refreshPhase3Data, refreshSpeechEngine, tauriAvailable]
-  );
-
   const removeInstalledModel = useCallback(
     async (modelId: string) => {
       if (!tauriAvailable) {
@@ -1902,6 +1875,32 @@ export function useVoiceWave() {
       }
     },
     [installModel, installedModels, makeModelActive]
+  );
+
+  /** The one-time Home card offering existing users Parakeet. Switch
+   * downloads it with the normal downloader and makes it active only once it
+   * installed (the backend marks the offer answered in that same save); the
+   * current model keeps dictating until then, and after a failure or cancel.
+   * Not now only records the answer. */
+  const answerParakeetOffer = useCallback(
+    async (accept: boolean) => {
+      const parakeetId = modelCatalog.find((row) => row.tier === "parakeet")?.modelId;
+      if (accept && parakeetId) {
+        await installAndActivateModel(parakeetId);
+        return;
+      }
+      const nextSettings = { ...settings, parakeetOfferAnswered: true };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save your answer");
+      }
+    },
+    [installAndActivateModel, modelCatalog, settings, tauriAvailable]
   );
 
   const runBenchmarkAndRecommend = useCallback(async () => {
@@ -2701,7 +2700,7 @@ export function useVoiceWave() {
     setPreferClipboardFallback,
     setSpokenEditCommands,
     setGpuAcceleration,
-    answerUpgradeOffer,
+    answerParakeetOffer,
     removeInstalledModel,
     refreshSpeechEngine,
     completeOnboarding,

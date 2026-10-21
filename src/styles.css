@@ -984,6 +984,12 @@ body {
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
+/* Three rows (Parakeet, Small, Large Turbo): the recommended first row spans
+   the width and the two alternatives share the row below. */
+.vw-model-gate-tab:first-child:nth-last-child(3) {
+  grid-column: 1 / -1;
+}
+
 .vw-model-gate-tab:hover {
   border-color: var(--vw-color-border-strong);
 }
