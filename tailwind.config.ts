@@ -58,7 +58,7 @@ const config: Config = {
         card: "0 10px 32px -18px rgba(36, 75, 131, 0.45)"
       },
       fontFamily: {
-        display: ["\"Fraunces\"", "Georgia", "serif"],
+        display: ["\"Fraunces Variable\"", "Georgia", "serif"],
         body: ["\"DM Sans\"", "Segoe UI", "sans-serif"]
       }
     }

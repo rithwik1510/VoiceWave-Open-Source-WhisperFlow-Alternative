@@ -643,7 +643,7 @@ export function Onboarding({
             {step === "welcome" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">VOICEWAVE</p>
-                <h1 className='mt-3 font-["Fraunces"] text-[44px] leading-[1.06] tracking-tight text-ink-strong'>
+                <h1 className='mt-3 font-display text-[44px] leading-[1.06] tracking-tight text-ink-strong'>
                   Your voice,
                   <br />
                   everywhere.
@@ -741,7 +741,7 @@ export function Onboarding({
             {step === "mic" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">MICROPHONE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-3 font-display text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Say something.
                 </h2>
                 <p className="mt-2 text-[15px] text-faint">
@@ -797,7 +797,7 @@ export function Onboarding({
             {step === "speak" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">THE ONE GESTURE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-3 font-display text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Hold the key. Speak. Let go.
                 </h2>
 
@@ -911,7 +911,7 @@ export function Onboarding({
                 <div className="vw-onb-done-orb">
                   <Check size={40} strokeWidth={3} />
                 </div>
-                <h2 className='mt-6 font-["Fraunces"] text-[38px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-6 font-display text-[38px] leading-tight tracking-tight text-ink-strong'>
                   You're set.
                 </h2>
                 <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-faint">

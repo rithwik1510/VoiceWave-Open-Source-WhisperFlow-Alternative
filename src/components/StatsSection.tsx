@@ -116,7 +116,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
         y="92"
         textAnchor="middle"
         className="fill-ink-strong"
-        style={{ font: '600 40px "Manrope", sans-serif' }}
+        style={{ font: '600 40px "Manrope Variable", sans-serif' }}
       >
         {Math.round(wpm * progress)}
       </text>
@@ -125,7 +125,7 @@ function WpmGauge({ wpm, progress }: { wpm: number; progress: number }) {
         y="112"
         textAnchor="middle"
         className="fill-hint"
-        style={{ font: "600 11px 'Manrope', sans-serif", letterSpacing: "0.14em" }}
+        style={{ font: "600 11px 'Manrope Variable', sans-serif", letterSpacing: "0.14em" }}
       >
         WPM
       </text>
@@ -222,7 +222,7 @@ export function StatsSection() {
                   <Clock size={13} className="text-accent" />
                   Time saved vs typing
                 </p>
-                <p className='mt-2 font-["Fraunces"] text-[54px] leading-none tracking-tight text-ink-strong'>
+                <p className='mt-2 font-display text-[54px] leading-none tracking-tight text-ink-strong'>
                   {formatDuration(summary.timeSavedMsAllTime * progress)}
                 </p>
                 <p className="mt-2 text-sm text-faint">
@@ -285,7 +285,7 @@ export function StatsSection() {
                 </span>
               )}
             </div>
-            <p className='mt-4 font-["Fraunces"] text-[44px] leading-none tracking-tight text-ink-strong'>
+            <p className='mt-4 font-display text-[44px] leading-none tracking-tight text-ink-strong'>
               {formatWords(summary.allTimeWords * progress)}
             </p>
             <p className="mt-1 text-xs text-hint">all time</p>
