@@ -246,13 +246,20 @@ fn emit_pill_retry(app: &AppHandle, title: &str, detail: String) {
 
 /// A retry is clicked from the pill, which may hold the foreground by the
 /// time text is ready; give focus back to the app the user dictated into,
-/// and let it settle before any keystroke. No-op for live dictations.
-async fn return_focus_for_retry(retry_audio: Option<&RetainedAudio>) {
-    if let Some(target) = retry_audio.and_then(|audio| audio.target_window) {
+/// and let it settle before any keystroke. Returns whether keystrokes may
+/// go to the foreground window: false only for a retry that VoiceWave still
+/// fronts (the target window is gone or refused focus), which must not type
+/// into VoiceWave itself. Always true for live dictations.
+async fn return_focus_for_retry(retry_audio: Option<&RetainedAudio>) -> bool {
+    let Some(audio) = retry_audio else {
+        return true;
+    };
+    if let Some(target) = audio.target_window {
         if crate::insertion::return_focus_from_voicewave(target) {
             sleep(Duration::from_millis(80)).await;
         }
     }
+    !crate::insertion::voicewave_owns_foreground()
 }
 
 /// Pill copy when a spoken "press enter" was not carried out (plan 020).
@@ -263,7 +270,7 @@ fn emit_submit_notice(app: &AppHandle, err: &SubmitError) {
         SubmitError::NotDelivered => return,
         SubmitError::FocusMoved => (
             "Didn't press Enter",
-            "The window changed after your text went in.",
+            "The window you dictated into isn't in front anymore.",
         ),
         SubmitError::Elevated => (
             "This app runs as administrator",

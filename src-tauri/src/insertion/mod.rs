@@ -745,6 +745,20 @@ pub fn foreground_window_id() -> Option<isize> {
     }
 }
 
+/// Whether a VoiceWave window (main or pill) holds the foreground.
+pub fn voicewave_owns_foreground() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+        foreground_process_id() == Some(unsafe { GetCurrentProcessId() })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Retry support (plan 020): clicking the pill's Try again can activate a
 /// VoiceWave window. When one of ours holds the foreground, hand focus back to
 /// `target`, the window the user dictated into. Never takes focus from another
@@ -753,11 +767,9 @@ pub fn return_focus_from_voicewave(target: isize) -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::Foundation::HWND;
-        use windows_sys::Win32::System::Threading::GetCurrentProcessId;
         use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
 
-        let ours = unsafe { GetCurrentProcessId() };
-        if foreground_process_id() != Some(ours) {
+        if !voicewave_owns_foreground() {
             return false;
         }
         let target = target as HWND;

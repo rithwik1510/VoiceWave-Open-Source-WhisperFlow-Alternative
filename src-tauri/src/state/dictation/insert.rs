@@ -89,7 +89,7 @@ impl VoiceWaveController {
         }
         let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
 
-        return_focus_for_retry(retry_audio.as_ref()).await;
+        let typing_allowed = return_focus_for_retry(retry_audio.as_ref()).await;
         if self.end_if_cancelled(run).await {
             return None;
         }
@@ -99,7 +99,9 @@ impl VoiceWaveController {
             target_app: None,
             prefer_clipboard: settings.prefer_clipboard_fallback
                 || (had_snippet && inserted_text.contains('\n')),
-            force_clipboard_only: false,
+            // A retry that could not reach its window goes to the clipboard
+            // (the rescue pill shows it); nothing lands, so no Enter follows.
+            force_clipboard_only: !typing_allowed,
         };
         let insert_started = Instant::now();
         let (

@@ -6,6 +6,7 @@ use super::capture::CapturedAudio;
 use super::transcribe::{Decoded, Transcription};
 use super::DictationRun;
 use crate::inference::note_audio_pipeline_decode_hard_failure;
+use crate::insertion::SubmitError;
 use crate::settings::{resolve_profile, EffectivePolicy, InsertPath, PolishProfile};
 use crate::snippet::{ProtectionError, ProtectionOutcome, SnippetExpansionPlan};
 use crate::state::{
@@ -92,11 +93,17 @@ impl VoiceWaveController {
             let outcome = if unheard {
                 None
             } else {
-                return_focus_for_retry(retry_audio.as_ref()).await;
+                let typing_allowed = return_focus_for_retry(retry_audio.as_ref()).await;
                 if self.end_if_cancelled(run).await {
                     return None;
                 }
-                Some(self.insertion_engine.lock().await.press_enter_now())
+                Some(if typing_allowed {
+                    self.insertion_engine.lock().await.press_enter_now()
+                } else {
+                    // A retry whose window is gone must not press Enter in
+                    // VoiceWave.
+                    Err(SubmitError::FocusMoved)
+                })
             };
             self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
                 .await;
