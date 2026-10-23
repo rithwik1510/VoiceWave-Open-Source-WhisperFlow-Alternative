@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
-## [Unreleased]
+## [0.7.5] – 2026-10-23
 
 Parakeet becomes the default speech model, with your dictionary words built
 in. Also a smaller installer, no more Pro screens, an easy way to report
@@ -15,12 +15,13 @@ transcription.
 ### Added
 
 - **Parakeet, the new default speech model.** NVIDIA's Parakeet TDT 0.6B v3
-  is now what setup recommends on every PC that can run it. It is several times faster than Large Turbo on a graphics card and
-  faster than Small on a processor, and returns nothing instead of made-up
-  words when you say nothing. It runs on your graphics card once its own
-  one-time check passes, and on your processor otherwise. It understands
-  English and 24 European languages and has no language setting. Small and
-  Large Turbo are still in Models.
+  is now what setup recommends on every PC that can run it. It is about 3 to
+  4 times faster than Large Turbo on a graphics card and faster than Small on
+  a processor, and returns nothing instead of made-up words when you say
+  nothing. It runs on your graphics card once its own one-time check passes,
+  and on your processor otherwise. It understands English and 24 European
+  languages and has no language setting. Small and Large Turbo are still in
+  Models. Parakeet TDT 0.6B v3 is by NVIDIA and licensed under CC BY 4.0.
 - **Your dictionary words steer Parakeet.** Words from your dictionary are
   favoured while Parakeet decides what you said, so names like "Claude" come
   out right more often instead of being fixed up afterwards. Common words
@@ -31,7 +32,6 @@ transcription.
   Not now. Your current model keeps dictating until Parakeet is downloaded,
   and you can switch back anytime in Models. It is never shown again after
   you answer.
-
 - **Start with Windows.** A new switch in Settings > General (and on the last
   setup screen) opens VoiceWave in the tray when you sign in, with the speech
   model already loaded, so the first dictation after a reboot is as fast as
@@ -95,6 +95,20 @@ transcription.
 - **Apps running as administrator.** Windows blocks typing into them from a
   normal app, so VoiceWave now copies the text and says so, instead of
   reporting it as inserted.
+- **Clearer messages when a dictation fails.** The pill offers Try again only
+  when it can help. If the speech engine didn't start it asks you to restart
+  VoiceWave, and if the model is still downloading it keeps your recording
+  and says to try again when the download finishes.
+- **Fonts ship with the app.** The interface fonts are now part of the
+  install instead of being downloaded from Google Fonts at every launch, so
+  the app looks the same offline and makes no font requests.
+- The window title is now just "VoiceWave".
+
+### Fixed
+
+- **Helper processes close with VoiceWave.** The speech and AI polish helpers
+  now close when VoiceWave closes, even after a crash or an End task in Task
+  Manager, instead of staying behind and holding memory.
 
 ---
 
