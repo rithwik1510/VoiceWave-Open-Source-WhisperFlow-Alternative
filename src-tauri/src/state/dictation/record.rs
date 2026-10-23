@@ -81,6 +81,74 @@ struct LatencyBreakdownEvent {
     mic_input_volume_percent: Option<u8>,
 }
 
+/// The UI event carries the record's measurements in its own shape: no
+/// timestamp or success flag, and plain values where the record keeps an
+/// `Option` (always `Some` for a dictation; `asr_engine` is `None` only when
+/// empty).
+impl From<&LatencyMetricRecord> for LatencyBreakdownEvent {
+    fn from(record: &LatencyMetricRecord) -> Self {
+        Self {
+            session_id: record.session_id,
+            capture_ms: record.capture_ms,
+            release_to_transcribing_ms: record.release_to_transcribing_ms,
+            effective_release_watchdog_ms: record.effective_release_watchdog_ms,
+            watchdog_recovered: record.watchdog_recovered,
+            segments_captured: record.segments_captured,
+            release_stop_detected_at_utc_ms: record.release_stop_detected_at_utc_ms,
+            model_init_ms: record.model_init_ms,
+            audio_condition_ms: record.audio_condition_ms,
+            decode_compute_ms: record.decode_compute_ms,
+            runtime_cache_hit: record.runtime_cache_hit,
+            backend_requested: record.backend_requested.clone(),
+            backend_used: record.backend_used.clone(),
+            backend_fallback: record.backend_fallback,
+            asr_engine: record.asr_engine.clone().unwrap_or_default(),
+            asr_step_down_reason: record.asr_step_down_reason.clone(),
+            hold_to_first_draft_ms: record.hold_to_first_draft_ms,
+            incremental_decode_ms: record.incremental_decode_ms,
+            release_finalize_ms: record.release_finalize_ms,
+            incremental_windows_decoded: record.incremental_windows_decoded,
+            finalize_tail_audio_ms: record.finalize_tail_audio_ms,
+            asr_integrity_percent: record.asr_integrity_percent,
+            asr_raw_word_count: record.asr_raw_word_count,
+            asr_final_word_count: record.asr_final_word_count,
+            decode_ms: record.decode_ms,
+            post_ms: record.post_ms,
+            insert_ms: record.insert_ms,
+            total_ms: record.total_ms,
+            release_to_inserted_ms: record.release_to_inserted_ms,
+            audio_duration_ms: record.audio_duration_ms,
+            model_id: record.model_id.clone(),
+            decode_mode: record.decode_mode,
+            decode_policy_mode_selected: record.decode_policy_mode_selected.unwrap_or_default(),
+            decode_policy_reason: record.decode_policy_reason.clone().unwrap_or_default(),
+            fw_low_coherence: record.fw_low_coherence,
+            fw_retry_used: record.fw_retry_used,
+            fw_literal_retry_used: record.fw_literal_retry_used,
+            audio_pipeline_version: record.audio_pipeline_version.clone(),
+            fw_avg_logprob: record.fw_avg_logprob,
+            fw_no_speech_prob: record.fw_no_speech_prob,
+            fw_compression_ratio: record.fw_compression_ratio,
+            fw_shadow_candidate_version: record.fw_shadow_candidate_version.clone(),
+            fw_shadow_quality_delta: record.fw_shadow_quality_delta,
+            fw_shadow_candidate_avg_logprob: record.fw_shadow_candidate_avg_logprob,
+            fw_shadow_candidate_no_speech_prob: record.fw_shadow_candidate_no_speech_prob,
+            fw_shadow_candidate_retry_used: record.fw_shadow_candidate_retry_used,
+            fw_shadow_candidate_low_coherence: record.fw_shadow_candidate_low_coherence,
+            fw_shadow_candidate_decode_compute_ms: record.fw_shadow_candidate_decode_compute_ms,
+            fw_shadow_candidate_won: record.fw_shadow_candidate_won,
+            audio_pipeline_fallback_engaged: record.audio_pipeline_fallback_engaged,
+            audio_pipeline_fallback_remaining: record.audio_pipeline_fallback_remaining,
+            warm_start_hit: record.warm_start_hit,
+            worker_reused: record.worker_reused,
+            correction_candidates_count: record.correction_candidates_count,
+            insertion_method: record.insertion_method.clone().unwrap_or_default(),
+            insertion_target_class: record.insertion_target_class.clone().unwrap_or_default(),
+            mic_input_volume_percent: record.mic_input_volume_percent,
+        }
+    }
+}
+
 impl VoiceWaveController {
     /// Runs after the session is marked Inserted, for successful and failed
     /// insertions alike.
@@ -181,77 +249,75 @@ impl VoiceWaveController {
         }
         let audio_duration_ms =
             sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-        let segments_captured = segment_count;
         let release_stop_detected_at_utc_ms = self
             .session_release_stop_detected_at_utc_ms(session_id)
             .await
             .unwrap_or(0);
-        let _ = app.emit(
-            "voicewave://latency",
-            LatencyBreakdownEvent {
-                session_id,
-                capture_ms,
-                release_to_transcribing_ms,
-                effective_release_watchdog_ms,
-                watchdog_recovered,
-                segments_captured,
-                release_stop_detected_at_utc_ms,
-                model_init_ms: decode_telemetry.model_init_ms,
-                audio_condition_ms: decode_telemetry.audio_condition_ms,
-                decode_compute_ms: decode_telemetry.decode_compute_ms,
-                runtime_cache_hit: decode_telemetry.runtime_cache_hit,
-                backend_requested: decode_telemetry.backend_requested.clone(),
-                backend_used: decode_telemetry.backend_used.clone(),
-                backend_fallback: decode_telemetry.backend_fallback,
-                asr_engine: decode_telemetry.asr_engine.clone(),
-                asr_step_down_reason: decode_telemetry.asr_step_down_reason.clone(),
-                hold_to_first_draft_ms: 0,
-                incremental_decode_ms: 0,
-                release_finalize_ms,
-                incremental_windows_decoded: 0,
-                finalize_tail_audio_ms,
-                asr_integrity_percent,
-                asr_raw_word_count,
-                asr_final_word_count,
-                decode_ms,
-                post_ms,
-                insert_ms,
-                total_ms,
-                release_to_inserted_ms,
-                audio_duration_ms,
-                model_id: final_worker.active_model().to_string(),
-                decode_mode: final_worker.decode_mode(),
-                decode_policy_mode_selected: policy_selected_mode,
-                decode_policy_reason: decode_policy_reason.clone(),
-                fw_low_coherence: decode_telemetry.fw_low_coherence,
-                fw_retry_used: decode_telemetry.fw_retry_used,
-                fw_literal_retry_used: decode_telemetry.fw_literal_retry_used,
-                audio_pipeline_version: decode_telemetry.audio_pipeline_version.clone(),
-                fw_avg_logprob: decode_telemetry.fw_avg_logprob,
-                fw_no_speech_prob: decode_telemetry.fw_no_speech_prob,
-                fw_compression_ratio: decode_telemetry.fw_compression_ratio,
-                fw_shadow_candidate_version: decode_telemetry.fw_shadow_candidate_version.clone(),
-                fw_shadow_quality_delta: decode_telemetry.fw_shadow_quality_delta,
-                fw_shadow_candidate_avg_logprob: decode_telemetry.fw_shadow_candidate_avg_logprob,
-                fw_shadow_candidate_no_speech_prob: decode_telemetry
-                    .fw_shadow_candidate_no_speech_prob,
-                fw_shadow_candidate_retry_used: decode_telemetry.fw_shadow_candidate_retry_used,
-                fw_shadow_candidate_low_coherence: decode_telemetry
-                    .fw_shadow_candidate_low_coherence,
-                fw_shadow_candidate_decode_compute_ms: decode_telemetry
-                    .fw_shadow_candidate_decode_compute_ms,
-                fw_shadow_candidate_won: decode_telemetry.fw_shadow_candidate_won,
-                audio_pipeline_fallback_engaged: decode_telemetry.audio_pipeline_fallback_engaged,
-                audio_pipeline_fallback_remaining: decode_telemetry
-                    .audio_pipeline_fallback_remaining,
-                warm_start_hit: decode_telemetry.runtime_cache_hit,
-                worker_reused: decode_telemetry.runtime_cache_hit,
-                correction_candidates_count: correction_candidates.len() as u32,
-                insertion_method: insertion_method.clone(),
-                insertion_target_class: insertion_target_class.clone(),
-                mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
-            },
-        );
+        // Measured once: the persisted diagnostics record, and the UI latency
+        // event derived from it.
+        let latency = LatencyMetricRecord {
+            session_id,
+            timestamp_utc_ms: now_utc_ms(),
+            capture_ms,
+            release_to_transcribing_ms,
+            effective_release_watchdog_ms,
+            watchdog_recovered,
+            segments_captured: segment_count,
+            release_stop_detected_at_utc_ms,
+            model_init_ms: decode_telemetry.model_init_ms,
+            audio_condition_ms: decode_telemetry.audio_condition_ms,
+            decode_compute_ms: decode_telemetry.decode_compute_ms,
+            runtime_cache_hit: decode_telemetry.runtime_cache_hit,
+            backend_requested: decode_telemetry.backend_requested,
+            backend_used: decode_telemetry.backend_used,
+            backend_fallback: decode_telemetry.backend_fallback,
+            asr_engine: Some(decode_telemetry.asr_engine).filter(|engine| !engine.is_empty()),
+            asr_step_down_reason: decode_telemetry.asr_step_down_reason,
+            hold_to_first_draft_ms: 0,
+            incremental_decode_ms: 0,
+            release_finalize_ms,
+            incremental_windows_decoded: 0,
+            finalize_tail_audio_ms,
+            asr_integrity_percent,
+            asr_raw_word_count,
+            asr_final_word_count,
+            decode_ms,
+            post_ms,
+            insert_ms,
+            total_ms,
+            release_to_inserted_ms,
+            audio_duration_ms,
+            model_id: final_worker.active_model().to_string(),
+            decode_mode: final_worker.decode_mode(),
+            decode_policy_mode_selected: Some(policy_selected_mode),
+            decode_policy_reason: Some(decode_policy_reason),
+            fw_low_coherence: decode_telemetry.fw_low_coherence,
+            fw_retry_used: decode_telemetry.fw_retry_used,
+            fw_literal_retry_used: decode_telemetry.fw_literal_retry_used,
+            audio_pipeline_version: decode_telemetry.audio_pipeline_version,
+            fw_avg_logprob: decode_telemetry.fw_avg_logprob,
+            fw_no_speech_prob: decode_telemetry.fw_no_speech_prob,
+            fw_compression_ratio: decode_telemetry.fw_compression_ratio,
+            fw_shadow_candidate_version: decode_telemetry.fw_shadow_candidate_version,
+            fw_shadow_quality_delta: decode_telemetry.fw_shadow_quality_delta,
+            fw_shadow_candidate_avg_logprob: decode_telemetry.fw_shadow_candidate_avg_logprob,
+            fw_shadow_candidate_no_speech_prob: decode_telemetry.fw_shadow_candidate_no_speech_prob,
+            fw_shadow_candidate_retry_used: decode_telemetry.fw_shadow_candidate_retry_used,
+            fw_shadow_candidate_low_coherence: decode_telemetry.fw_shadow_candidate_low_coherence,
+            fw_shadow_candidate_decode_compute_ms: decode_telemetry
+                .fw_shadow_candidate_decode_compute_ms,
+            fw_shadow_candidate_won: decode_telemetry.fw_shadow_candidate_won,
+            audio_pipeline_fallback_engaged: decode_telemetry.audio_pipeline_fallback_engaged,
+            audio_pipeline_fallback_remaining: decode_telemetry.audio_pipeline_fallback_remaining,
+            warm_start_hit: decode_telemetry.runtime_cache_hit,
+            worker_reused: decode_telemetry.runtime_cache_hit,
+            correction_candidates_count: correction_candidates.len() as u32,
+            insertion_method: Some(insertion_method),
+            insertion_target_class: Some(insertion_target_class),
+            success: insertion_success,
+            mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
+        };
+        let _ = app.emit("voicewave://latency", LatencyBreakdownEvent::from(&latency));
         // Always-on aggregate stats (counts and durations only, never text)
         // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
         // diagnostics gates the detailed per-utterance records below. Only
@@ -263,9 +329,9 @@ impl VoiceWaveController {
                 asr_final_word_count,
                 asr_raw_word_count,
                 audio_duration_ms,
-                Some(insertion_target_class.as_str()),
-                decode_telemetry.fw_avg_logprob,
-                decode_telemetry.fw_no_speech_prob,
+                latency.insertion_target_class.as_deref(),
+                latency.fw_avg_logprob,
+                latency.fw_no_speech_prob,
             ) {
                 tracing::warn!("stats record failed: {err}");
             }
@@ -275,77 +341,7 @@ impl VoiceWaveController {
                 .diagnostics_manager
                 .lock()
                 .await
-                .record_latency(LatencyMetricRecord {
-                    session_id,
-                    timestamp_utc_ms: now_utc_ms(),
-                    capture_ms,
-                    release_to_transcribing_ms,
-                    effective_release_watchdog_ms,
-                    watchdog_recovered,
-                    segments_captured,
-                    release_stop_detected_at_utc_ms,
-                    model_init_ms: decode_telemetry.model_init_ms,
-                    audio_condition_ms: decode_telemetry.audio_condition_ms,
-                    decode_compute_ms: decode_telemetry.decode_compute_ms,
-                    runtime_cache_hit: decode_telemetry.runtime_cache_hit,
-                    backend_requested: decode_telemetry.backend_requested,
-                    backend_used: decode_telemetry.backend_used,
-                    backend_fallback: decode_telemetry.backend_fallback,
-                    asr_engine: Some(decode_telemetry.asr_engine)
-                        .filter(|engine| !engine.is_empty()),
-                    asr_step_down_reason: decode_telemetry.asr_step_down_reason,
-                    hold_to_first_draft_ms: 0,
-                    incremental_decode_ms: 0,
-                    release_finalize_ms,
-                    incremental_windows_decoded: 0,
-                    finalize_tail_audio_ms,
-                    asr_integrity_percent,
-                    asr_raw_word_count,
-                    asr_final_word_count,
-                    decode_ms,
-                    post_ms,
-                    insert_ms,
-                    total_ms,
-                    release_to_inserted_ms,
-                    audio_duration_ms,
-                    model_id: final_worker.active_model().to_string(),
-                    decode_mode: final_worker.decode_mode(),
-                    decode_policy_mode_selected: Some(policy_selected_mode),
-                    decode_policy_reason: Some(decode_policy_reason),
-                    fw_low_coherence: decode_telemetry.fw_low_coherence,
-                    fw_retry_used: decode_telemetry.fw_retry_used,
-                    fw_literal_retry_used: decode_telemetry.fw_literal_retry_used,
-                    audio_pipeline_version: decode_telemetry.audio_pipeline_version,
-                    fw_avg_logprob: decode_telemetry.fw_avg_logprob,
-                    fw_no_speech_prob: decode_telemetry.fw_no_speech_prob,
-                    fw_compression_ratio: decode_telemetry.fw_compression_ratio,
-                    fw_shadow_candidate_version: decode_telemetry.fw_shadow_candidate_version,
-                    fw_shadow_quality_delta: decode_telemetry.fw_shadow_quality_delta,
-                    fw_shadow_candidate_avg_logprob: decode_telemetry
-                        .fw_shadow_candidate_avg_logprob,
-                    fw_shadow_candidate_no_speech_prob: decode_telemetry
-                        .fw_shadow_candidate_no_speech_prob,
-                    fw_shadow_candidate_retry_used: decode_telemetry.fw_shadow_candidate_retry_used,
-                    fw_shadow_candidate_low_coherence: decode_telemetry
-                        .fw_shadow_candidate_low_coherence,
-                    fw_shadow_candidate_decode_compute_ms: decode_telemetry
-                        .fw_shadow_candidate_decode_compute_ms,
-                    fw_shadow_candidate_won: decode_telemetry.fw_shadow_candidate_won,
-                    audio_pipeline_fallback_engaged: decode_telemetry
-                        .audio_pipeline_fallback_engaged,
-                    audio_pipeline_fallback_remaining: decode_telemetry
-                        .audio_pipeline_fallback_remaining,
-                    warm_start_hit: decode_telemetry.runtime_cache_hit,
-                    worker_reused: decode_telemetry.runtime_cache_hit,
-                    correction_candidates_count: correction_candidates.len() as u32,
-                    insertion_method: Some(insertion_method),
-                    insertion_target_class: Some(insertion_target_class),
-                    success: insertion_success,
-                    mic_input_volume_percent: mic_input_volume_slot
-                        .lock()
-                        .ok()
-                        .and_then(|slot| *slot),
-                });
+                .record_latency(latency);
         }
 
         // Keep non-critical persistence off the hot path so release->final latency stays low.
