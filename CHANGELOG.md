@@ -52,6 +52,11 @@ transcription.
   issue with your app version, Windows version and speech engine. Nothing is
   sent until you submit it on GitHub. Open logs folder shows the log files to
   attach.
+- **Copy diagnostics.** Settings → Diagnostics and Help have a Copy
+  diagnostics button and a preview of what it copies: app and Windows
+  versions, speech engine, microphone name and recent warnings from the log.
+  Report a problem now puts the same text in the GitHub issue for you, so
+  attaching logs is optional. Never audio or anything you dictated.
 - **Your first word is no longer clipped.** After a dictation the mic stays
   on for 2 minutes and remembers the last 0.6 seconds, so the next dictation
   starts with what you said just before the hotkey went down. The mic also
@@ -66,8 +71,14 @@ transcription.
 - **Setup and reliability counts** in the anonymous usage count: which setup
   step was reached, whether setup finished or was skipped, whether the first
   dictation ran on the GPU or the CPU, failed model downloads, and GPU-to-CPU
-  fallbacks. Each carries one category and nothing else. The existing switch
-  in setup and Settings → Diagnostics turns all of it off.
+  fallbacks. Each carries fixed categories and nothing else. The existing
+  switch in setup and Settings → Diagnostics turns all of it off.
+- **More reliability counts** in the anonymous usage count, if it's on: a
+  once-a-day app launch (and whether VoiceWave started with Windows), the
+  type of a failed dictation, speech helper crashes, and internal errors by
+  app area. Every count also says whether speech runs on the GPU or the CPU,
+  the model family, the graphics card maker and Windows 10 or 11. Fixed
+  categories only, never content.
 - **Choose your own dictation shortcut.** Settings → Dictation → Dictation
   shortcut: click Change, press the keys you want, and let go. It works right
   away, no restart. Esc cancels, and Reset to default brings back Ctrl + Win.

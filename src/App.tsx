@@ -33,7 +33,13 @@ import {
 import { firebaseEnabled } from "./lib/firebase";
 import { DEFAULT_PUSH_TO_TALK_HOTKEY, formatHotkey } from "./lib/hotkeys";
 import { applyTheme } from "./lib/theme";
-import { copyTextToClipboard, getSupportContext, openIssueReport, openLogsFolder } from "./lib/tauri";
+import {
+  copyTextToClipboard,
+  getDiagnosticsReport,
+  getSupportContext,
+  openIssueReport,
+  openLogsFolder
+} from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ParakeetOffer } from "./components/ParakeetOffer";
@@ -476,6 +482,26 @@ function OverlayModal({ title, subtitle, onClose, children, maxWidthClassName = 
   );
 }
 
+/** Settings → Diagnostics and Help: the diagnostics report as plain text,
+ * fetched fresh each time the preview opens. */
+function DiagnosticsPreview({ report, onOpen }: { report: string | null; onOpen: () => void }) {
+  return (
+    <details
+      className="mt-2 text-xs text-faint"
+      onToggle={(event) => {
+        if (event.currentTarget.open) {
+          onOpen();
+        }
+      }}
+    >
+      <summary className="cursor-pointer select-none font-medium text-accent-text">Preview diagnostics</summary>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-edge bg-inset px-3 py-2 font-mono text-[11px] leading-relaxed text-quiet">
+        {report ?? "Loading…"}
+      </pre>
+    </details>
+  );
+}
+
 /** Models page: where dictation runs, the one-time graphics card check, an
  * accepted upgrade in flight, and a nudge to Small when dictation is slow on
  * the processor. A graphics-card model stuck there (the backend's
@@ -629,6 +655,10 @@ function App() {
   // "couldn't open" message.
   const [supportContext, setSupportContext] = useState<SupportContext | null>(null);
   const [supportError, setSupportError] = useState<string | null>(null);
+  // The diagnostics report (preview + "Copy diagnostics"), and the brief
+  // "Copied" state after a copy.
+  const [diagnosticsReport, setDiagnosticsReport] = useState<string | null>(null);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const {
     activeState,
     approveDictionaryQueueEntry,
@@ -1294,6 +1324,31 @@ function App() {
     void openIssueReport(speechEngineSummary).catch(() =>
       setSupportError("Couldn't open your browser. Report the problem on VoiceWave's GitHub Issues page instead.")
     );
+  };
+
+  // Always fetched fresh: the report includes the latest log warnings.
+  const loadDiagnosticsReport = async () => {
+    const report = await getDiagnosticsReport();
+    setDiagnosticsReport(report);
+    return report;
+  };
+
+  const previewDiagnostics = () => {
+    void loadDiagnosticsReport().catch(() => setDiagnosticsReport("Couldn't load the diagnostics."));
+  };
+
+  const copyDiagnostics = () => {
+    setSupportError(null);
+    void (async () => {
+      try {
+        await copyTextToClipboard(await loadDiagnosticsReport());
+      } catch {
+        setSupportError("Couldn't copy the diagnostics.");
+        return;
+      }
+      setDiagnosticsCopied(true);
+      window.setTimeout(() => setDiagnosticsCopied(false), 1500);
+    })();
   };
 
   const showLogsFolder = () => {
@@ -3115,11 +3170,30 @@ function App() {
                   )}
 
                   <div className="vw-set-row">
+                    <div className="min-w-0 flex-1">
+                      <p className="vw-set-title">Diagnostics report</p>
+                      <p className="vw-set-desc">
+                        App and Windows versions, speech engine, microphone name and recent warnings, as plain text
+                        to paste anywhere. Never audio or anything you dictated.
+                      </p>
+                      <DiagnosticsPreview report={diagnosticsReport} onOpen={previewDiagnostics} />
+                    </div>
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm shrink-0 self-start"
+                      onClick={copyDiagnostics}
+                      disabled={!tauriAvailable}
+                    >
+                      {diagnosticsCopied ? "Copied" : "Copy diagnostics"}
+                    </button>
+                  </div>
+
+                  <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">Report a problem</p>
                       <p className="vw-set-desc">
-                        Opens a pre-filled GitHub issue. Attach the bundle above and the latest log file; logs
-                        never contain what you dictated.
+                        Opens a pre-filled GitHub issue that already includes the diagnostics report. Attaching the
+                        bundle above or the latest log file is optional; logs never contain what you dictated.
                       </p>
                       {supportError && <p className="mt-1 text-xs text-status-danger-text">{supportError}</p>}
                     </div>
@@ -3591,8 +3665,8 @@ function App() {
             <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <p className="text-sm font-semibold text-ink-strong">Report a problem</p>
               <p className="mt-1 text-sm text-faint">
-                Opens a pre-filled GitHub issue with your app version, Windows version and speech engine. Nothing
-                is sent until you submit it on GitHub.
+                Opens a pre-filled GitHub issue with the diagnostics report: app and Windows versions, speech
+                engine, microphone name and recent warnings. Nothing is sent until you submit it on GitHub.
               </p>
               {supportContext && (
                 <p className="mt-2 text-xs text-hint">
@@ -3617,11 +3691,19 @@ function App() {
                 >
                   Open logs folder
                 </button>
+                <button
+                  type="button"
+                  className="vw-btn-secondary vw-btn-sm"
+                  onClick={copyDiagnostics}
+                  disabled={!tauriAvailable}
+                >
+                  {diagnosticsCopied ? "Copied" : "Copy diagnostics"}
+                </button>
               </div>
               {supportError && <p className="mt-2 text-xs text-status-danger-text">{supportError}</p>}
+              <DiagnosticsPreview report={diagnosticsReport} onOpen={previewDiagnostics} />
               <p className="mt-3 text-xs text-faint">
-                Attach a diagnostics export (Settings → Diagnostics) and the latest log file if you can. Logs never
-                contain what you dictated.
+                Attaching the latest log file is optional. Logs never contain what you dictated.
               </p>
             </section>
           </div>
