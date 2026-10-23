@@ -510,7 +510,7 @@ export async function getSpeechEngineStatus(): Promise<SpeechEngineStatus> {
   return invokeVoicewave<SpeechEngineStatus>("get_speech_engine_status");
 }
 
-/** Qualify a GPU upgrade accepted before 0.8.0 and switch to it; a no-op otherwise. */
+/** Qualify a GPU upgrade accepted before 0.7.5 and switch to it; a no-op otherwise. */
 export async function finishGpuUpgrade(): Promise<void> {
   return invokeVoicewave<void>("finish_gpu_upgrade");
 }

@@ -16,7 +16,7 @@ interface ParakeetOfferProps {
 const toMb = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
 /** Home view card, shown once, offering existing users the switch to
- * Parakeet (the default for new installs since 0.8.0). The current model
+ * Parakeet (the default for new installs since 0.7.5). The current model
  * keeps dictating until Parakeet installed; a failed or cancelled download
  * shows the usual Retry/Resume here and leaves the current model active. */
 export function ParakeetOffer({ model, status, onSwitch, onCancel, onDecline }: ParakeetOfferProps) {

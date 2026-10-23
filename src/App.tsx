@@ -795,9 +795,9 @@ function App() {
     !showModelSetupGate &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
   // Home view: the one-time offer to switch to Parakeet for existing users
-  // (0.8.0). Only where Parakeet runs (the backend lists it only there), never
+  // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU
-  // upgrade accepted before 0.8.0 is still pending. A Parakeet download in
+  // upgrade accepted before 0.7.5 is still pending. A Parakeet download in
   // progress keeps the card up so it can show progress and Retry.
   const parakeetRow = modelCatalog.find((row) => row.tier === "parakeet") ?? null;
   const otherModelDownloading = Object.values(modelStatuses).some(

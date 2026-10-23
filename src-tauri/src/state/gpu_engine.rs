@@ -1,7 +1,7 @@
 //! Controller surface for plan 019's engine selection: the status the UI
 //! shows ("Running on …", "Getting your graphics card ready", the switch to
 //! a processor model when the GPU is unusable), finishing a GPU upgrade
-//! accepted before 0.8.0 (the Parakeet offer replaced that notice), and
+//! accepted before 0.7.5 (the Parakeet offer replaced that notice), and
 //! removing a model's files.
 
 use super::{ControllerError, VoiceWaveController};

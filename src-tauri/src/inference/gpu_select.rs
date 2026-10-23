@@ -135,7 +135,7 @@ impl GpuDevice {
 
 /// Parakeet (one GGML file for every PC that can run the speech workers, on
 /// the GPU or the CPU) plus the two Whisper sizes, each in both model
-/// families. Parakeet is the default since 0.8.0; Small and Large Turbo stay
+/// families. Parakeet is the default since 0.7.5; Small and Large Turbo stay
 /// as alternatives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

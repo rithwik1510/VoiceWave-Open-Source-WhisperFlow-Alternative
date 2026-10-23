@@ -457,7 +457,7 @@ export interface SpeechEngineStatus {
   preparing: boolean;
   qualification: "passed" | "failed" | "retry" | null;
   qualificationDetail: string | null;
-  /** A GPU upgrade accepted before 0.8.0, switched to once it qualifies. */
+  /** A GPU upgrade accepted before 0.7.5, switched to once it qualifies. */
   pendingUpgrade: string | null;
   /** The active graphics-card model is stuck on the processor (check failed,
    * GPU cooling down or gone, acceleration off) with no processor model

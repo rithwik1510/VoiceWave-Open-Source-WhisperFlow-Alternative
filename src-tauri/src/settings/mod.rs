@@ -245,7 +245,7 @@ pub struct VoiceWaveSettings {
     #[serde(default)]
     pub gpu_acceleration: GpuAcceleration,
     /// The one-time Home card offering existing users the switch to Parakeet
-    /// (0.8.0) was answered: "Not now", or Parakeet was made active (the
+    /// (0.7.5) was answered: "Not now", or Parakeet was made active (the
     /// card or Models). Finishing onboarding sets it too, since setup already
     /// offers Parakeet. False for settings files that predate it.
     #[serde(default)]
