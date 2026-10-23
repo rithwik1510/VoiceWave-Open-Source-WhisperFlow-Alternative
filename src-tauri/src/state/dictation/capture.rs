@@ -78,15 +78,10 @@ impl VoiceWaveController {
         };
         let capture_ms = capture_started.elapsed().as_millis() as u64;
 
+        // cancel_dictation already set the session and HUD to Idle; doing it
+        // again here could paint over (and release Esc from) a session that
+        // started since.
         if cancel_token.is_cancelled() {
-            self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                .await;
-            self.update_state(
-                app,
-                VoiceWaveHudState::Idle,
-                Some("Dictation cancelled.".to_string()),
-            )
-            .await;
             return Ok(None);
         }
         if let Some(retained) = retry_audio {
@@ -277,7 +272,8 @@ impl VoiceWaveController {
                 },
             )
         });
-        if ready_rx.await.is_ok() {
+        // A cancelled run's late mic-open must not repaint the HUD.
+        if ready_rx.await.is_ok() && !self.end_if_cancelled(run).await {
             // Sound cue is driven from the pill renderer for precise
             // sync with the visible listening onset.
             self.update_state(
@@ -293,16 +289,9 @@ impl VoiceWaveController {
 
         match captured {
             Ok(rows) => Ok(Some(rows)),
+            // Quiet for the same reason as the cancel check in capture_audio.
             Err(AudioError::Cancelled) => {
                 tracing::info!("capture cancelled (session={session_id})");
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    app,
-                    VoiceWaveHudState::Idle,
-                    Some("Dictation cancelled.".to_string()),
-                )
-                .await;
                 Ok(None)
             }
             Err(AudioError::NoSpeechDetected) => {

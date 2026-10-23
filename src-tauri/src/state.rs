@@ -1323,9 +1323,10 @@ pub struct VoiceWaveController {
     // (ids start at 1). While set, the Inserted HUD state keeps Esc owned, so
     // Esc still cancels the Enter through History and the paste delay.
     submit_pending_session: AtomicU64,
-    // Held by start admission (through the Listening state) and by the whole
-    // of cancel_dictation, so a cancel never tears down, or sets Idle over,
-    // a session that started while it ran.
+    // Held by start admission (through the Listening state), all of
+    // cancel_dictation, and flow cleanup (through its Error state). A session
+    // that starts meanwhile never has its token, Esc or pill torn down by the
+    // older one. Always the outermost lock: taken while holding no other.
     lifecycle_gate: Mutex<()>,
 }
 
@@ -2007,6 +2008,10 @@ impl VoiceWaveController {
                     retry_audio,
                 )
                 .await;
+            // Held through the Error state below, so a new session can't
+            // start between freeing the slot and this run's last HUD update
+            // (which would release its Esc and paint over its pill).
+            let gate = controller.lifecycle_gate.lock().await;
             let still_owns_session = {
                 let mut active = controller.active_session.lock().await;
                 if active
@@ -2050,6 +2055,7 @@ impl VoiceWaveController {
             };
             if let Err(err) = run_result {
                 if !still_owns_session {
+                    drop(gate);
                     tracing::warn!(
                         "stale dictation session {session_id} failed after replacement: {err}"
                     );
@@ -2075,6 +2081,7 @@ impl VoiceWaveController {
                         Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
+                drop(gate);
                 if retry {
                     emit_pill_retry(&app, notice_title, notice_detail);
                 } else {

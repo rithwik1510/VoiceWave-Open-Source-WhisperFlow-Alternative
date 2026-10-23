@@ -259,15 +259,8 @@ impl VoiceWaveController {
             asr_integrity_metrics(finalize_text, baseline_transcript);
 
         if final_transcript.trim().is_empty() {
+            // cancel_dictation already set the session and HUD to Idle.
             if cancel_token.is_cancelled() {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    app,
-                    VoiceWaveHudState::Idle,
-                    Some("Dictation cancelled.".to_string()),
-                )
-                .await;
                 return Ok(None);
             }
             if mode == DictationMode::Microphone {
