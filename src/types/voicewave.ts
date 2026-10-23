@@ -244,6 +244,8 @@ export interface LatencyBreakdownEvent {
   correctionCandidatesCount?: number;
   insertionMethod: InsertionMethod | string;
   insertionTargetClass: string;
+  /** A microphone dictation whose text landed (clipboard-only counts). */
+  dictationLanded: boolean;
 }
 
 export interface DiagnosticsStatus {

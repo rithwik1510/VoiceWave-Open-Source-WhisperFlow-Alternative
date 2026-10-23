@@ -600,15 +600,6 @@ export function useVoiceWave() {
   );
   const modelStatusesRef = useRef(modelStatuses);
   modelStatusesRef.current = modelStatuses;
-  // Set by a dictation's non-empty final transcript, which Rust emits just
-  // before inserting it; the insertion event that follows says whether the
-  // text landed. Cleared by the latency event that ends the dictation, by a
-  // manual insert from the UI (which never counts) and when the next
-  // dictation starts listening.
-  const dictationInsertPendingRef = useRef(false);
-  // Set when a dictation's text landed; the latency event that follows says
-  // which engine actually decoded (funnel firstSuccess).
-  const firstSuccessPendingRef = useRef(false);
   const [speechEngine, setSpeechEngine] = useState<SpeechEngineStatus | null>(null);
   const speechEngineRef = useRef(speechEngine);
   speechEngineRef.current = speechEngine;
@@ -1658,9 +1649,6 @@ export function useVoiceWave() {
       });
       return;
     }
-    // Not a dictation: its insertion event must not count as usage (a
-    // cancelled dictation can leave the flag set).
-    dictationInsertPendingRef.current = false;
     try {
       const result = await insertText({
         text: snapshot.lastFinal,
@@ -2375,12 +2363,6 @@ export function useVoiceWave() {
         } else if (state !== "error") {
           setError(null);
         }
-        // A new dictation: drop markers a previous one left behind (a cancel
-        // before the spoken Enter ends it with no latency event).
-        if (state === "listening") {
-          dictationInsertPendingRef.current = false;
-          firstSuccessPendingRef.current = false;
-        }
       }));
 
       await keep(listenVoicewaveTranscript((event) => {
@@ -2389,21 +2371,9 @@ export function useVoiceWave() {
           lastPartial: event.isFinal ? prev.lastPartial : event.text,
           lastFinal: event.isFinal ? event.text : prev.lastFinal
         }));
-        if (event.isFinal && event.text.trim()) {
-          dictationInsertPendingRef.current = true;
-        }
       }));
 
       await keep(listenVoicewaveInsertion((result) => {
-        // Usage counts only a dictation whose text landed. Clipboard-only
-        // (elevated app) is a success; every method failing is not.
-        if (dictationInsertPendingRef.current) {
-          dictationInsertPendingRef.current = false;
-          if (result.success) {
-            void trackAnonymousUsage().catch(() => undefined);
-            firstSuccessPendingRef.current = true;
-          }
-        }
         setLastInsertion(result);
         void refreshRecentInsertions();
         void refreshPhase3Data();
@@ -2465,12 +2435,11 @@ export function useVoiceWave() {
 
       await keep(listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
-        // The dictation is over (its insertion event, if any, came first).
-        dictationInsertPendingRef.current = false;
-        // Funnel: both are deduped in telemetry.ts (once per install / once
-        // per reason per session), so firing on every dictation is cheap.
-        if (firstSuccessPendingRef.current) {
-          firstSuccessPendingRef.current = false;
+        // Usage and the funnel events are deduped in telemetry.ts (once per
+        // day / install / reason per session), so firing on every dictation
+        // is cheap. Only a microphone dictation whose text landed counts.
+        if (payload.dictationLanded) {
+          void trackAnonymousUsage().catch(() => undefined);
           void trackFunnelEvent({
             type: "Dictation.firstSuccess",
             engine: payload.backendUsed === "cpu" ? "cpu" : "gpu"

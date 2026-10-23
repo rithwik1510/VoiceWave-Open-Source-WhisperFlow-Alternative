@@ -79,14 +79,17 @@ struct LatencyBreakdownEvent {
     insertion_method: String,
     insertion_target_class: String,
     mic_input_volume_percent: Option<u8>,
+    /// A microphone dictation whose text landed (clipboard-only counts;
+    /// fixture checks never do). Drives the usage and first-success
+    /// telemetry in the frontend.
+    dictation_landed: bool,
 }
 
 /// The UI event carries the record's measurements in its own shape: no
-/// timestamp or success flag, and plain values where the record keeps an
-/// `Option` (always `Some` for a dictation; `asr_engine` is `None` only when
-/// empty).
-impl From<&LatencyMetricRecord> for LatencyBreakdownEvent {
-    fn from(record: &LatencyMetricRecord) -> Self {
+/// timestamp, and plain values where the record keeps an `Option` (always
+/// `Some` for a dictation; `asr_engine` is `None` only when empty).
+impl LatencyBreakdownEvent {
+    fn new(record: &LatencyMetricRecord, mode: DictationMode) -> Self {
         Self {
             session_id: record.session_id,
             capture_ms: record.capture_ms,
@@ -145,6 +148,7 @@ impl From<&LatencyMetricRecord> for LatencyBreakdownEvent {
             insertion_method: record.insertion_method.clone().unwrap_or_default(),
             insertion_target_class: record.insertion_target_class.clone().unwrap_or_default(),
             mic_input_volume_percent: record.mic_input_volume_percent,
+            dictation_landed: record.success && mode == DictationMode::Microphone,
         }
     }
 }
@@ -317,7 +321,7 @@ impl VoiceWaveController {
             success: insertion_success,
             mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
         };
-        let _ = app.emit("voicewave://latency", LatencyBreakdownEvent::from(&latency));
+        let _ = app.emit("voicewave://latency", LatencyBreakdownEvent::new(&latency, mode));
         // Always-on aggregate stats (counts and durations only, never text)
         // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
         // diagnostics gates the detailed per-utterance records below. Only

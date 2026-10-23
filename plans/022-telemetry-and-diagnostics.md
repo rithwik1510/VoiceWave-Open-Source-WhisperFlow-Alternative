@@ -29,8 +29,9 @@ useful GitHub issues. Ships with 0.7.5 so the Parakeet cohort is measured.
 
 `App.activeDaily` fires on the first dictation of each UTC day whose text was
 inserted (clipboard-only into an elevated app counts; a dictation where every
-insert method failed does not). The same moment sends `App.installActivated`
-once and arms `Dictation.firstSuccess`. It means "dictated today", not "app
+insert method failed does not). The trigger is the dictation's latency event
+(`dictationLanded`). The same moment sends `App.installActivated` and
+`Dictation.firstSuccess` once per install. It means "dictated today", not "app
 ran today". Churn and "running but broken"
 look the same in today's data. `App.launchedDaily` separates them.
 
