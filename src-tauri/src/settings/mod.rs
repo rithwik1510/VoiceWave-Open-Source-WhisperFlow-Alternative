@@ -195,7 +195,6 @@ pub struct VoiceWaveSettings {
     /// default; NO per-field serde default here so the container-level
     /// default (true) applies when the field is absent from older settings.
     pub spoken_edit_commands: bool,
-    pub prefer_clipboard_only_for_terminals: bool,
     /// OS input-volume guard behavior at dictation start. Defaults to Warn:
     /// external apps (browser AGC, call apps) silently lower the system mic
     /// volume and tank transcription quality for every model at once.
@@ -283,7 +282,6 @@ impl Default for VoiceWaveSettings {
             code_mode: CodeModeSettings::default(),
             pro_post_processing_enabled: true,
             spoken_edit_commands: true,
-            prefer_clipboard_only_for_terminals: true,
             mic_volume_guard: MicVolumeGuardMode::default(),
             keep_mic_ready: false,
             pill_action_suggestions: false,
@@ -640,26 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn prefer_clipboard_only_for_terminals_defaults_to_true() {
-        let settings = VoiceWaveSettings::default();
-        assert!(settings.prefer_clipboard_only_for_terminals);
-    }
-
-    #[test]
-    fn prefer_clipboard_only_for_terminals_round_trips() {
-        let path = temp_settings_path();
-        let store = SettingsStore::from_path(path.clone());
-        let mut settings = VoiceWaveSettings::default();
-        settings.prefer_clipboard_only_for_terminals = false;
-        store.save(&settings).expect("save should succeed");
-
-        let loaded = store.load().expect("load should succeed");
-        assert!(!loaded.prefer_clipboard_only_for_terminals);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn theme_defaults_to_system_and_round_trips() {
         assert_eq!(VoiceWaveSettings::default().theme, ThemePreference::System);
 
@@ -675,21 +653,6 @@ mod tests {
         assert!(raw.contains("\"theme\": \"dark\""), "{raw}");
         let loaded = store.load().expect("load should succeed");
         assert_eq!(loaded.theme, ThemePreference::Dark);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn backward_compat_missing_field_defaults_to_true() {
-        // Old settings JSON without preferClipboardOnlyForTerminals
-        // should deserialize with the default (true).
-        let path = temp_settings_path();
-        let store = SettingsStore::from_path(path.clone());
-        let raw = r#"{"activeModel":"fw-small.en"}"#;
-        std::fs::write(&path, raw).expect("write should succeed");
-
-        let loaded = store.load().expect("load should succeed");
-        assert!(loaded.prefer_clipboard_only_for_terminals);
 
         let _ = std::fs::remove_file(path);
     }

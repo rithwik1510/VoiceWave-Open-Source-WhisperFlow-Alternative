@@ -212,7 +212,8 @@ the command.
    arrives on the clipboard.
 8. **`preferClipboardOnlyForTerminals` stays dead.** It defaults to `true` in
    every saved settings file, so wiring it would switch terminal paste off for
-   everyone. Delete it in a later cleanup.
+   everyone. Delete it in a later cleanup. (Removed in 0.7.5; old settings
+   files that still carry it load fine, serde ignores the unknown key.)
 
 ## Open questions for the owner
 
