@@ -93,7 +93,7 @@ import {
   ANALYTICS_CONSENT_VERSION,
   classifyGpuStepDown,
   funnelEventFromTelemetry,
-  setTelemetryContextProvider,
+  setTelemetryProviders,
   speechModelFamily,
   speechModelKind,
   trackAnonymousUsage,
@@ -567,8 +567,12 @@ export function useVoiceWave() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   // Real settings arrived from the backend: the fallback has usage counting
-  // on, so telemetry must not send (or drop) anything before this.
+  // on, so telemetry must not send (or drop) anything before this. The ref is
+  // set during render, together with settingsRef, so the telemetry consent
+  // check never pairs "loaded" with the fallback settings.
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const settingsLoadedRef = useRef(settingsLoaded);
+  settingsLoadedRef.current = settingsLoaded;
   const [hotkeys, setHotkeys] = useState<HotkeySnapshot>(fallbackHotkeys);
   const [permissions, setPermissions] = useState<PermissionSnapshot>(fallbackPermissions);
   const [inputDevices, setInputDevices] = useState<string[]>([]);
@@ -1450,10 +1454,7 @@ export function useVoiceWave() {
     void listenVoicewavePolishModelProgress((payload) => {
       setPolishModelProgress(payload);
       if (payload.error) {
-        void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-          type: "Model.downloadFailed",
-          model: "polish"
-        }).catch(() => undefined);
+        void trackFunnelEvent({ type: "Model.downloadFailed", model: "polish" }).catch(() => undefined);
       }
     }).then((fn) => {
       if (active) {
@@ -1716,10 +1717,7 @@ export function useVoiceWave() {
         // after a cancel is not a failure.
         const kind = speechModelKind(modelId);
         if (kind && modelStatusesRef.current[modelId]?.state !== "cancelled") {
-          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-            type: "Model.downloadFailed",
-            model: kind
-          }).catch(() => undefined);
+          void trackFunnelEvent({ type: "Model.downloadFailed", model: kind }).catch(() => undefined);
         }
         // Belt and braces: even if the backend never emitted a terminal status
         // (or the IPC call itself rejected), the row must leave "downloading"
@@ -2377,7 +2375,7 @@ export function useVoiceWave() {
           lastFinal: event.isFinal ? event.text : prev.lastFinal
         }));
         if (event.isFinal && event.text.trim()) {
-          void trackAnonymousUsage(settingsRef.current.anonymousUsageOptIn).catch(() => undefined);
+          void trackAnonymousUsage().catch(() => undefined);
           firstSuccessPendingRef.current = true;
         }
       }));
@@ -2434,10 +2432,7 @@ export function useVoiceWave() {
         }));
         const failedKind = payload.state === "failed" ? speechModelKind(payload.modelId) : null;
         if (failedKind) {
-          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-            type: "Model.downloadFailed",
-            model: failedKind
-          }).catch(() => undefined);
+          void trackFunnelEvent({ type: "Model.downloadFailed", model: failedKind }).catch(() => undefined);
         }
       }));
 
@@ -2449,10 +2444,9 @@ export function useVoiceWave() {
         setLastLatency(payload);
         // Funnel: both are deduped in telemetry.ts (once per install / once
         // per reason per session), so firing on every dictation is cheap.
-        const optedIn = settingsRef.current.anonymousUsageOptIn;
         if (firstSuccessPendingRef.current) {
           firstSuccessPendingRef.current = false;
-          void trackFunnelEvent(optedIn, {
+          void trackFunnelEvent({
             type: "Dictation.firstSuccess",
             engine: payload.backendUsed === "cpu" ? "cpu" : "gpu"
           }).catch(() => undefined);
@@ -2461,9 +2455,7 @@ export function useVoiceWave() {
           ? classifyGpuStepDown(payload.asrStepDownReason, payload.backendFallback)
           : null;
         if (stepDown) {
-          void trackFunnelEvent(optedIn, { type: "Speech.gpuStepDown", reason: stepDown }).catch(
-            () => undefined
-          );
+          void trackFunnelEvent({ type: "Speech.gpuStepDown", reason: stepDown }).catch(() => undefined);
         }
       }));
 
@@ -2487,29 +2479,35 @@ export function useVoiceWave() {
     };
   }, [refreshPhase3Data, refreshRecentInsertions, refreshSessionHistory, settings.activeModel, tauriAvailable]);
 
-  // Context on every usage signal, read at send time through refs so it is
-  // never stale. Fixed categories only (see ANONYMOUS_USAGE_DETAILS).
+  // Consent and context for every usage signal, read at send time through
+  // refs so they are never stale. Consent stays off until the real settings
+  // load (the fallback has it on). Fixed categories only (see
+  // ANONYMOUS_USAGE_DETAILS).
   useEffect(() => {
-    setTelemetryContextProvider(() => {
-      const engine = speechEngineRef.current;
-      const osVersion = supportContextRef.current?.osVersion ?? "";
-      return {
-        "VoiceWave.Speech.path": engine?.runningOn?.device ?? (engine?.preparing ? "preparing" : "none"),
-        "VoiceWave.Speech.modelFamily": speechModelFamily(settingsRef.current.activeModel),
-        "VoiceWave.Gpu.vendor": engine?.gpuVendor ?? "none",
-        "VoiceWave.Os.major": osVersion.startsWith("Windows 11")
-          ? "11"
-          : osVersion.startsWith("Windows 10")
-            ? "10"
-            : "other"
-      };
+    setTelemetryProviders({
+      consent: () => settingsLoadedRef.current && settingsRef.current.anonymousUsageOptIn,
+      context: () => {
+        const engine = speechEngineRef.current;
+        const osVersion = supportContextRef.current?.osVersion ?? "";
+        return {
+          "VoiceWave.Speech.path": engine?.runningOn?.device ?? (engine?.preparing ? "preparing" : "none"),
+          "VoiceWave.Speech.modelFamily": speechModelFamily(settingsRef.current.activeModel),
+          "VoiceWave.Gpu.vendor": engine?.gpuVendor ?? "none",
+          "VoiceWave.Os.major": osVersion.startsWith("Windows 11")
+            ? "11"
+            : osVersion.startsWith("Windows 10")
+              ? "10"
+              : "other"
+        };
+      }
     });
   }, []);
 
   // Plan 022: the daily launch marker, plus the backend's queued failure,
   // crash, and panic facts. Draining always clears the queue; while usage
-  // counting is off the drained facts are simply dropped (trackFunnelEvent's
-  // gate), so the queue never fills.
+  // counting is off the drained facts are simply dropped (telemetry.ts's
+  // consent gate), so the queue never fills. Waits for the real settings so
+  // nothing is drained (and dropped) before the user's choice is known.
   useEffect(() => {
     if (!tauriAvailable || !settingsLoaded) {
       return;
@@ -2521,9 +2519,8 @@ export function useVoiceWave() {
     const drain = () => {
       void drainTelemetry()
         .then((events) => {
-          const optedIn = settingsRef.current.anonymousUsageOptIn;
           for (const event of events) {
-            void trackFunnelEvent(optedIn, funnelEventFromTelemetry(event)).catch(() => undefined);
+            void trackFunnelEvent(funnelEventFromTelemetry(event)).catch(() => undefined);
           }
         })
         .catch(() => undefined);
@@ -2544,10 +2541,7 @@ export function useVoiceWave() {
         // Deduped once per UTC day; the hourly re-check covers an app left
         // running past midnight.
         const trackLaunch = () =>
-          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-            type: "App.launchedDaily",
-            launchMode
-          }).catch(() => undefined);
+          void trackFunnelEvent({ type: "App.launchedDaily", launchMode }).catch(() => undefined);
         trackLaunch();
         launchTimer = window.setInterval(trackLaunch, 60 * 60 * 1000);
       }

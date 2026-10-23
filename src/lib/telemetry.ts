@@ -40,6 +40,9 @@ type AnonymousUsageDependencies = {
   randomUUID: () => string;
   getAppVersion: () => Promise<string>;
   createClient: (appId: string, installationId: string) => SignalClient;
+  /** Whether usage counting is on. Read when a queued send starts and again
+   * right before each signal, so turning it off stops sends already queued. */
+  isOptedIn: () => boolean;
   /** Context keys added to every signal, read at send time. */
   getContext: () => Record<string, string>;
 };
@@ -72,7 +75,9 @@ export type FunnelEvent =
 export type SpeechModelKind = "speech-gpu" | "speech-cpu";
 
 let activeClient: { installationId: string; client: SignalClient } | null = null;
-/** Set by `useVoiceWave` via `setTelemetryContextProvider`; no extra keys until then. */
+/** Set by `useVoiceWave` via `setTelemetryProviders`. Until then nothing is
+ * sent and no extra keys are added. */
+let consentProvider: () => boolean = () => false;
 let contextProvider: () => Record<string, string> = () => ({});
 // Every send runs through one queue so a check-then-mark dedupe can never
 // race a second copy of the same event (e.g. a model failure reported by both
@@ -128,15 +133,20 @@ function defaultDependencies(): AnonymousUsageDependencies {
       activeClient = { installationId, client };
       return client;
     },
+    isOptedIn: () => consentProvider(),
     getContext: () => contextProvider()
   };
 }
 
-/** Registers the context (speech path, model family, GPU vendor, Windows
- * major) merged into every signal. Called at send time, so it should read
- * live state. */
-export function setTelemetryContextProvider(provider: () => Record<string, string>): void {
-  contextProvider = provider;
+/** Registers the usage-counting consent and the context (speech path, model
+ * family, GPU vendor, Windows major) merged into every signal. Both are read
+ * at send time, so they should read live state. */
+export function setTelemetryProviders(providers: {
+  consent: () => boolean;
+  context: () => Record<string, string>;
+}): void {
+  consentProvider = providers.consent;
+  contextProvider = providers.context;
 }
 
 function getOrCreateInstallationId(dependencies: AnonymousUsageDependencies): string {
@@ -168,24 +178,21 @@ function utcDay(dependencies: AnonymousUsageDependencies): string {
   return new Date(dependencies.now()).toISOString().slice(0, 10);
 }
 
-async function sendAnonymousUsage(
-  optedIn: boolean,
-  dependencies: AnonymousUsageDependencies
-): Promise<AnonymousUsageResult> {
+async function sendAnonymousUsage(dependencies: AnonymousUsageDependencies): Promise<AnonymousUsageResult> {
   const result: AnonymousUsageResult = {
     configured: Boolean(dependencies.appId),
     activationSent: false,
     dailyActiveSent: false
   };
 
-  if (!optedIn || !dependencies.appId || !dependencies.storage) {
+  if (!dependencies.isOptedIn() || !dependencies.appId || !dependencies.storage) {
     return result;
   }
 
   snapshotActivation(dependencies.storage);
   const { client, payload } = await prepareSignal(dependencies);
 
-  if (dependencies.storage.getItem(ACTIVATED_KEY) !== "1") {
+  if (dependencies.isOptedIn() && dependencies.storage.getItem(ACTIVATED_KEY) !== "1") {
     const response = await client.signal("App.installActivated", payload);
     if (response.ok) {
       dependencies.storage.setItem(ACTIVATED_KEY, "1");
@@ -194,7 +201,7 @@ async function sendAnonymousUsage(
   }
 
   const todayUtc = utcDay(dependencies);
-  if (dependencies.storage.getItem(LAST_ACTIVE_DAY_KEY) !== todayUtc) {
+  if (dependencies.isOptedIn() && dependencies.storage.getItem(LAST_ACTIVE_DAY_KEY) !== todayUtc) {
     const response = await client.signal("App.activeDaily", payload);
     if (response.ok) {
       dependencies.storage.setItem(LAST_ACTIVE_DAY_KEY, todayUtc);
@@ -207,16 +214,15 @@ async function sendAnonymousUsage(
 
 /**
  * Records only an activated installation and a once-per-UTC-day active marker.
- * Call this after a successful final dictation. Nothing is sent while the user
- * has it turned off, and no transcript, audio, account, filename, or device
- * data enters either event payload.
+ * Call this after a dictation's text was inserted. Nothing is sent while the
+ * user has it turned off, and no transcript, audio, account, filename, or
+ * device data enters either event payload.
  */
 export function trackAnonymousUsage(
-  optedIn: boolean,
   overrides: Partial<AnonymousUsageDependencies> = {}
 ): Promise<AnonymousUsageResult> {
   const dependencies = { ...defaultDependencies(), ...overrides };
-  return enqueue(() => sendAnonymousUsage(optedIn, dependencies));
+  return enqueue(() => sendAnonymousUsage(dependencies));
 }
 
 /** The parameters an event carries, and how often it may be sent: once per
@@ -269,13 +275,9 @@ function describeFunnelEvent(event: FunnelEvent): {
   }
 }
 
-async function sendFunnelEvent(
-  optedIn: boolean,
-  event: FunnelEvent,
-  dependencies: AnonymousUsageDependencies
-): Promise<boolean> {
+async function sendFunnelEvent(event: FunnelEvent, dependencies: AnonymousUsageDependencies): Promise<boolean> {
   const storage = dependencies.storage;
-  if (!optedIn || !dependencies.appId || !storage) {
+  if (!dependencies.isOptedIn() || !dependencies.appId || !storage) {
     return false;
   }
 
@@ -293,6 +295,9 @@ async function sendFunnelEvent(
   }
 
   const { client, payload } = await prepareSignal(dependencies);
+  if (!dependencies.isOptedIn()) {
+    return false;
+  }
   const response = await client.signal(event.type, { ...payload, ...params });
   if (!response.ok) {
     return false;
@@ -312,12 +317,11 @@ async function sendFunnelEvent(
  * the event was sent.
  */
 export function trackFunnelEvent(
-  optedIn: boolean,
   event: FunnelEvent,
   overrides: Partial<AnonymousUsageDependencies> = {}
 ): Promise<boolean> {
   const dependencies = { ...defaultDependencies(), ...overrides };
-  return enqueue(() => sendFunnelEvent(optedIn, event, dependencies));
+  return enqueue(() => sendFunnelEvent(event, dependencies));
 }
 
 /** Speech model family from its id: whisper.cpp ("wcpp-") models are the GPU
@@ -387,6 +391,7 @@ export function classifyGpuStepDown(
 
 export function resetAnonymousUsageForTests(): void {
   activeClient = null;
+  consentProvider = () => false;
   contextProvider = () => ({});
   sendQueue = Promise.resolve();
   sessionFunnelKeys.clear();

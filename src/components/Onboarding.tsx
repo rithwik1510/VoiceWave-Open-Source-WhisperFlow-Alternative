@@ -405,13 +405,11 @@ export function Onboarding({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const rehearsalBaselineRef = useRef<string | null>(null);
   const { canvasRef, burst } = useParticleBurst();
-  const usageOptInRef = useRef(usageOptIn);
-  usageOptInRef.current = usageOptIn;
-
-  // Funnel events honour the usage toggle as it stands at each event.
-  // telemetry.ts keeps every step and the outcome to once per install.
+  // Funnel events honour the usage toggle as it stands when each is sent
+  // (telemetry.ts reads the live setting). It keeps every step and the
+  // outcome to once per install.
   const track = useCallback((event: FunnelEvent) => {
-    void trackFunnelEvent(usageOptInRef.current, event).catch(() => undefined);
+    void trackFunnelEvent(event).catch(() => undefined);
   }, []);
 
   // Welcome counts when the user acts on it (not on mount), so the toggle

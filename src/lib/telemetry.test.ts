@@ -22,7 +22,8 @@ describe("anonymous activated-install analytics", () => {
     const signal = vi.fn();
     const storage = new MemoryStorage();
 
-    const result = await trackAnonymousUsage(false, {
+    const result = await trackAnonymousUsage({
+      isOptedIn: () => false,
       appId: "test-app",
       storage,
       randomUUID: () => "install-1",
@@ -43,6 +44,7 @@ describe("anonymous activated-install analytics", () => {
     const signal = vi.fn().mockResolvedValue({ ok: true });
     const storage = new MemoryStorage();
     const dependencies = {
+      isOptedIn: () => true,
       appId: "test-app",
       storage,
       now: () => Date.UTC(2026, 6, 31, 12),
@@ -51,8 +53,8 @@ describe("anonymous activated-install analytics", () => {
       createClient: () => ({ signal: signal as (type: string, payload?: Record<string, string>) => Promise<Response> })
     };
 
-    const first = await trackAnonymousUsage(true, dependencies);
-    const second = await trackAnonymousUsage(true, dependencies);
+    const first = await trackAnonymousUsage(dependencies);
+    const second = await trackAnonymousUsage(dependencies);
 
     expect(first).toEqual({
       configured: true,
@@ -79,6 +81,7 @@ describe("anonymous activated-install analytics", () => {
     const signal = vi.fn().mockResolvedValue({ ok: false });
     const storage = new MemoryStorage();
     const dependencies = {
+      isOptedIn: () => true,
       appId: "test-app",
       storage,
       now: () => Date.UTC(2026, 6, 31, 12),
@@ -87,8 +90,8 @@ describe("anonymous activated-install analytics", () => {
       createClient: () => ({ signal: signal as (type: string, payload?: Record<string, string>) => Promise<Response> })
     };
 
-    await trackAnonymousUsage(true, dependencies);
-    await trackAnonymousUsage(true, dependencies);
+    await trackAnonymousUsage(dependencies);
+    await trackAnonymousUsage(dependencies);
 
     expect(signal).toHaveBeenCalledTimes(4);
   });
