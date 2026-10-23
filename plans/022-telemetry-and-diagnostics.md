@@ -13,6 +13,11 @@ useful GitHub issues. Ships with 0.7.5 so the Parakeet cohort is measured.
 - **Same gate as today.** Nothing is sent unless usage counting is on and an
   app ID is configured. Rust never talks to the network for telemetry; it
   queues facts and the frontend sends them through `telemetry.ts`.
+- **Consent is read at send time.** `telemetry.ts` asks a consent provider
+  registered by `useVoiceWave` when a queued send starts and again right
+  before each signal, so turning counting off stops sends already queued.
+  The provider says no until the real settings have loaded (the fallback
+  settings have counting on).
 - **Panics, not "crashes".** The panic hook also fires for panics the app
   survives (caught in tokio tasks and `mic_keeper::guarded`), so the event is
   `App.panicked`, counted once per UTC day per area. A hard kill or power loss
@@ -22,8 +27,11 @@ useful GitHub issues. Ships with 0.7.5 so the Parakeet cohort is measured.
 
 ## Why activeDaily looks like "install day only"
 
-`App.activeDaily` fires on the first successful dictation of each UTC day: it
-means "dictated today", not "app ran today". Churn and "running but broken"
+`App.activeDaily` fires on the first dictation of each UTC day whose text was
+inserted (clipboard-only into an elevated app counts; a dictation where every
+insert method failed does not). The same moment sends `App.installActivated`
+once and arms `Dictation.firstSuccess`. It means "dictated today", not "app
+ran today". Churn and "running but broken"
 look the same in today's data. `App.launchedDaily` separates them.
 
 ## Contract (Rust ↔ frontend)
@@ -103,8 +111,11 @@ dictation) are not recorded.
 | `Dictation.failed` | `VoiceWave.Dictation.failureKind` | once per UTC day per kind |
 | `Speech.workerCrashed` | `VoiceWave.Worker.kind`, `VoiceWave.Worker.exit` | once per app session per kind+exit |
 | `App.panicked` | `VoiceWave.Panic.area` | once per UTC day per area |
+| `Model.downloadFailed` (existing) | `VoiceWave.Model.kind`: `parakeet` \| `whisper-cpp` \| `faster-whisper` \| `polish` | once per UTC day per kind |
 
 `describeFunnelEvent` returns a parameter map instead of a single parameter.
+`Model.downloadFailed` reports the engine family, not GPU vs CPU: Parakeet and
+whisper.cpp run on either, and `VoiceWave.Speech.path` says which.
 
 **Context on every signal** (existing events too), next to version and channel:
 
@@ -115,9 +126,10 @@ dictation) are not recorded.
 | `VoiceWave.Gpu.vendor` | `nvidia` \| `amd` \| `intel` \| `other` \| `none` | `speechEngine.gpuVendor` |
 | `VoiceWave.Os.major` | `10` \| `11` \| `other` | `supportContext.osVersion` |
 
-Context comes from a provider registered by `useVoiceWave`, read at send
-time. It is injected through `AnonymousUsageDependencies` so existing tests
-keep passing (default provider returns no extra keys until registered).
+Context and consent come from providers registered by `useVoiceWave`
+(`setTelemetryProviders`), read at send time. They are injected through
+`AnonymousUsageDependencies` so tests can supply their own (until registered,
+nothing is sent and no extra keys are added).
 
 ## Diagnostics report (`get_diagnostics_report`)
 

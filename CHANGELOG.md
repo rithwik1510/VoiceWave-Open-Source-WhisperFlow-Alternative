@@ -48,15 +48,14 @@ transcription.
 - **Try again after a failed transcription.** When transcription fails or
   times out, the pill offers Try again, which transcribes the same recording.
   The audio stays in memory only, and only until your next dictation.
-- **Report a problem.** Help → Report a problem opens a pre-filled GitHub
-  issue with your app version, Windows version and speech engine. Nothing is
-  sent until you submit it on GitHub. Open logs folder shows the log files to
-  attach.
-- **Copy diagnostics.** Settings → Diagnostics and Help have a Copy
-  diagnostics button and a preview of what it copies: app and Windows
-  versions, speech engine, microphone name and recent warnings from the log.
-  Report a problem now puts the same text in the GitHub issue for you, so
-  attaching logs is optional. Never audio or anything you dictated.
+- **Report a problem and Copy diagnostics.** Help and Settings →
+  Diagnostics have Report a problem, which opens a GitHub issue form filled
+  in with a diagnostics report: app and Windows versions, speech engine,
+  microphone name and recent warnings from the log. Opening the form sends
+  that report to GitHub to fill it in; submitting it publishes the issue.
+  Copy diagnostics copies the same report, with a preview of exactly what it
+  contains. Attaching log files (Help → Open logs folder) is optional. Never
+  audio or anything you dictated.
 - **Your first word is no longer clipped.** After a dictation the mic stays
   on for 2 minutes and remembers the last 0.6 seconds, so the next dictation
   starts with what you said just before the hotkey went down. The mic also
