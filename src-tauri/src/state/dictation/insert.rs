@@ -16,7 +16,10 @@ use crate::state::{
 };
 use crate::telemetry::{self, DictationFailureKind, TelemetryEvent};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 use tauri::Emitter;
 use tokio::time::sleep;
 
@@ -94,6 +97,12 @@ impl VoiceWaveController {
         if self.end_if_cancelled(run).await {
             return None;
         }
+        // Keeps Esc owned past the Inserted state (and the History write
+        // inside insert_text) until the Enter below is pressed or cancelled.
+        if submit_requested {
+            self.submit_pending_session
+                .store(session_id, Ordering::SeqCst);
+        }
 
         let insert_payload = InsertTextRequest {
             text: inserted_text.clone(),
@@ -163,13 +172,18 @@ impl VoiceWaveController {
                 "direct" => SUBMIT_DELAY_AFTER_TYPING_MS,
                 _ => 0,
             };
-            // The Inserted HUD state released Esc; own it again through the
-            // delay so Esc still cancels the Enter (cancel_dictation releases
-            // it), and give it back as soon as Enter is pressed.
-            self.set_hotkey_dictation_active(true).await;
             sleep(Duration::from_millis(delay_ms)).await;
             // The text already landed; a cancel still stops the Enter.
+            // cancel_dictation cleared the marker and released Esc; a
+            // replaced run only clears its own marker.
             if self.end_if_cancelled(run).await {
+                // Only this run's own marker: a stale run never clears a newer one.
+                let _ = self.submit_pending_session.compare_exchange(
+                    session_id,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
                 return None;
             }
             let outcome = self
@@ -177,7 +191,17 @@ impl VoiceWaveController {
                 .lock()
                 .await
                 .press_enter_after_insert();
-            self.set_hotkey_dictation_active(false).await;
+            let _ = self.submit_pending_session.compare_exchange(
+                session_id,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            // Esc is ours to give back only while the run still owns the
+            // session (a cancel during the Enter already released it).
+            if !self.end_if_cancelled(run).await {
+                self.set_hotkey_dictation_active(false).await;
+            }
             Some(outcome)
         } else {
             None

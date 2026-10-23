@@ -1319,6 +1319,10 @@ pub struct VoiceWaveController {
     // The last capture's audio while its transcription has failed; cleared
     // when a dictation succeeds and replaced by the next capture (plan 020).
     retained_capture: Mutex<Option<RetainedCapture>>,
+    // The session whose spoken "press enter" is still pending, 0 for none
+    // (ids start at 1). While set, the Inserted HUD state keeps Esc owned, so
+    // Esc still cancels the Enter through History and the paste delay.
+    submit_pending_session: AtomicU64,
 }
 
 impl VoiceWaveController {
@@ -1460,6 +1464,7 @@ impl VoiceWaveController {
             mic_profile_notice_sent: AtomicBool::new(false),
             gpu_notice_sent: AtomicBool::new(false),
             retained_capture: Mutex::new(None),
+            submit_pending_session: AtomicU64::new(0),
         })
     }
 
@@ -2009,6 +2014,7 @@ impl VoiceWaveController {
             // A cancelled session may be replaced immediately. Never let the
             // old task clear the replacement session's token or stop flag.
             if still_owns_session {
+                controller.submit_pending_session.store(0, Ordering::SeqCst);
                 controller.set_hotkey_dictation_active(false).await;
                 let mut token_slot = controller.cancel_token.lock().await;
                 *token_slot = None;
@@ -2225,6 +2231,7 @@ impl VoiceWaveController {
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
         }
+        self.submit_pending_session.store(0, Ordering::SeqCst);
         self.set_hotkey_dictation_active(false).await;
         self.stop_mic_level_monitor().await;
 
@@ -4144,10 +4151,14 @@ impl VoiceWaveController {
         };
 
         let _ = previous_state;
-        if matches!(
-            state,
-            VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
-        ) {
+        let release_esc = match state {
+            VoiceWaveHudState::Idle | VoiceWaveHudState::Error => true,
+            // A pending spoken Enter keeps Esc until insert_transcript
+            // presses it or the user cancels.
+            VoiceWaveHudState::Inserted => self.submit_pending_session.load(Ordering::SeqCst) == 0,
+            _ => false,
+        };
+        if release_esc {
             self.set_hotkey_dictation_active(false).await;
         }
         // Hotkey cues intentionally do NOT play here: state transitions lag
