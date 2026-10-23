@@ -47,7 +47,7 @@ pub(super) struct FormattedText {
 
 impl VoiceWaveController {
     /// Splits off a trailing "press enter" (plan 020). On its own it presses
-    /// Enter and returns `None`, ending the flow.
+    /// Enter (unless the user cancelled) and returns `None`, ending the flow.
     pub(super) async fn apply_submit_command(
         &self,
         run: &DictationRun,
@@ -93,6 +93,9 @@ impl VoiceWaveController {
                 None
             } else {
                 return_focus_for_retry(retry_audio.as_ref()).await;
+                if self.end_if_cancelled(run).await {
+                    return None;
+                }
                 Some(self.insertion_engine.lock().await.press_enter_now())
             };
             self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)

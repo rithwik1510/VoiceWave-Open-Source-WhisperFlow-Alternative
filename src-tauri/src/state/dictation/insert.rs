@@ -48,13 +48,15 @@ pub(super) struct Insertion {
 impl VoiceWaveController {
     /// Never fails: an insertion error moves the HUD and session to Error and
     /// comes back as `success: false`, so the transcript is still rescued.
+    /// `None` means the user cancelled before the text went in or before
+    /// its Enter, and the session has ended.
     pub(super) async fn insert_transcript(
         &self,
         run: &DictationRun,
         delivery: &Delivery,
         text: &FormattedText,
         spoken: &SpokenText,
-    ) -> Insertion {
+    ) -> Option<Insertion> {
         let DictationRun {
             ref app,
             session_id,
@@ -88,6 +90,9 @@ impl VoiceWaveController {
         let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
 
         return_focus_for_retry(retry_audio.as_ref()).await;
+        if self.end_if_cancelled(run).await {
+            return None;
+        }
 
         let insert_payload = InsertTextRequest {
             text: inserted_text.clone(),
@@ -155,6 +160,10 @@ impl VoiceWaveController {
                 _ => 0,
             };
             sleep(Duration::from_millis(delay_ms)).await;
+            // The text already landed; a cancel still stops the Enter.
+            if self.end_if_cancelled(run).await {
+                return None;
+            }
             Some(
                 self.insertion_engine
                     .lock()
@@ -195,7 +204,7 @@ impl VoiceWaveController {
                 *correction_session = None;
             }
         }
-        Insertion {
+        Some(Insertion {
             success: insertion_success,
             method: insertion_method,
             target_class: insertion_target_class,
@@ -207,7 +216,7 @@ impl VoiceWaveController {
             post_started,
             post_before_insert_ms,
             insert_ms,
-        }
+        })
     }
 }
 

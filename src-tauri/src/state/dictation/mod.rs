@@ -60,7 +60,8 @@ impl VoiceWaveController {
     /// 6. record: latency/stats/diagnostics, History rescue, dictionary queue
     ///
     /// A phase that returns `None` has already ended the session (cancelled,
-    /// nothing heard, Enter only) and the flow returns `Ok(())`. Errors go to
+    /// nothing heard, Enter only) and the flow returns `Ok(())`. Delivery
+    /// re-checks for a cancel before inserting and before any Enter. Errors go to
     /// the caller, which shows them and offers Try again when audio was kept.
     pub(super) async fn run_dictation_flow(
         &self,
@@ -124,9 +125,12 @@ impl VoiceWaveController {
             return Ok(());
         };
         let mut delivery = resolve_delivery(&run, &text, &spoken, &transcription).await;
-        let insertion = self
+        let Some(insertion) = self
             .insert_transcript(&run, &delivery, &text, &spoken)
-            .await;
+            .await
+        else {
+            return Ok(());
+        };
         self.spawn_background_polish(&run, &text, &insertion, delivery.late_polish_handle.take());
         announce_insertion(
             &run,
@@ -146,5 +150,34 @@ impl VoiceWaveController {
         self.record_dictation(&run, &capture, transcription, &text, delivery, insertion)
             .await;
         Ok(())
+    }
+
+    /// Checked right before text goes in and before every Enter, after any
+    /// wait: a cancel (Esc, `cancel_dictation`) can land during the polish
+    /// attempt or the paste-to-Enter delay. A cancelled run, or one whose
+    /// session was replaced, ends like every other cancel: nothing typed, no
+    /// Enter, Idle. True when the run has ended.
+    async fn end_if_cancelled(&self, run: &DictationRun) -> bool {
+        let owns_session = self
+            .active_session
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|session| session.session_id == run.session_id);
+        if owns_session && !run.cancel_token.is_cancelled() {
+            return false;
+        }
+        // A replaced session owns the HUD now; leave it alone.
+        if owns_session {
+            self.set_session_state(run.session_id, DictationLifecycleState::Idle, None, None)
+                .await;
+            self.update_state(
+                &run.app,
+                VoiceWaveHudState::Idle,
+                Some("Dictation cancelled.".to_string()),
+            )
+            .await;
+        }
+        true
     }
 }
