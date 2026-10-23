@@ -1,5 +1,12 @@
 import TelemetryDeck from "@telemetrydeck/sdk";
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
+import type {
+  DictationFailureKind,
+  PanicArea,
+  TelemetryEvent,
+  WorkerExit,
+  WorkerKind
+} from "../types/voicewave";
 
 const INSTALLATION_ID_KEY = "voicewave.analytics.installation-id";
 const ACTIVATED_KEY = "voicewave.analytics.activated";
@@ -12,10 +19,14 @@ export const ANALYTICS_CONSENT_VERSION = 1;
 /** The in-app answer to "what does the anonymous usage count send?". Keep it
  * in step with the events below whenever one is added or changed. */
 export const ANONYMOUS_USAGE_DETAILS =
-  "A random install ID, the app version, a first-use marker and a once-a-day active marker, plus setup " +
-  "progress, whether your first dictation ran on the graphics card or the processor, model download " +
-  "failures, and graphics-card-to-processor fallbacks. Never audio, transcripts, dictionary or snippet " +
-  "content, account identity, filenames, or settings.";
+  "A random install ID, the app version, a first-use marker and a once-a-day active marker, a once-a-day " +
+  "app-launch marker and whether the app started with Windows, setup progress, whether your first " +
+  "dictation ran on the graphics card or the processor, model download failures, graphics-card-to-processor " +
+  "fallbacks, the type of a failed dictation (for example no microphone or a timeout), the type of a speech " +
+  "helper crash, and which part of the app hit an internal error. Each comes with whether speech runs on " +
+  "the graphics card or the processor, the speech model family, the graphics card maker, and Windows 10 or " +
+  "11. Never audio, transcripts, error messages, dictionary or snippet content, account identity, device " +
+  "names, filenames, or settings.";
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";
 
 type SignalClient = {
@@ -29,6 +40,8 @@ type AnonymousUsageDependencies = {
   randomUUID: () => string;
   getAppVersion: () => Promise<string>;
   createClient: (appId: string, installationId: string) => SignalClient;
+  /** Context keys added to every signal, read at send time. */
+  getContext: () => Record<string, string>;
 };
 
 export type AnonymousUsageResult = {
@@ -38,9 +51,9 @@ export type AnonymousUsageResult = {
 };
 
 /**
- * Setup and reliability funnel. Each event carries exactly one enum value on
- * top of the base payload (app version + channel) — never transcript text,
- * error messages, paths, or device names.
+ * Setup and reliability funnel. Each event carries its own enum parameters on
+ * top of the base payload (app version, channel, and the registered context)
+ * — never transcript text, error messages, paths, or device names.
  */
 export type FunnelEvent =
   | { type: "Onboarding.stepReached"; step: "welcome" | "mic" | "speak" | "done" }
@@ -50,11 +63,17 @@ export type FunnelEvent =
   | {
       type: "Speech.gpuStepDown";
       reason: "preparing" | "cooldown" | "driver-disabled" | "unavailable" | "fault";
-    };
+    }
+  | { type: "App.launchedDaily"; launchMode: "autostart" | "manual" }
+  | { type: "Dictation.failed"; failureKind: DictationFailureKind }
+  | { type: "Speech.workerCrashed"; worker: WorkerKind; exit: WorkerExit }
+  | { type: "App.panicked"; area: PanicArea };
 
 export type SpeechModelKind = "speech-gpu" | "speech-cpu";
 
 let activeClient: { installationId: string; client: SignalClient } | null = null;
+/** Set by `useVoiceWave` via `setTelemetryContextProvider`; no extra keys until then. */
+let contextProvider: () => Record<string, string> = () => ({});
 // Every send runs through one queue so a check-then-mark dedupe can never
 // race a second copy of the same event (e.g. a model failure reported by both
 // the event stream and the failed command).
@@ -108,8 +127,16 @@ function defaultDependencies(): AnonymousUsageDependencies {
       });
       activeClient = { installationId, client };
       return client;
-    }
+    },
+    getContext: () => contextProvider()
   };
+}
+
+/** Registers the context (speech path, model family, GPU vendor, Windows
+ * major) merged into every signal. Called at send time, so it should read
+ * live state. */
+export function setTelemetryContextProvider(provider: () => Record<string, string>): void {
+  contextProvider = provider;
 }
 
 function getOrCreateInstallationId(dependencies: AnonymousUsageDependencies): string {
@@ -123,12 +150,14 @@ function getOrCreateInstallationId(dependencies: AnonymousUsageDependencies): st
   return installationId;
 }
 
-/** The client plus the payload every signal shares (app version + channel). */
+/** The client plus the payload every signal shares (context, app version,
+ * channel). */
 async function prepareSignal(dependencies: AnonymousUsageDependencies) {
   const installationId = getOrCreateInstallationId(dependencies);
   const client = dependencies.createClient(dependencies.appId, installationId);
   const appVersion = await dependencies.getAppVersion().catch(() => "unknown");
   const payload: Record<string, string> = {
+    ...dependencies.getContext(),
     "VoiceWave.App.version": appVersion,
     "VoiceWave.Distribution.channel": "github"
   };
@@ -190,41 +219,53 @@ export function trackAnonymousUsage(
   return enqueue(() => sendAnonymousUsage(optedIn, dependencies));
 }
 
-/** The single parameter an event carries, and how often it may be sent:
- * once per install, once per UTC day, or once per app session. `slot` names
- * the dedupe bucket (e.g. one per onboarding step, one for completion). */
+/** The parameters an event carries, and how often it may be sent: once per
+ * install, once per UTC day, or once per app session. `slot` names the dedupe
+ * bucket (e.g. one per onboarding step, one per failure kind). */
 function describeFunnelEvent(event: FunnelEvent): {
-  parameter: string;
-  value: string;
+  params: Record<string, string>;
   once: "install" | "utc-day" | "session";
   slot: string;
 } {
   switch (event.type) {
     case "Onboarding.stepReached":
       return {
-        parameter: "VoiceWave.Onboarding.step",
-        value: event.step,
+        params: { "VoiceWave.Onboarding.step": event.step },
         once: "install",
         slot: `${event.type}.${event.step}`
       };
     case "Onboarding.completed":
-      return { parameter: "VoiceWave.Onboarding.outcome", value: event.outcome, once: "install", slot: event.type };
+      return { params: { "VoiceWave.Onboarding.outcome": event.outcome }, once: "install", slot: event.type };
     case "Dictation.firstSuccess":
-      return { parameter: "VoiceWave.Dictation.engine", value: event.engine, once: "install", slot: event.type };
+      return { params: { "VoiceWave.Dictation.engine": event.engine }, once: "install", slot: event.type };
     case "Model.downloadFailed":
       return {
-        parameter: "VoiceWave.Model.kind",
-        value: event.model,
+        params: { "VoiceWave.Model.kind": event.model },
         once: "utc-day",
         slot: `${event.type}.${event.model}`
       };
     case "Speech.gpuStepDown":
       return {
-        parameter: "VoiceWave.Speech.stepDownReason",
-        value: event.reason,
+        params: { "VoiceWave.Speech.stepDownReason": event.reason },
         once: "session",
         slot: `${event.type}.${event.reason}`
       };
+    case "App.launchedDaily":
+      return { params: { "VoiceWave.App.launchMode": event.launchMode }, once: "utc-day", slot: event.type };
+    case "Dictation.failed":
+      return {
+        params: { "VoiceWave.Dictation.failureKind": event.failureKind },
+        once: "utc-day",
+        slot: `${event.type}.${event.failureKind}`
+      };
+    case "Speech.workerCrashed":
+      return {
+        params: { "VoiceWave.Worker.kind": event.worker, "VoiceWave.Worker.exit": event.exit },
+        once: "session",
+        slot: `${event.type}.${event.worker}+${event.exit}`
+      };
+    case "App.panicked":
+      return { params: { "VoiceWave.Panic.area": event.area }, once: "utc-day", slot: `${event.type}.${event.area}` };
   }
 }
 
@@ -238,7 +279,7 @@ async function sendFunnelEvent(
     return false;
   }
 
-  const { parameter, value, once, slot } = describeFunnelEvent(event);
+  const { params, once, slot } = describeFunnelEvent(event);
   const storageKey = `${FUNNEL_KEY_PREFIX}${slot}`;
   if (event.type === "Dictation.firstSuccess" && snapshotActivation(storage)) {
     storage.setItem(storageKey, "1");
@@ -252,7 +293,7 @@ async function sendFunnelEvent(
   }
 
   const { client, payload } = await prepareSignal(dependencies);
-  const response = await client.signal(event.type, { ...payload, [parameter]: value });
+  const response = await client.signal(event.type, { ...payload, ...params });
   if (!response.ok) {
     return false;
   }
@@ -291,6 +332,33 @@ export function speechModelKind(modelId: string): SpeechModelKind | null {
   return null;
 }
 
+/** The `VoiceWave.Speech.modelFamily` context value for an active model id. */
+export function speechModelFamily(modelId: string): "parakeet" | "turbo" | "small" | "other" | "none" {
+  if (!modelId) {
+    return "none";
+  }
+  if (modelId.includes("parakeet")) {
+    return "parakeet";
+  }
+  if (modelId.includes("turbo")) {
+    return "turbo";
+  }
+  return modelId.includes("small") ? "small" : "other";
+}
+
+/** Maps a fact drained from the backend queue (`drain_telemetry`) to the
+ * funnel event that reports it. */
+export function funnelEventFromTelemetry(event: TelemetryEvent): FunnelEvent {
+  switch (event.type) {
+    case "dictation-failed":
+      return { type: "Dictation.failed", failureKind: event.kind };
+    case "worker-crashed":
+      return { type: "Speech.workerCrashed", worker: event.worker, exit: event.exit };
+    case "panicked":
+      return { type: "App.panicked", area: event.area };
+  }
+}
+
 /**
  * Buckets the backend's `asrStepDownReason` (prefixes from
  * src-tauri/src/inference/asr_worker.rs `primary_rung_blocking`). A GPU fault
@@ -319,6 +387,7 @@ export function classifyGpuStepDown(
 
 export function resetAnonymousUsageForTests(): void {
   activeClient = null;
+  contextProvider = () => ({});
   sendQueue = Promise.resolve();
   sessionFunnelKeys.clear();
   activatedBeforeLaunch = null;

@@ -7,6 +7,7 @@ import {
   canUseTauri,
   clearHistory,
   downloadModel,
+  drainTelemetry,
   exportDiagnosticsBundle as exportDiagnosticsBundleCommand,
   exportDictionary as exportDictionaryCommand,
   exportSessionHistoryPreset,
@@ -20,6 +21,7 @@ import {
   getPermissionSnapshot,
   getRecentInsertions,
   getSessionHistory,
+  getSupportContext,
   insertText,
   listenVoicewaveAudioQuality,
   listenVoicewaveHistoryUpdated,
@@ -30,6 +32,7 @@ import {
   listenVoicewavePermission,
   listenVoicewaveSettingsChanged,
   listenVoicewaveState,
+  listenVoicewaveTelemetryPending,
   listenVoicewaveTranscript,
   listInstalledModels,
   listInputDevices,
@@ -89,6 +92,9 @@ import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "
 import {
   ANALYTICS_CONSENT_VERSION,
   classifyGpuStepDown,
+  funnelEventFromTelemetry,
+  setTelemetryContextProvider,
+  speechModelFamily,
   speechModelKind,
   trackAnonymousUsage,
   trackFunnelEvent
@@ -130,6 +136,7 @@ import type {
   HistoryExportPreset,
   HistoryExportResult,
   SessionHistoryRecord,
+  SupportContext,
   LatencyBreakdownEvent,
   VoiceWaveHudState,
   VoiceSnippet,
@@ -559,6 +566,9 @@ export function useVoiceWave() {
   const [settings, setSettings] = useState<VoiceWaveSettings>(fallbackSettings);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  // Real settings arrived from the backend: the fallback has usage counting
+  // on, so telemetry must not send (or drop) anything before this.
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [hotkeys, setHotkeys] = useState<HotkeySnapshot>(fallbackHotkeys);
   const [permissions, setPermissions] = useState<PermissionSnapshot>(fallbackPermissions);
   const [inputDevices, setInputDevices] = useState<string[]>([]);
@@ -590,6 +600,9 @@ export function useVoiceWave() {
   // follows it says which engine actually decoded (funnel firstSuccess).
   const firstSuccessPendingRef = useRef(false);
   const [speechEngine, setSpeechEngine] = useState<SpeechEngineStatus | null>(null);
+  const speechEngineRef = useRef(speechEngine);
+  speechEngineRef.current = speechEngine;
+  const supportContextRef = useRef<SupportContext | null>(null);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkRun | null>(null);
   const [modelRecommendation, setModelRecommendation] = useState<ModelRecommendation | null>(null);
   const [modelSpeeds, setModelSpeeds] = useState<Record<string, number>>({});
@@ -2324,6 +2337,7 @@ export function useVoiceWave() {
         });
         setSnapshot(loadedSnapshot);
         setSettings(safeLoadedSettings);
+        setSettingsLoaded(true);
         setDiagnosticsStatus(diagnostics);
         setHotkeys(loadedHotkeys);
         setPermissions(permissionSnapshot);
@@ -2472,6 +2486,88 @@ export function useVoiceWave() {
       }
     };
   }, [refreshPhase3Data, refreshRecentInsertions, refreshSessionHistory, settings.activeModel, tauriAvailable]);
+
+  // Context on every usage signal, read at send time through refs so it is
+  // never stale. Fixed categories only (see ANONYMOUS_USAGE_DETAILS).
+  useEffect(() => {
+    setTelemetryContextProvider(() => {
+      const engine = speechEngineRef.current;
+      const osVersion = supportContextRef.current?.osVersion ?? "";
+      return {
+        "VoiceWave.Speech.path": engine?.runningOn?.device ?? (engine?.preparing ? "preparing" : "none"),
+        "VoiceWave.Speech.modelFamily": speechModelFamily(settingsRef.current.activeModel),
+        "VoiceWave.Gpu.vendor": engine?.gpuVendor ?? "none",
+        "VoiceWave.Os.major": osVersion.startsWith("Windows 11")
+          ? "11"
+          : osVersion.startsWith("Windows 10")
+            ? "10"
+            : "other"
+      };
+    });
+  }, []);
+
+  // Plan 022: the daily launch marker, plus the backend's queued failure,
+  // crash, and panic facts. Draining always clears the queue; while usage
+  // counting is off the drained facts are simply dropped (trackFunnelEvent's
+  // gate), so the queue never fills.
+  useEffect(() => {
+    if (!tauriAvailable || !settingsLoaded) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let launchTimer: number | undefined;
+
+    const drain = () => {
+      void drainTelemetry()
+        .then((events) => {
+          const optedIn = settingsRef.current.anonymousUsageOptIn;
+          for (const event of events) {
+            void trackFunnelEvent(optedIn, funnelEventFromTelemetry(event)).catch(() => undefined);
+          }
+        })
+        .catch(() => undefined);
+    };
+
+    void (async () => {
+      try {
+        supportContextRef.current = await getSupportContext();
+      } catch {
+        // Context falls back to "other"; the launch marker needs it, so skip.
+      }
+      if (disposed) {
+        return;
+      }
+      const context = supportContextRef.current;
+      if (context) {
+        const launchMode = context.launchedAtLogin ? "autostart" : "manual";
+        // Deduped once per UTC day; the hourly re-check covers an app left
+        // running past midnight.
+        const trackLaunch = () =>
+          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
+            type: "App.launchedDaily",
+            launchMode
+          }).catch(() => undefined);
+        trackLaunch();
+        launchTimer = window.setInterval(trackLaunch, 60 * 60 * 1000);
+      }
+
+      // Listen before the first drain so nothing queued in between is missed.
+      const stop = await listenVoicewaveTelemetryPending(drain);
+      if (disposed) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+      drain();
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.clearInterval(launchTimer);
+    };
+  }, [settingsLoaded, tauriAvailable]);
 
   useEffect(() => {
     return () => {

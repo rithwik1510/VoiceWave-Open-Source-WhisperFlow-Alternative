@@ -259,7 +259,39 @@ export interface SupportContext {
   appVersion: string;
   osVersion: string;
   logDir: string;
+  /** This process was started with `--autostart` (Windows sign-in). */
+  launchedAtLogin: boolean;
 }
+
+/** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
+ * never messages, paths, or user text. Mirrors src-tauri/src/telemetry.rs. */
+export type DictationFailureKind =
+  | "setup"
+  | "mic-missing"
+  | "mic-open"
+  | "engine-start"
+  | "timeout"
+  | "transcription"
+  | "empty-result"
+  | "insert"
+  | "no-speech"
+  | "other";
+export type WorkerKind = "asr-gpu" | "asr-cpu" | "faster-whisper" | "polish";
+export type WorkerExit = "crash" | "timeout" | "spawn-failed";
+export type PanicArea =
+  | "state"
+  | "inference"
+  | "audio"
+  | "insertion"
+  | "hotkey"
+  | "models"
+  | "settings"
+  | "other"
+  | "dependency";
+export type TelemetryEvent =
+  | { type: "dictation-failed"; kind: DictationFailureKind }
+  | { type: "worker-crashed"; worker: WorkerKind; exit: WorkerExit }
+  | { type: "panicked"; area: PanicArea };
 
 export interface DiagnosticsExportResult {
   filePath: string;
@@ -448,6 +480,8 @@ export interface SpeechEngineStatus {
   cpuSupport: "full" | "noAvx2" | "unsupported";
   /** The graphics card dictation uses, on machines that have one that qualifies. */
   gpuName: string | null;
+  /** Graphics vendor from the PCI vendor id; null with no graphics card. */
+  gpuVendor: "nvidia" | "amd" | "intel" | "other" | null;
   recommendedModelId: string;
   /** Where the active model runs, as the speech worker reported it; null
    * while the one-time graphics card check runs or is about to. */

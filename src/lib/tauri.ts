@@ -50,6 +50,7 @@ import type {
   SessionHistoryRecord,
   StatsSummary,
   SupportContext,
+  TelemetryEvent,
   TranscriptEvent,
   UndoResult,
   VoiceWaveSettings,
@@ -278,6 +279,16 @@ export async function listenVoicewaveHistoryUpdated(callback: () => void): Promi
   return listen("voicewave://history-updated", () => callback());
 }
 
+/** Fired by the backend whenever it queues a telemetry fact; the payload is
+ * empty, so drain with `drainTelemetry`. */
+export async function listenVoicewaveTelemetryPending(callback: () => void): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://telemetry-pending", () => callback());
+}
+
 export function canUseTauri(): boolean {
   return isTauriRuntime();
 }
@@ -375,10 +386,23 @@ export async function getSupportContext(): Promise<SupportContext> {
   return invokeVoicewave<SupportContext>("get_support_context");
 }
 
-/** Opens a pre-filled GitHub issue form in the browser. `engine` is a short
- * speech-engine summary (device, engine, model id) — never user text. */
+/** Opens a pre-filled GitHub issue form in the browser, with the diagnostics
+ * report in its `diagnostics` field. `engine` is a short speech-engine
+ * summary (device, engine, model id) — never user text. */
 export async function openIssueReport(engine: string): Promise<void> {
   await invokeVoicewave<void>("open_issue_report", { engine });
+}
+
+/** Plain-text diagnostics (versions, speech engine, mic, recent warnings);
+ * never audio or dictated text. Also what `openIssueReport` attaches. */
+export async function getDiagnosticsReport(): Promise<string> {
+  return invokeVoicewave<string>("get_diagnostics_report");
+}
+
+/** Returns and clears the backend's queued telemetry facts, including a panic
+ * recorded by the previous run. */
+export async function drainTelemetry(): Promise<TelemetryEvent[]> {
+  return invokeVoicewave<TelemetryEvent[]>("drain_telemetry");
 }
 
 export async function openLogsFolder(): Promise<void> {
