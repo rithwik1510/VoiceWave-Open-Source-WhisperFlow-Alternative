@@ -14,6 +14,7 @@ use crate::state::{
     VoiceWaveController, VoiceWaveHudState, CORRECTION_SESSION_WINDOW_MS,
     HANDS_FREE_MAX_CAPTURE_MS, SUBMIT_DELAY_AFTER_PASTE_MS, SUBMIT_DELAY_AFTER_TYPING_MS,
 };
+use crate::telemetry::{self, DictationFailureKind, TelemetryEvent};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -139,6 +140,12 @@ impl VoiceWaveController {
             }
         };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
+        // An elevated target's clipboard-only fallback counts as a success.
+        if !insertion_success {
+            telemetry::record(TelemetryEvent::DictationFailed {
+                kind: DictationFailureKind::Insert,
+            });
+        }
         // Spoken submit: Enter goes only into the window that received the
         // text, after the paste has had time to land (see the delay consts).
         let submit_outcome = if submit_requested {

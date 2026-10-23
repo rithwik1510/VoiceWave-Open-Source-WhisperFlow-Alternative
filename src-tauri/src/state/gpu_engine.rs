@@ -9,7 +9,8 @@ use crate::inference::{
     asr_engine_view,
     gpu_select::{
         clear_pending_upgrade, driver_disabled, hardware_profile_async, model_tier,
-        pending_upgrade, CpuSupport, HardwareProfile, ModelTier, QualOutcome, PARAKEET_MODEL_ID,
+        pending_upgrade, CpuSupport, GpuVendor, HardwareProfile, ModelTier, QualOutcome,
+        PARAKEET_MODEL_ID,
     },
     is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model, qualify_gpu, AsrRung,
     RunningOn,
@@ -38,6 +39,8 @@ pub struct SpeechEngineStatus {
     pub cpu_support: CpuSupport,
     /// The GPU dictation uses on GPU-path machines.
     pub gpu_name: Option<String>,
+    /// That GPU's maker; `None` without one.
+    pub gpu_vendor: Option<GpuVendor>,
     pub recommended_model_id: String,
     /// Where the active model runs, from the worker's own report once it has
     /// decoded. `None` while the one-time GPU check runs or is due.
@@ -138,6 +141,7 @@ impl VoiceWaveController {
         SpeechEngineStatus {
             cpu_support: hardware.cpu,
             gpu_name: hardware.gpu.as_ref().map(|device| device.name.clone()),
+            gpu_vendor: hardware.gpu.as_ref().map(|device| device.vendor()),
             recommended_model_id: hardware.recommended_model_id().to_string(),
             running_on,
             preparing,

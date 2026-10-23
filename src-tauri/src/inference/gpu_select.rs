@@ -75,6 +75,16 @@ fn detect_cpu_support() -> CpuSupport {
     CpuSupport::Full
 }
 
+/// GPU maker from the PCI vendor id (telemetry and diagnostics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Other,
+}
+
 /// A GPU the Vulkan worker can decode on, from its `--list-devices` report.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +102,16 @@ pub struct GpuDevice {
 }
 
 impl GpuDevice {
+    pub fn vendor(&self) -> GpuVendor {
+        match self.vendor_id {
+            0x10DE => GpuVendor::Nvidia,
+            // 0x1002 (ex-ATI, the usual one) and AMD's own 0x1022.
+            0x1002 | 0x1022 => GpuVendor::Amd,
+            0x8086 => GpuVendor::Intel,
+            _ => GpuVendor::Other,
+        }
+    }
+
     /// Persistent identity: survives reboots (LUIDs do not) and tells two
     /// identical cards apart (UUID).
     pub fn identity(&self) -> String {

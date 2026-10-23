@@ -19,8 +19,12 @@ mod secure_store;
 pub mod settings;
 pub mod snippet;
 pub mod stats;
-#[cfg(feature = "desktop")]
+// Not desktop-gated: the inference workers record telemetry and redact
+// paths with these.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod support;
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod telemetry;
 pub mod transcript;
 
 #[cfg(feature = "desktop")]
@@ -1172,6 +1176,13 @@ struct SupportContext {
     app_version: String,
     os_version: String,
     log_dir: String,
+    launched_at_login: bool,
+}
+
+/// This process was started by the "Start with Windows" Run-key entry.
+#[cfg(feature = "desktop")]
+fn launched_at_login() -> bool {
+    std::env::args().any(|arg| arg == AUTOSTART_ARG)
 }
 
 #[cfg(feature = "desktop")]
@@ -1183,17 +1194,72 @@ fn get_support_context() -> SupportContext {
         log_dir: support::log_dir()
             .map(|dir| dir.display().to_string())
             .unwrap_or_default(),
+        launched_at_login: launched_at_login(),
     }
 }
 
-/// Opens the prefilled GitHub bug form in the default browser. The frontend
-/// only supplies the engine label; the URL itself is built from fixed parts.
+/// Gathers the diagnostics report's setup facts (see
+/// `support::DiagnosticsReport`).
+#[cfg(feature = "desktop")]
+async fn diagnostics_report(controller: &VoiceWaveController) -> support::DiagnosticsReport {
+    use inference::gpu_select::{CpuSupport, QualOutcome};
+
+    let settings = controller.load_settings().await;
+    let engine = controller.speech_engine_status().await;
+    let model_installed = controller
+        .list_installed_models()
+        .await
+        .iter()
+        .any(|row| row.model_id == settings.active_model);
+    let running_on = match &engine.running_on {
+        _ if engine.preparing => "preparing (one-time graphics card check)".to_string(),
+        Some(running) if running.device == inference::AsrRung::Gpu => "GPU".to_string(),
+        Some(_) => "processor".to_string(),
+        None => "unknown".to_string(),
+    };
+    let gpu_check = match (&engine.gpu_name, engine.qualification) {
+        (None, _) => "no GPU",
+        (_, Some(QualOutcome::Passed)) => "passed",
+        (_, Some(QualOutcome::Failed)) => "failed",
+        (_, Some(QualOutcome::Retry)) => "retrying next launch",
+        (_, None) => "not run",
+    };
+    support::DiagnosticsReport::new(&support::DiagnosticsFacts {
+        launched_at_login: launched_at_login(),
+        cpu_support: match engine.cpu_support {
+            CpuSupport::Full => "full",
+            CpuSupport::NoAvx2 => "no AVX2 (faster-whisper models only)",
+            CpuSupport::Unsupported => "unsupported",
+        },
+        active_model: settings.active_model,
+        model_installed,
+        running_on,
+        gpu_name: engine.gpu_name,
+        gpu_check,
+        microphone: settings.input_device,
+        hotkey: settings.push_to_talk_hotkey,
+    })
+}
+
+/// Plain-text diagnostics for "Copy diagnostics" and the issue form.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn open_issue_report(engine: String) -> Result<(), String> {
-    let url = support::issue_report_url(&engine)?;
-    support::shell_open(url.as_ref())
-        .map_err(|err| format!("failed to open the issue form: {err}"))
+async fn get_diagnostics_report(runtime: State<'_, RuntimeContext>) -> Result<String, String> {
+    Ok(diagnostics_report(&runtime.controller).await.text())
+}
+
+/// Opens the prefilled GitHub bug form in the default browser. The frontend
+/// only supplies the engine label; the URL itself is built from fixed parts
+/// plus the diagnostics report.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn open_issue_report(
+    engine: String,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
+    let report = diagnostics_report(&runtime.controller).await;
+    let url = support::issue_report_url(&engine, &report)?;
+    support::shell_open(url.as_ref()).map_err(|err| format!("failed to open the issue form: {err}"))
 }
 
 #[cfg(feature = "desktop")]
@@ -2350,7 +2416,8 @@ pub fn run() {
         .setup(|app| {
             // The main window is created hidden (tauri.conf.json) so a login
             // launch never flashes it. Normal launches show it straight away.
-            let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+            telemetry::attach(app.handle().clone());
+            let launched_at_login = launched_at_login();
             if !launched_at_login {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
@@ -2505,7 +2572,9 @@ pub fn run() {
             show_main_window,
             open_microphone_privacy_settings,
             get_support_context,
+            get_diagnostics_report,
             open_issue_report,
+            telemetry::drain_telemetry,
             open_logs_folder,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,

@@ -12,7 +12,9 @@ use crate::state::{
     asr_integrity_metrics, dictation_retry_instruction, emit_pill_notice, emit_submit_notice,
     return_focus_for_retry, should_reject_low_confidence_transcript_as_no_speech, ControllerError,
     DictationLifecycleState, DictationMode, VoiceWaveController, VoiceWaveHudState,
+    EMPTY_TRANSCRIPT_ERROR,
 };
+use crate::telemetry::{self, DictationFailureKind, TelemetryEvent};
 use crate::transcript::{
     finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
     split_trailing_submit_command, ProTranscriptOptions,
@@ -264,9 +266,7 @@ impl VoiceWaveController {
                     note_audio_pipeline_decode_hard_failure();
                 }
             }
-            return Err(ControllerError::Runtime(
-                "Inference finished without final transcript.".to_string(),
-            ));
+            return Err(ControllerError::Runtime(EMPTY_TRANSCRIPT_ERROR.to_string()));
         }
         if mode == DictationMode::Microphone
             && should_reject_low_confidence_transcript_as_no_speech(
@@ -276,6 +276,9 @@ impl VoiceWaveController {
                 decode_telemetry.fw_no_speech_prob,
             )
         {
+            telemetry::record(TelemetryEvent::DictationFailed {
+                kind: DictationFailureKind::NoSpeech,
+            });
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
             self.update_state(

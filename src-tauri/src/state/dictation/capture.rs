@@ -17,6 +17,7 @@ use crate::state::{
     RetainedAudio, RetainedCapture, VoiceWaveController, VoiceWaveHudState,
     HANDS_FREE_MAX_CAPTURE_MS, HANDS_FREE_SILENCE_TIMEOUT_MS, MAX_RELEASE_TAIL_MS,
 };
+use crate::telemetry::{self, DictationFailureKind, TelemetryEvent};
 use std::{
     sync::{atomic::Ordering, Arc, Mutex as StdMutex},
     time::{Duration, Instant},
@@ -310,6 +311,9 @@ impl VoiceWaveController {
             }
             Err(AudioError::NoSpeechDetected) => {
                 tracing::info!("capture ended with no speech (session={session_id})");
+                telemetry::record(TelemetryEvent::DictationFailed {
+                    kind: DictationFailureKind::NoSpeech,
+                });
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
                 let device_label = input_device.as_deref().unwrap_or("system default");

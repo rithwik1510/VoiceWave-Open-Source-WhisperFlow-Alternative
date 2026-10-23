@@ -22,6 +22,8 @@ use super::gpu_select::{
 };
 use super::InferenceError;
 use crate::settings::DecodeMode;
+use crate::support::redact_profile_dir;
+use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
 use flate2::{write::ZlibEncoder, Compression};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -291,6 +293,9 @@ enum Fault {
         class: ErrorClass,
         reason: String,
         timed_out: bool,
+        /// Telemetry: set where the worker died, hung or never came up;
+        /// `None` for an error the worker itself reported.
+        exit: Option<WorkerExit>,
     },
 }
 
@@ -300,6 +305,43 @@ impl Fault {
             class,
             reason: reason.into(),
             timed_out: false,
+            exit: None,
+        }
+    }
+
+    /// Any failure on the way to a ready worker is a failed start.
+    fn failed_start(self) -> Self {
+        match self {
+            Fault::Worker {
+                class,
+                reason,
+                timed_out,
+                ..
+            } => Fault::Worker {
+                class,
+                reason,
+                timed_out,
+                exit: Some(WorkerExit::SpawnFailed),
+            },
+            other => other,
+        }
+    }
+
+    /// Telemetry for a failure on the dictation or prewarm path. Never
+    /// called for qualification: failing there is the check doing its job.
+    fn record(&self, rung: Rung) {
+        if let Fault::Worker {
+            exit: Some(exit), ..
+        } = self
+        {
+            let worker = match rung {
+                Rung::Gpu => WorkerKind::AsrGpu,
+                Rung::Cpu => WorkerKind::AsrCpu,
+            };
+            telemetry::record(TelemetryEvent::WorkerCrashed {
+                worker,
+                exit: *exit,
+            });
         }
     }
 }
@@ -331,28 +373,6 @@ pub(crate) fn trim_reason(reason: &str) -> String {
     let mut trimmed: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
     trimmed.push('…');
     trimmed
-}
-
-/// `C:\Users\<name>` → `%USERPROFILE%`, ignoring ASCII case like Windows.
-fn redact_profile_dir(text: &str) -> String {
-    let needle = std::env::var("USERPROFILE")
-        .unwrap_or_default()
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase();
-    if needle.len() <= 3 {
-        return text.to_string();
-    }
-    // ASCII lowercasing keeps byte offsets, so they index `text` too.
-    let haystack = text.to_ascii_lowercase();
-    let mut redacted = String::with_capacity(text.len());
-    let mut at = 0;
-    while let Some(found) = haystack[at..].find(&needle) {
-        redacted.push_str(&text[at..at + found]);
-        redacted.push_str("%USERPROFILE%");
-        at += found + needle.len();
-    }
-    redacted.push_str(&text[at..]);
-    redacted
 }
 
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
@@ -437,6 +457,7 @@ impl WorkerProcess {
                 class: ErrorClass::Backend,
                 reason: format!("{} worker missed its {what} deadline", self.rung.dir_name()),
                 timed_out: true,
+                exit: Some(WorkerExit::Timeout),
             });
         }
         match self.responses.recv_timeout(POLL_SLICE.min(until - now)) {
@@ -449,14 +470,16 @@ impl WorkerProcess {
     fn exited(&self, what: &str) -> Fault {
         // Give the stderr drain a moment to capture the last lines.
         std::thread::sleep(Duration::from_millis(100));
-        Fault::worker(
-            ErrorClass::Backend,
-            format!(
+        Fault::Worker {
+            class: ErrorClass::Backend,
+            reason: format!(
                 "{} worker exited during {what}. stderr: {}",
                 self.rung.dir_name(),
                 self.stderr_text()
             ),
-        )
+            timed_out: false,
+            exit: Some(WorkerExit::Crash),
+        }
     }
 
     fn wait_ready(&mut self, deadline: Duration) -> Result<(), Fault> {
@@ -647,7 +670,15 @@ fn ensure_spawned(
         );
         *guard = None;
     }
-    *guard = Some(spawn(rung, ready_deadline)?);
+    // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
+    // it would crash on. A known hardware limit, not a failed start.
+    if cpu_support() != CpuSupport::Full {
+        return Err(Fault::worker(
+            ErrorClass::Backend,
+            "this processor lacks AVX2, which this speech model needs; choose a model in Models",
+        ));
+    }
+    *guard = Some(spawn(rung, ready_deadline).map_err(Fault::failed_start)?);
     Ok(())
 }
 
@@ -663,14 +694,6 @@ fn worker_command(exe: &Path) -> Command {
 }
 
 fn spawn(rung: Rung, ready_deadline: Duration) -> Result<WorkerProcess, Fault> {
-    // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
-    // it would crash on.
-    if cpu_support() != CpuSupport::Full {
-        return Err(Fault::worker(
-            ErrorClass::Backend,
-            "this processor lacks AVX2, which this speech model needs; choose a model in Models",
-        ));
-    }
     let exe = resolve_worker_exe(rung)?;
     let mut command = worker_command(&exe);
     command
@@ -948,6 +971,7 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
         class,
         reason,
         timed_out,
+        ..
     } = fault
     else {
         return;
@@ -1089,8 +1113,12 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
             started.elapsed().as_millis()
         ),
         Ok((_, true)) => {}
-        Err(fault) if rung == Rung::Gpu => note_gpu_fault(fault, true),
-        Err(_) => {}
+        Err(fault) => {
+            fault.record(rung);
+            if rung == Rung::Gpu {
+                note_gpu_fault(fault, true);
+            }
+        }
     }
     result.map(|_| Prewarm::Done)
 }
@@ -1185,6 +1213,11 @@ fn transcribe_blocking(
         },
     );
     if let Err(fault) = &result {
+        // A worker that missed its deadline while cancelling is the user's
+        // cancel, not a hang.
+        if !cancel.is_cancelled() {
+            fault.record(rung);
+        }
         if rung == Rung::Gpu {
             note_gpu_fault(fault, false);
         }
@@ -1326,6 +1359,7 @@ fn fault_verdict(fault: Fault, during_load: bool) -> Verdict {
             class: ErrorClass::Backend,
             timed_out: true,
             reason,
+            ..
         } if during_load => Verdict::Retry(format!("load ran past 120 s (driver still preparing): {reason}")),
         Fault::Worker {
             class: ErrorClass::Backend,

@@ -1,5 +1,6 @@
 use super::InferenceError;
 use crate::settings::DecodeMode;
+use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -651,14 +652,16 @@ fn exchange_with_worker(
     } else {
         worker_response_timeout().max(transcribe_timeout_for_audio(request))
     };
-    let line = match read_worker_response_line_with_timeout(worker, timeout) {
-        Ok(value) => value,
-        Err(err) => {
-            let _ = worker.child.kill();
-            let _ = worker.child.wait();
-            return Err(err);
-        }
-    };
+    // A download worker dies when the user cancels it: not a crash.
+    let line =
+        match read_worker_response_line_with_timeout(worker, timeout, !request.allow_download) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+                return Err(err);
+            }
+        };
 
     let response: WorkerResponse = match serde_json::from_str(line.trim()) {
         Ok(value) => value,
@@ -755,10 +758,20 @@ fn worker_prefetch_timeout() -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
+/// `record_crash`: report an exit or timeout to telemetry.
 fn read_worker_response_line_with_timeout(
     worker: &mut WorkerProcess,
     timeout: Duration,
+    record_crash: bool,
 ) -> Result<String, InferenceError> {
+    let record = |exit| {
+        if record_crash {
+            telemetry::record(TelemetryEvent::WorkerCrashed {
+                worker: WorkerKind::FasterWhisper,
+                exit,
+            });
+        }
+    };
     let stdout = worker
         .stdout
         .take()
@@ -780,6 +793,7 @@ fn read_worker_response_line_with_timeout(
         Ok(Ok((stdout, bytes, line))) => {
             worker.stdout = Some(stdout);
             if bytes == 0 {
+                record(WorkerExit::Crash);
                 return Err(InferenceError::RuntimeJoin(format!(
                     "faster-whisper worker exited unexpectedly. stderr: {}",
                     stderr_tail_text(&worker.stderr_tail, 8)
@@ -789,11 +803,13 @@ fn read_worker_response_line_with_timeout(
         }
         Ok(Err((stdout, err))) => {
             worker.stdout = Some(stdout);
+            record(WorkerExit::Crash);
             Err(InferenceError::RuntimeJoin(format!(
                 "worker stdout read failed: {err}"
             )))
         }
         Err(RecvTimeoutError::Timeout) => {
+            record(WorkerExit::Timeout);
             let timeout_ms = timeout.as_millis();
             let pid = worker.child.id();
             let _ = worker.child.kill();
@@ -803,6 +819,7 @@ fn read_worker_response_line_with_timeout(
             )))
         }
         Err(RecvTimeoutError::Disconnected) => {
+            record(WorkerExit::Crash);
             let _ = worker.child.kill();
             let _ = worker.child.wait();
             Err(InferenceError::RuntimeJoin(
@@ -827,7 +844,18 @@ fn ensure_worker<'a>(
     })
 }
 
+/// Starts a worker and waits for its ready line. Every failure (runtime
+/// missing, launch failed, no ready line) is recorded as a failed start.
 fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
+    start_worker().inspect_err(|_| {
+        telemetry::record(TelemetryEvent::WorkerCrashed {
+            worker: WorkerKind::FasterWhisper,
+            exit: WorkerExit::SpawnFailed,
+        });
+    })
+}
+
+fn start_worker() -> Result<WorkerProcess, InferenceError> {
     let worker_path = resolve_worker_path()?;
     let python = resolve_python_path()?;
     let hf_home = hf_home_dir();

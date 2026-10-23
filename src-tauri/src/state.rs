@@ -55,6 +55,7 @@ use crate::{
         VoiceSnippetSyncRecord,
     },
     stats::{StatsManager, StatsSummary},
+    telemetry::{self, DictationFailureKind, TelemetryEvent},
     transcript::sanitize_user_transcript,
 };
 use serde::{Deserialize, Serialize};
@@ -207,6 +208,9 @@ fn emit_pill_rescue(
         },
     );
 }
+
+/// The decode finished but left nothing to insert (post-process).
+const EMPTY_TRANSCRIPT_ERROR: &str = "Inference finished without final transcript.";
 
 /// What the pill says about a failed dictation (see
 /// `dictation_failure_notice`).
@@ -2014,6 +2018,9 @@ impl VoiceWaveController {
                     );
                     return;
                 }
+                telemetry::record(TelemetryEvent::DictationFailed {
+                    kind: Self::failure_kind(&err),
+                });
                 // The pill's error color-flash carries no text; the notice is
                 // the only place the user actually learns what went wrong.
                 let FailureNotice {
@@ -2134,6 +2141,41 @@ impl VoiceWaveController {
             title,
             detail: detail.to_string(),
             retry,
+        }
+    }
+
+    /// Telemetry class of a failed dictation: the arms of
+    /// `dictation_failure_notice` (plus the stream errors it shows raw);
+    /// keep the two in step.
+    fn failure_kind(err: &ControllerError) -> DictationFailureKind {
+        match err {
+            ControllerError::MissingModel(_) => DictationFailureKind::Setup,
+            ControllerError::Audio(
+                AudioError::MissingInputDevice | AudioError::DeviceNotFound(_),
+            ) => DictationFailureKind::MicMissing,
+            ControllerError::Audio(
+                AudioError::Devices(_)
+                | AudioError::DefaultInputConfig(_)
+                | AudioError::BuildStream(_)
+                | AudioError::PlayStream(_)
+                | AudioError::RuntimeStream(_)
+                | AudioError::UnsupportedSampleFormat(_),
+            ) => DictationFailureKind::MicOpen,
+            ControllerError::Audio(AudioError::NoSpeechDetected) => DictationFailureKind::NoSpeech,
+            ControllerError::Runtime(message)
+                if message.starts_with("Faster-Whisper runtime")
+                    || message.starts_with("Faster-Whisper warmup") =>
+            {
+                DictationFailureKind::EngineStart
+            }
+            ControllerError::Runtime(message) if message.contains("timed out") => {
+                DictationFailureKind::Timeout
+            }
+            ControllerError::Runtime(message) if message == EMPTY_TRANSCRIPT_ERROR => {
+                DictationFailureKind::EmptyResult
+            }
+            ControllerError::Runtime(_) => DictationFailureKind::Transcription,
+            _ => DictationFailureKind::Other,
         }
     }
 
