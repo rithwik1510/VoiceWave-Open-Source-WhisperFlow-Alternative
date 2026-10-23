@@ -1323,6 +1323,10 @@ pub struct VoiceWaveController {
     // (ids start at 1). While set, the Inserted HUD state keeps Esc owned, so
     // Esc still cancels the Enter through History and the paste delay.
     submit_pending_session: AtomicU64,
+    // Held by start admission (through the Listening state) and by the whole
+    // of cancel_dictation, so a cancel never tears down, or sets Idle over,
+    // a session that started while it ran.
+    lifecycle_gate: Mutex<()>,
 }
 
 impl VoiceWaveController {
@@ -1465,6 +1469,7 @@ impl VoiceWaveController {
             gpu_notice_sent: AtomicBool::new(false),
             retained_capture: Mutex::new(None),
             submit_pending_session: AtomicU64::new(0),
+            lifecycle_gate: Mutex::new(()),
         })
     }
 
@@ -1877,6 +1882,7 @@ impl VoiceWaveController {
             "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?}, retry={retrying})",
             trigger, control_mode, mode
         );
+        let admission = self.lifecycle_gate.lock().await;
         // Snapshot the lifecycle state before touching the token: nothing in
         // this file holds `active_session` and `cancel_token` at the same
         // time, and this is not the place to start.
@@ -1979,6 +1985,8 @@ impl VoiceWaveController {
             )
             .await;
         }
+
+        drop(admission);
 
         // The start command now returns once the session is accepted. Keeping
         // the long capture/decode flow in its own task lets the event-driven
@@ -2206,6 +2214,7 @@ impl VoiceWaveController {
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
+        let _gate = self.lifecycle_gate.lock().await;
         let cancelled_session = {
             let mut active = self.active_session.lock().await;
             match active.as_mut() {
@@ -2227,9 +2236,8 @@ impl VoiceWaveController {
         // live token, a set stop flag, and Escape still owned by the hook with
         // no cancellable session attached - and cancel is the only path that
         // can clear that. All three are idempotent, so running them on a
-        // no-op cancel costs nothing. The pending-Enter marker is cleared
-        // before the token is cancelled: a replacement session can only start
-        // after that, so this never wipes its marker.
+        // no-op cancel costs nothing. The lifecycle gate keeps a new session
+        // from starting until this returns, so none of it hits a replacement.
         self.submit_pending_session.store(0, Ordering::SeqCst);
         if let Some(token) = self.cancel_token.lock().await.clone() {
             token.cancel();
