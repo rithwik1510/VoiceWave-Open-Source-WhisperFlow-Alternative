@@ -845,13 +845,16 @@ fn ensure_worker<'a>(
 }
 
 /// Starts a worker and waits for its ready line. Every failure (runtime
-/// missing, launch failed, no ready line) is recorded as a failed start.
+/// missing, launch failed, no ready line) is recorded and returned as a
+/// failed start, so a dictation reports it as an engine fault, not a retryable
+/// decode failure.
 fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
-    start_worker().inspect_err(|_| {
+    start_worker().map_err(|err| {
         telemetry::record(TelemetryEvent::WorkerCrashed {
             worker: WorkerKind::FasterWhisper,
             exit: WorkerExit::SpawnFailed,
         });
+        InferenceError::WorkerStartFailed(err.to_string())
     })
 }
 

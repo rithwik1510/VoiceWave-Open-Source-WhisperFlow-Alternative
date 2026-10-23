@@ -398,7 +398,7 @@ impl VoiceWaveController {
                     InferenceError::AsrWorker {
                         failed_start: true,
                         ..
-                    }
+                    } | InferenceError::WorkerStartFailed(_)
                 ) {
                     return Err(ControllerError::EngineStart(format!(
                         "Speech engine failed to start for model '{}': {err}",

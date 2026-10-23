@@ -198,6 +198,10 @@ pub enum InferenceError {
         /// audio cannot help.
         failed_start: bool,
     },
+    /// The faster-whisper worker never came up (runtime missing, launch
+    /// failed, no ready line): the same failed-start case as `AsrWorker`.
+    #[error("{0}")]
+    WorkerStartFailed(String),
 }
 
 #[derive(Debug, Clone)]
