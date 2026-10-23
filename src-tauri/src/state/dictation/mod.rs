@@ -154,30 +154,19 @@ impl VoiceWaveController {
 
     /// Checked right before text goes in and before every Enter, after any
     /// wait: a cancel (Esc, `cancel_dictation`) can land during the polish
-    /// attempt or the paste-to-Enter delay. A cancelled run, or one whose
-    /// session was replaced, ends like every other cancel: nothing typed, no
-    /// Enter, Idle. True when the run has ended.
+    /// attempt or the paste-to-Enter delay. True when the run must stop: its
+    /// token was cancelled or its session was replaced. A pure check:
+    /// `cancel_dictation` already set the session and HUD to Idle, and a
+    /// replaced session owns the HUD, so touching it here could only clobber
+    /// the newer dictation.
     async fn end_if_cancelled(&self, run: &DictationRun) -> bool {
-        let owns_session = self
-            .active_session
+        if run.cancel_token.is_cancelled() {
+            return true;
+        }
+        self.active_session
             .lock()
             .await
             .as_ref()
-            .is_some_and(|session| session.session_id == run.session_id);
-        if owns_session && !run.cancel_token.is_cancelled() {
-            return false;
-        }
-        // A replaced session owns the HUD now; leave it alone.
-        if owns_session {
-            self.set_session_state(run.session_id, DictationLifecycleState::Idle, None, None)
-                .await;
-            self.update_state(
-                &run.app,
-                VoiceWaveHudState::Idle,
-                Some("Dictation cancelled.".to_string()),
-            )
-            .await;
-        }
-        true
+            .is_none_or(|session| session.session_id != run.session_id)
     }
 }

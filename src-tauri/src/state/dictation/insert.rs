@@ -163,17 +163,22 @@ impl VoiceWaveController {
                 "direct" => SUBMIT_DELAY_AFTER_TYPING_MS,
                 _ => 0,
             };
+            // The Inserted HUD state released Esc; own it again through the
+            // delay so Esc still cancels the Enter (cancel_dictation releases
+            // it), and give it back as soon as Enter is pressed.
+            self.set_hotkey_dictation_active(true).await;
             sleep(Duration::from_millis(delay_ms)).await;
             // The text already landed; a cancel still stops the Enter.
             if self.end_if_cancelled(run).await {
                 return None;
             }
-            Some(
-                self.insertion_engine
-                    .lock()
-                    .await
-                    .press_enter_after_insert(),
-            )
+            let outcome = self
+                .insertion_engine
+                .lock()
+                .await
+                .press_enter_after_insert();
+            self.set_hotkey_dictation_active(false).await;
+            Some(outcome)
         } else {
             None
         };
