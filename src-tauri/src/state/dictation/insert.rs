@@ -59,6 +59,7 @@ impl VoiceWaveController {
     ) -> Option<Insertion> {
         let DictationRun {
             ref app,
+            mode,
             session_id,
             ref retry_audio,
             ref settings,
@@ -148,7 +149,8 @@ impl VoiceWaveController {
         };
         let insert_ms = insert_started.elapsed().as_millis() as u64;
         // An elevated target's clipboard-only fallback counts as a success.
-        if !insertion_success {
+        // Fixture runs are tests, not user dictations.
+        if !insertion_success && mode == DictationMode::Microphone {
             telemetry::record(TelemetryEvent::DictationFailed {
                 kind: DictationFailureKind::Insert,
             });
