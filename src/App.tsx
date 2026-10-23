@@ -1317,8 +1317,9 @@ function App() {
       .catch(() => undefined);
   }, [reportRowVisible, supportContext, tauriAvailable]);
 
-  // Report a problem: Rust builds the GitHub issue URL (version, OS, engine)
-  // and opens the browser; nothing is sent until the user submits on GitHub.
+  // Report a problem: Rust builds the GitHub issue URL with the diagnostics
+  // report in it and opens the browser. Opening the form sends the report to
+  // GitHub; submitting it publishes the issue.
   const reportProblem = () => {
     setSupportError(null);
     void openIssueReport(speechEngineSummary).catch(() =>
@@ -3110,7 +3111,7 @@ function App() {
                       <p className="vw-set-title">Anonymous usage count (on by default)</p>
                       <p className="vw-set-desc">
                         Helps us count real installs and spot where setup goes wrong. Never audio, transcripts,
-                        or settings. Turn off anytime.
+                        or your other settings. Turn off anytime.
                       </p>
                       <UsageCountDetails />
                     </div>
@@ -3666,7 +3667,8 @@ function App() {
               <p className="text-sm font-semibold text-ink-strong">Report a problem</p>
               <p className="mt-1 text-sm text-faint">
                 Opens a pre-filled GitHub issue with the diagnostics report: app and Windows versions, speech
-                engine, microphone name and recent warnings. Nothing is sent until you submit it on GitHub.
+                engine, microphone name and recent warnings. Opening the form sends these to GitHub to fill
+                it in; submitting it publishes the issue.
               </p>
               {supportContext && (
                 <p className="mt-2 text-xs text-hint">

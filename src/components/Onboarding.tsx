@@ -706,7 +706,7 @@ export function Onboarding({
                     <p className="vw-set-title">Anonymous usage count · on by default</p>
                     <p className="vw-set-desc">
                       Counts installs and setup progress with a random ID. Never audio, transcripts, or
-                      settings. Change it anytime in Settings.
+                      your other settings. Change it anytime in Settings.
                     </p>
                     <UsageCountDetails />
                   </div>

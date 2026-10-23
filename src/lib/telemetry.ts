@@ -19,14 +19,14 @@ export const ANALYTICS_CONSENT_VERSION = 1;
 /** The in-app answer to "what does the anonymous usage count send?". Keep it
  * in step with the events below whenever one is added or changed. */
 export const ANONYMOUS_USAGE_DETAILS =
-  "A random install ID, the app version, a first-use marker and a once-a-day active marker, a once-a-day " +
-  "app-launch marker and whether the app started with Windows, setup progress, whether your first " +
-  "dictation ran on the graphics card or the processor, model download failures, graphics-card-to-processor " +
-  "fallbacks, the type of a failed dictation (for example no microphone or a timeout), the type of a speech " +
-  "helper crash, and which part of the app hit an internal error. Each comes with whether speech runs on " +
-  "the graphics card or the processor, the speech model family, the graphics card maker, and Windows 10 or " +
-  "11. Never audio, transcripts, error messages, dictionary or snippet content, account identity, device " +
-  "names, filenames, or settings.";
+  "A random install ID, a random ID that changes every launch, the app version, a first-use marker and a " +
+  "once-a-day active marker, a once-a-day app-launch marker and whether the app started with Windows, setup " +
+  "progress, whether your first dictation ran on the graphics card or the processor, model download failures, " +
+  "graphics-card-to-processor fallbacks, the type of a failed dictation (for example no microphone or a " +
+  "timeout), the type of a speech helper crash, and which part of the app hit an internal error. Each comes " +
+  "with whether speech runs on the graphics card or the processor, the speech model family, the graphics card " +
+  "maker, and Windows 10 or 11. Never audio, transcripts, error messages, dictionary or snippet content, " +
+  "account identity, device names, filenames, or your other settings.";
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";
 
 type SignalClient = {
