@@ -1227,6 +1227,13 @@ enum DictationFinishCause {
     PushToTalkRelease,
 }
 
+/// The dictation run behind a HUD update; see `update_run_state`.
+#[derive(Clone, Copy)]
+struct RunOwner<'a> {
+    session_id: u64,
+    cancel_token: &'a CancellationToken,
+}
+
 #[derive(Debug, Clone)]
 struct DictationSession {
     session_id: u64,
@@ -2676,7 +2683,7 @@ impl VoiceWaveController {
         payload: InsertTextRequest,
     ) -> Result<InsertResult, ControllerError> {
         let (result, _record_id) = self
-            .insert_text_with_polish_meta(app, payload, None)
+            .insert_text_with_polish_meta(app, payload, None, None)
             .await?;
         Ok(result)
     }
@@ -2685,11 +2692,12 @@ impl VoiceWaveController {
     /// plan-010 polish metadata when the caller is the dictation flow.
     /// Returns the history record id (None when retention is Off) so async
     /// polish results can update the same record later.
-    pub(crate) async fn insert_text_with_polish_meta(
+    async fn insert_text_with_polish_meta(
         &self,
         app: AppHandle,
         mut payload: InsertTextRequest,
         polish_meta: Option<&PolishHistoryMeta>,
+        owner: Option<RunOwner<'_>>,
     ) -> Result<(InsertResult, Option<String>), ControllerError> {
         if !payload.prefer_clipboard {
             let settings = self.settings.lock().await.clone();
@@ -2716,7 +2724,7 @@ impl VoiceWaveController {
             } else {
                 VoiceWaveHudState::Inserted
             };
-            self.update_state(&app, hud_state, result.message.clone())
+            self.update_run_state(&app, owner, hud_state, result.message.clone())
                 .await;
             let _ = app.emit("voicewave://insertion", result.clone());
         }
@@ -2752,7 +2760,7 @@ impl VoiceWaveController {
                 Some(reason) => format!("{headline} ({reason})"),
                 None => headline.to_string(),
             };
-            self.update_state(&app, VoiceWaveHudState::Error, Some(message))
+            self.update_run_state(&app, owner, VoiceWaveHudState::Error, Some(message))
                 .await;
             let _ = app.emit("voicewave://insertion", result.clone());
         }
@@ -4144,6 +4152,38 @@ impl VoiceWaveController {
             }
             session.release_requested_at_utc_ms
         })
+    }
+
+    /// A dictation run's HUD update (`None`: not a dictation, published
+    /// as-is). Checked under the lifecycle gate, so no cancel or newer
+    /// session lands between the check and the publish. A replaced run never
+    /// publishes: it would paint over the newer session's pill and release
+    /// its Esc. A cancelled run may still land on Idle, Inserted or Error,
+    /// but never moves the HUD back to Listening or Transcribing.
+    async fn update_run_state(
+        &self,
+        app: &AppHandle,
+        owner: Option<RunOwner<'_>>,
+        state: VoiceWaveHudState,
+        message: Option<String>,
+    ) {
+        let Some(owner) = owner else {
+            return self.update_state(app, state, message).await;
+        };
+        let _gate = self.lifecycle_gate.lock().await;
+        let current = self
+            .active_session
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|session| session.session_id == owner.session_id);
+        let terminal = matches!(
+            state,
+            VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
+        );
+        if current && (terminal || !owner.cancel_token.is_cancelled()) {
+            self.update_state(app, state, message).await;
+        }
     }
 
     async fn update_state(

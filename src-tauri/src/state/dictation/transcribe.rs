@@ -245,8 +245,9 @@ impl VoiceWaveController {
             None,
         )
         .await;
-        self.update_state(
+        self.update_run_state(
             app,
+            Some(run.owner()),
             VoiceWaveHudState::Transcribing,
             Some(format!("{transcribing_message}{watchdog_note}")),
         )
@@ -287,8 +288,9 @@ impl VoiceWaveController {
             if finalize_audio_ms < fw_min_decode_audio_ms() {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
-                self.update_state(
+                self.update_run_state(
                     app,
+                    Some(run.owner()),
                     VoiceWaveHudState::Idle,
                     Some(format!(
                         "Capture was too short to transcribe reliably. {}",
@@ -370,8 +372,9 @@ impl VoiceWaveController {
             Ok(Err(InferenceError::Cancelled)) => {
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;
-                self.update_state(
+                self.update_run_state(
                     app,
+                    Some(run.owner()),
                     VoiceWaveHudState::Idle,
                     Some("Dictation cancelled.".to_string()),
                 )

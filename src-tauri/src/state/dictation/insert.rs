@@ -127,7 +127,12 @@ impl VoiceWaveController {
             insertion_record_id,
             insertion_blocked_by_elevation,
         ) = match self
-            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(polish_meta))
+            .insert_text_with_polish_meta(
+                app.clone(),
+                insert_payload,
+                Some(polish_meta),
+                Some(run.owner()),
+            )
             .await
         {
             Ok((result, record_id)) => (
@@ -143,8 +148,9 @@ impl VoiceWaveController {
                 result.blocked_by_elevation,
             ),
             Err(err) => {
-                self.update_state(
+                self.update_run_state(
                     app,
+                    Some(run.owner()),
                     VoiceWaveHudState::Error,
                     Some(format!("Insertion failed: {err}")),
                 )

@@ -11,7 +11,8 @@ mod transcribe;
 
 use super::{
     clamp_max_utterance_ms, ControllerError, DictationControlMode, DictationLifecycleState,
-    DictationMode, DictationSession, RetainedAudio, VoiceWaveController, VoiceWaveHudState,
+    DictationMode, DictationSession, RetainedAudio, RunOwner, VoiceWaveController,
+    VoiceWaveHudState,
 };
 use crate::{inference::uses_whisper_pipeline, settings::VoiceWaveSettings};
 use insert::announce_insertion;
@@ -75,16 +76,6 @@ impl VoiceWaveController {
         retry_audio: Option<RetainedAudio>,
     ) -> Result<(), ControllerError> {
         let flow_started = Instant::now();
-        if mode == DictationMode::Fixture {
-            // Sound cue is now played from the pill renderer on state commit
-            // so the sound lines up with the visible pill onset.
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Listening,
-                Some("Listening for speech...".to_string()),
-            )
-            .await;
-        }
         if retry_audio.is_none() {
             self.set_session_state(session_id, DictationLifecycleState::Listening, None, None)
                 .await;
@@ -105,6 +96,17 @@ impl VoiceWaveController {
             flow_started,
             settings,
         };
+        if mode == DictationMode::Fixture {
+            // Sound cue is now played from the pill renderer on state commit
+            // so the sound lines up with the visible pill onset.
+            self.update_run_state(
+                &run.app,
+                Some(run.owner()),
+                VoiceWaveHudState::Listening,
+                Some("Listening for speech...".to_string()),
+            )
+            .await;
+        }
         let fw_ready_task = self.preflight(&run).await?;
         let Some(capture) = self.capture_audio(&run).await? else {
             return Ok(());
@@ -169,6 +171,14 @@ impl DictationRun {
     /// answer (Esc, the pending-Enter marker) keeps the `active_session` guard
     /// while it does: a replacement installs itself under that lock, so it
     /// cannot slip in between the check and the act.
+    /// For `update_run_state`: every HUD update a run makes goes through it.
+    fn owner(&self) -> RunOwner<'_> {
+        RunOwner {
+            session_id: self.session_id,
+            cancel_token: &self.cancel_token,
+        }
+    }
+
     fn is_current(&self, active: &Option<DictationSession>) -> bool {
         !self.cancel_token.is_cancelled()
             && active

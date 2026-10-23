@@ -120,7 +120,7 @@ impl VoiceWaveController {
             } else {
                 VoiceWaveHudState::Idle
             };
-            self.update_state(app, hud_state, Some(message)).await;
+            self.update_run_state(app, Some(run.owner()), hud_state, Some(message)).await;
             if let Some(Err(err)) = &outcome {
                 emit_submit_notice(app, err);
             }
@@ -284,8 +284,9 @@ impl VoiceWaveController {
             });
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
-            self.update_state(
+            self.update_run_state(
                 app,
+                Some(run.owner()),
                 VoiceWaveHudState::Idle,
                 Some(format!(
                     "No speech detected. {}",

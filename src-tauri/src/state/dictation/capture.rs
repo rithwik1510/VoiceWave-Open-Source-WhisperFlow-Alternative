@@ -101,8 +101,9 @@ impl VoiceWaveController {
         if segments.is_empty() {
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;
-            self.update_state(
+            self.update_run_state(
                 app,
+                Some(run.owner()),
                 VoiceWaveHudState::Idle,
                 Some(format!(
                     "No speech captured yet. {}",
@@ -272,12 +273,13 @@ impl VoiceWaveController {
                 },
             )
         });
-        // A cancelled run's late mic-open must not repaint the HUD.
-        if ready_rx.await.is_ok() && !self.end_if_cancelled(run).await {
+        // update_run_state drops this for a cancelled run's late mic-open.
+        if ready_rx.await.is_ok() {
             // Sound cue is driven from the pill renderer for precise
             // sync with the visible listening onset.
-            self.update_state(
+            self.update_run_state(
                 app,
+                Some(run.owner()),
                 VoiceWaveHudState::Listening,
                 Some("Listening for speech...".to_string()),
             )
@@ -311,8 +313,9 @@ impl VoiceWaveController {
                 } else {
                     String::new()
                 };
-                self.update_state(
+                self.update_run_state(
                     app,
+                    Some(run.owner()),
                     VoiceWaveHudState::Idle,
                     Some(format!(
                         "No speech on '{}'{}. {} Try lowering VAD threshold in Settings if this persists.",
