@@ -62,7 +62,7 @@ export type FunnelEvent =
   | { type: "Onboarding.stepReached"; step: "welcome" | "mic" | "speak" | "done" }
   | { type: "Onboarding.completed"; outcome: "finished" | "skipped" }
   | { type: "Dictation.firstSuccess"; engine: "gpu" | "cpu" }
-  | { type: "Model.downloadFailed"; model: "speech-gpu" | "speech-cpu" | "polish" }
+  | { type: "Model.downloadFailed"; model: SpeechModelKind | "polish" }
   | {
       type: "Speech.gpuStepDown";
       reason: "preparing" | "cooldown" | "driver-disabled" | "unavailable" | "fault";
@@ -72,7 +72,9 @@ export type FunnelEvent =
   | { type: "Speech.workerCrashed"; worker: WorkerKind; exit: WorkerExit }
   | { type: "App.panicked"; area: PanicArea };
 
-export type SpeechModelKind = "speech-gpu" | "speech-cpu";
+/** Speech engine family. Not GPU vs CPU: Parakeet and whisper.cpp run on
+ * either, and the `VoiceWave.Speech.path` context already says which. */
+export type SpeechModelKind = "parakeet" | "whisper-cpp" | "faster-whisper";
 
 let activeClient: { installationId: string; client: SignalClient } | null = null;
 /** Set by `useVoiceWave` via `setTelemetryProviders`. Until then nothing is
@@ -324,14 +326,18 @@ export function trackFunnelEvent(
   return enqueue(() => sendFunnelEvent(event, dependencies));
 }
 
-/** Speech model family from its id: whisper.cpp ("wcpp-") models are the GPU
- * path, faster-whisper ("fw-") the CPU one. Null for anything else. */
+/** Speech engine family from a model id: Parakeet (a "wcpp-" id, so checked
+ * first), other whisper.cpp ("wcpp-") models, or faster-whisper ("fw-"). Null
+ * for anything else. */
 export function speechModelKind(modelId: string): SpeechModelKind | null {
+  if (modelId.includes("parakeet")) {
+    return "parakeet";
+  }
   if (modelId.startsWith("wcpp-")) {
-    return "speech-gpu";
+    return "whisper-cpp";
   }
   if (modelId.startsWith("fw-")) {
-    return "speech-cpu";
+    return "faster-whisper";
   }
   return null;
 }
