@@ -602,8 +602,9 @@ export function useVoiceWave() {
   modelStatusesRef.current = modelStatuses;
   // Set by a dictation's non-empty final transcript, which Rust emits just
   // before inserting it; the insertion event that follows says whether the
-  // text landed. Cleared by the latency event that ends the dictation and by
-  // a manual insert from the UI, which never counts.
+  // text landed. Cleared by the latency event that ends the dictation, by a
+  // manual insert from the UI (which never counts) and when the next
+  // dictation starts listening.
   const dictationInsertPendingRef = useRef(false);
   // Set when a dictation's text landed; the latency event that follows says
   // which engine actually decoded (funnel firstSuccess).
@@ -2373,6 +2374,12 @@ export function useVoiceWave() {
           setError(message);
         } else if (state !== "error") {
           setError(null);
+        }
+        // A new dictation: drop markers a previous one left behind (a cancel
+        // before the spoken Enter ends it with no latency event).
+        if (state === "listening") {
+          dictationInsertPendingRef.current = false;
+          firstSuccessPendingRef.current = false;
         }
       }));
 
