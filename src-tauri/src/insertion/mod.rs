@@ -767,16 +767,27 @@ pub fn return_focus_from_voicewave(target: isize) -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::Foundation::HWND;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
 
         if !voicewave_owns_foreground() {
             return false;
         }
         let target = target as HWND;
-        // SAFETY: IsWindow accepts any value; SetForegroundWindow only runs
-        // on a live window. Our process just received the click, so Windows
-        // lets it hand the foreground over.
-        unsafe { IsWindow(target) != 0 && SetForegroundWindow(target) != 0 }
+        // SAFETY: IsWindow accepts any value; the rest only run on a live
+        // window. Our process just received the click, so Windows lets it hand
+        // the foreground over. A minimized target is restored first: it can't
+        // take keystrokes while iconic.
+        unsafe {
+            if IsWindow(target) == 0 {
+                return false;
+            }
+            if IsIconic(target) != 0 {
+                ShowWindow(target, SW_RESTORE);
+            }
+            SetForegroundWindow(target) != 0
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
