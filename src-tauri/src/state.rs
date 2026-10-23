@@ -2168,7 +2168,11 @@ impl VoiceWaveController {
             {
                 DictationFailureKind::EngineStart
             }
-            ControllerError::Runtime(message) if message.contains("timed out") => {
+            // The outer decode deadline says "timed out"; a whisper.cpp worker
+            // that misses its own deadline says "missed its ... deadline".
+            ControllerError::Runtime(message)
+                if message.contains("timed out") || message.contains("missed its") =>
+            {
                 DictationFailureKind::Timeout
             }
             ControllerError::Runtime(message) if message == EMPTY_TRANSCRIPT_ERROR => {
