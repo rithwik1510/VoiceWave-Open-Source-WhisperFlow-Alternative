@@ -39,11 +39,15 @@ fn claim_single_instance_or_exit() {
     // instance - `ShowWindowAsync` posts rather than sends, and
     // `SetForegroundWindow` returns immediately whether or not the foreground
     // lock lets it through. Never a plain `SendMessage` here.
-    // Must match the main window title in tauri.conf.json.
+    // Must match the main window title in tauri.conf.json. The title match is
+    // case-insensitive, so the class narrows it to Tauri windows: without it an
+    // Explorer window open on a "voicewave" folder would match, and we would
+    // focus that and exit instead of booting.
+    let class = wide("Tauri Window"); // the class Tauri registers on Windows
     let title = wide("VoiceWave");
-    // SAFETY: both pointers are valid nul-terminated UTF-16 buffers, and the
+    // SAFETY: all pointers are valid nul-terminated UTF-16 buffers, and the
     // HWND is only used for two calls that tolerate a stale handle.
-    let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    let window = unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) };
     if !window.is_null() {
         unsafe {
             let _ = ShowWindowAsync(window, SW_RESTORE);
