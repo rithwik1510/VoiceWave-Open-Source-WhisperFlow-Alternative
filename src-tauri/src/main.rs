@@ -39,7 +39,8 @@ fn claim_single_instance_or_exit() {
     // instance - `ShowWindowAsync` posts rather than sends, and
     // `SetForegroundWindow` returns immediately whether or not the foreground
     // lock lets it through. Never a plain `SendMessage` here.
-    let title = wide("VoiceWave Local Core");
+    // Must match the main window title in tauri.conf.json.
+    let title = wide("VoiceWave");
     // SAFETY: both pointers are valid nul-terminated UTF-16 buffers, and the
     // HWND is only used for two calls that tolerate a stale handle.
     let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };

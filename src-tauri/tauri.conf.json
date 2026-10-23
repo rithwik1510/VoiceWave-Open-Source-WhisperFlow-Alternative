@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "VoiceWave Local Core",
+        "title": "VoiceWave",
         "width": 1400,
         "height": 920,
         "minWidth": 1024,
