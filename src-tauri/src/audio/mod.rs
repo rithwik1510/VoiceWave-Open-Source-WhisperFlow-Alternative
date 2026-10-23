@@ -513,37 +513,41 @@ impl AudioCaptureService {
                         }
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    if stop_requested_at.is_some() {
-                        continue;
-                    }
-                    if !speech_detected {
-                        let initial_speech_timeout = hands_free
-                            .map_or(options.initial_speech_timeout, |limits| {
-                                limits.silence_timeout
-                            });
-                        if started.elapsed() >= initial_speech_timeout {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    let trailing_silence = match (hands_free, options.end_policy) {
-                        (Some(limits), _) => Some(limits.silence_timeout),
-                        (None, CaptureEndPolicy::EndOnSilence { trailing_silence, .. }) => {
-                            Some(trailing_silence)
-                        }
-                        (None, CaptureEndPolicy::ExplicitStop { .. }) => None,
-                    };
-                    if let (Some(trailing_silence), Some(last_voice_at)) =
-                        (trailing_silence, last_voice_at)
-                    {
-                        if last_voice_at.elapsed() >= trailing_silence {
-                            break;
-                        }
-                    }
-                }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            // Silence deadlines run on every pass, chunk or timeout: a device
+            // that delivers a buffer at least every 10 ms never times out.
+            // Not while the release tail runs; it has its own exits above.
+            if stop_requested_at.is_some() {
+                continue;
+            }
+            if !speech_detected {
+                let initial_speech_timeout = hands_free
+                    .map_or(options.initial_speech_timeout, |limits| {
+                        limits.silence_timeout
+                    });
+                if started.elapsed() >= initial_speech_timeout {
+                    break;
+                }
+                continue;
+            }
+            let trailing_silence = match (hands_free, options.end_policy) {
+                (Some(limits), _) => Some(limits.silence_timeout),
+                (
+                    None,
+                    CaptureEndPolicy::EndOnSilence {
+                        trailing_silence, ..
+                    },
+                ) => Some(trailing_silence),
+                (None, CaptureEndPolicy::ExplicitStop { .. }) => None,
+            };
+            if let (Some(trailing_silence), Some(last_voice_at)) = (trailing_silence, last_voice_at)
+            {
+                if last_voice_at.elapsed() >= trailing_silence {
+                    break;
+                }
             }
         }
 
