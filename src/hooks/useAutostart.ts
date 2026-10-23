@@ -31,14 +31,18 @@ export function useAutostart() {
 
   const setEnabled = useCallback(async (next: boolean) => {
     setEnabledState(next);
+    // Never rejects: callers fire and forget.
+    const autostart = await import("@tauri-apps/plugin-autostart").catch(() => null);
+    if (!autostart) {
+      setEnabledState(!next);
+      return;
+    }
     try {
-      const { enable, disable, isEnabled } = await import("@tauri-apps/plugin-autostart");
-      await (next ? enable() : disable());
-      setEnabledState(await isEnabled());
+      await (next ? autostart.enable() : autostart.disable());
+      setEnabledState(await autostart.isEnabled());
     } catch {
       // Registry write refused: show what Windows actually has.
-      const { isEnabled } = await import("@tauri-apps/plugin-autostart");
-      setEnabledState(await isEnabled().catch(() => !next));
+      setEnabledState(await autostart.isEnabled().catch(() => !next));
     }
   }, []);
 
