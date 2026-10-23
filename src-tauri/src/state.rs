@@ -1937,6 +1937,15 @@ impl VoiceWaveController {
                 hands_free: Arc::clone(&hands_free),
             });
         }
+        // Re-bind the kept audio to the retry session (an Arc clone) before
+        // anything can fail, so a retry that fails anywhere, preflight
+        // included, still keeps the recording and can offer Try again.
+        if let Some(audio) = &retry_audio {
+            *self.retained_capture.lock().await = Some(RetainedCapture {
+                session_id,
+                audio: audio.clone(),
+            });
+        }
         self.set_hotkey_dictation_active(true).await;
 
         let stop_flag = {

@@ -91,12 +91,8 @@ impl VoiceWaveController {
         }
         if let Some(retained) = retry_audio {
             // Already merged and assessed by the failed run: no copy, and no
-            // second audio-quality report. Re-bind it to this session (an Arc
-            // clone) so a failed retry can still offer Try again.
-            *self.retained_capture.lock().await = Some(RetainedCapture {
-                session_id,
-                audio: retained.clone(),
-            });
+            // second audio-quality report. The retry start already re-bound
+            // it to this session (`start_dictation_with_trigger`).
             return Ok(Some(CapturedAudio {
                 segment_count: retained.audio_quality.segment_count,
                 source_samples: Arc::clone(&retained.samples),
