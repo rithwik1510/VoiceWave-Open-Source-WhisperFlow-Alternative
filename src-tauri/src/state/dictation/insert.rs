@@ -94,14 +94,19 @@ impl VoiceWaveController {
         let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
 
         let typing_allowed = return_focus_for_retry(retry_audio.as_ref()).await;
-        if self.end_if_cancelled(run).await {
-            return None;
-        }
-        // Keeps Esc owned past the Inserted state (and the History write
-        // inside insert_text) until the Enter below is pressed or cancelled.
-        if submit_requested {
-            self.submit_pending_session
-                .store(session_id, Ordering::SeqCst);
+        {
+            let active = self.active_session.lock().await;
+            if !run.is_current(&active) {
+                return None;
+            }
+            // Keeps Esc owned past the Inserted state (and the History write
+            // inside insert_text) until the Enter below is pressed or
+            // cancelled. Set under the session lock, so it can never
+            // overwrite a replacement session's marker.
+            if submit_requested {
+                self.submit_pending_session
+                    .store(session_id, Ordering::SeqCst);
+            }
         }
 
         let insert_payload = InsertTextRequest {
@@ -198,10 +203,14 @@ impl VoiceWaveController {
                 Ordering::SeqCst,
             );
             // Esc is ours to give back only while the run still owns the
-            // session (a cancel during the Enter already released it).
-            if !self.end_if_cancelled(run).await {
+            // session (a cancel during the Enter already released it). Held
+            // under the session lock so a replacement can't take Esc between
+            // the check and the release.
+            let active = self.active_session.lock().await;
+            if run.is_current(&active) {
                 self.set_hotkey_dictation_active(false).await;
             }
+            drop(active);
             Some(outcome)
         } else {
             None

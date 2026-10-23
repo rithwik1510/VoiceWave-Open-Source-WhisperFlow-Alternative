@@ -2005,6 +2005,11 @@ impl VoiceWaveController {
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
+                    // Esc goes back before the session slot frees up: a
+                    // replacement installs itself under this lock and then
+                    // takes Esc, so it can never be clobbered here.
+                    controller.submit_pending_session.store(0, Ordering::SeqCst);
+                    controller.set_hotkey_dictation_active(false).await;
                     *active = None;
                     true
                 } else {
@@ -2014,8 +2019,6 @@ impl VoiceWaveController {
             // A cancelled session may be replaced immediately. Never let the
             // old task clear the replacement session's token or stop flag.
             if still_owns_session {
-                controller.submit_pending_session.store(0, Ordering::SeqCst);
-                controller.set_hotkey_dictation_active(false).await;
                 let mut token_slot = controller.cancel_token.lock().await;
                 *token_slot = None;
                 drop(token_slot);
@@ -2224,14 +2227,16 @@ impl VoiceWaveController {
         // live token, a set stop flag, and Escape still owned by the hook with
         // no cancellable session attached - and cancel is the only path that
         // can clear that. All three are idempotent, so running them on a
-        // no-op cancel costs nothing.
+        // no-op cancel costs nothing. The pending-Enter marker is cleared
+        // before the token is cancelled: a replacement session can only start
+        // after that, so this never wipes its marker.
+        self.submit_pending_session.store(0, Ordering::SeqCst);
         if let Some(token) = self.cancel_token.lock().await.clone() {
             token.cancel();
         }
         if let Some(stop_flag) = self.stop_flag.lock().await.clone() {
             stop_flag.store(true, Ordering::Relaxed);
         }
-        self.submit_pending_session.store(0, Ordering::SeqCst);
         self.set_hotkey_dictation_active(false).await;
         self.stop_mic_level_monitor().await;
 

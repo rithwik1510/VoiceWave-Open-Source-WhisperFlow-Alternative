@@ -11,7 +11,7 @@ mod transcribe;
 
 use super::{
     clamp_max_utterance_ms, ControllerError, DictationControlMode, DictationLifecycleState,
-    DictationMode, RetainedAudio, VoiceWaveController, VoiceWaveHudState,
+    DictationMode, DictationSession, RetainedAudio, VoiceWaveController, VoiceWaveHudState,
 };
 use crate::{inference::uses_whisper_pipeline, settings::VoiceWaveSettings};
 use insert::announce_insertion;
@@ -160,13 +160,19 @@ impl VoiceWaveController {
     /// replaced session owns the HUD, so touching it here could only clobber
     /// the newer dictation.
     async fn end_if_cancelled(&self, run: &DictationRun) -> bool {
-        if run.cancel_token.is_cancelled() {
-            return true;
-        }
-        self.active_session
-            .lock()
-            .await
-            .as_ref()
-            .is_none_or(|session| session.session_id != run.session_id)
+        !run.is_current(&*self.active_session.lock().await)
+    }
+}
+
+impl DictationRun {
+    /// Not cancelled, and its session not replaced. A caller that acts on the
+    /// answer (Esc, the pending-Enter marker) keeps the `active_session` guard
+    /// while it does: a replacement installs itself under that lock, so it
+    /// cannot slip in between the check and the act.
+    fn is_current(&self, active: &Option<DictationSession>) -> bool {
+        !self.cancel_token.is_cancelled()
+            && active
+                .as_ref()
+                .is_some_and(|session| session.session_id == self.session_id)
     }
 }
