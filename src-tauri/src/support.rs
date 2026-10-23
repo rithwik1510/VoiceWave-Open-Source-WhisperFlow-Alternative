@@ -168,19 +168,34 @@ pub fn take_panic_areas() -> Vec<PanicArea> {
 }
 
 /// `C:\Users\<name>` → `%USERPROFILE%`, ignoring ASCII case like Windows.
+/// Also catches the Debug-escaped form (`C:\\Users\\<name>`, e.g. a path
+/// printed with `{:?}`) and the forward-slash form (`C:/Users/<name>`).
 pub fn redact_profile_dir(text: &str) -> String {
-    let needle = std::env::var("USERPROFILE")
+    let profile = std::env::var("USERPROFILE")
         .unwrap_or_default()
         .trim_end_matches(['\\', '/'])
         .to_ascii_lowercase();
-    if needle.len() <= 3 {
+    if profile.len() <= 3 {
         return text.to_string();
     }
+    [
+        profile.replace('\\', r"\\"),
+        profile.replace('\\', "/"),
+        profile,
+    ]
+    .iter()
+    .fold(text.to_string(), |text, needle| {
+        replace_ignoring_ascii_case(&text, needle)
+    })
+}
+
+/// Every match of the lowercase `needle` in `text` → `%USERPROFILE%`.
+fn replace_ignoring_ascii_case(text: &str, needle: &str) -> String {
     // ASCII lowercasing keeps byte offsets, so they index `text` too.
     let haystack = text.to_ascii_lowercase();
     let mut redacted = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(found) = haystack[at..].find(&needle) {
+    while let Some(found) = haystack[at..].find(needle) {
         redacted.push_str(&text[at..at + found]);
         redacted.push_str("%USERPROFILE%");
         at += found + needle.len();
