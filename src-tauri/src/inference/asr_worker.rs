@@ -293,8 +293,9 @@ enum Fault {
         class: ErrorClass,
         reason: String,
         timed_out: bool,
-        /// Telemetry: set where the worker died, hung or never came up;
-        /// `None` for an error the worker itself reported.
+        /// Set where the worker died, hung or never came up (telemetry, and
+        /// `InferenceError::AsrWorker::failed_start`); `None` for an error
+        /// the worker itself reported.
         exit: Option<WorkerExit>,
     },
 }
@@ -354,9 +355,15 @@ impl From<Fault> for InferenceError {
                 model_id: "speech-worker".to_string(),
                 reason,
             },
-            Fault::Worker { class, reason, .. } => InferenceError::AsrWorker {
+            Fault::Worker {
+                class,
+                reason,
+                exit,
+                ..
+            } => InferenceError::AsrWorker {
                 class,
                 reason: trim_reason(&reason),
+                failed_start: exit == Some(WorkerExit::SpawnFailed),
             },
         }
     }

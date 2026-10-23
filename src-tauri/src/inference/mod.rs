@@ -193,6 +193,10 @@ pub enum InferenceError {
     AsrWorker {
         class: asr_worker::ErrorClass,
         reason: String,
+        /// The worker never came up (executable missing or blocked, launch
+        /// failed, exited or hung before its ready line): retrying the same
+        /// audio cannot help.
+        failed_start: bool,
     },
 }
 

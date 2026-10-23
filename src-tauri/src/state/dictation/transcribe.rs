@@ -390,6 +390,21 @@ impl VoiceWaveController {
                         final_worker.active_model().to_string(),
                     ));
                 }
+                // Likewise a speech worker that never came up (executable
+                // missing or quarantined, launch failed): a setup fault, so
+                // no decode-failure counting and no Try again.
+                if matches!(
+                    err,
+                    InferenceError::AsrWorker {
+                        failed_start: true,
+                        ..
+                    }
+                ) {
+                    return Err(ControllerError::EngineStart(format!(
+                        "Speech engine failed to start for model '{}': {err}",
+                        final_worker.active_model()
+                    )));
+                }
                 if mode == DictationMode::Microphone {
                     self.decode_policy
                         .lock()
@@ -502,12 +517,12 @@ async fn wait_for_faster_whisper(
                 fw_runtime_ready = true;
             }
             Ok(Err(err)) => {
-                return Err(ControllerError::Runtime(format!(
+                return Err(ControllerError::EngineStart(format!(
                     "Faster-Whisper runtime warmup failed: {err}"
                 )));
             }
             Err(err) => {
-                return Err(ControllerError::Runtime(format!(
+                return Err(ControllerError::EngineStart(format!(
                     "Faster-Whisper warmup join failure: {err}"
                 )));
             }

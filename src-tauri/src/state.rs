@@ -443,6 +443,10 @@ pub enum ControllerError {
     MissingModel(String),
     #[error("benchmark results unavailable")]
     MissingBenchmark,
+    /// The speech engine could not start (runtime not ready, warmup failed,
+    /// worker missing or blocked): a retry would hit the same wall.
+    #[error("{0}")]
+    EngineStart(String),
     #[error("{0}")]
     Runtime(String),
 }
@@ -2114,16 +2118,12 @@ impl VoiceWaveController {
                 "Couldn't open the microphone",
                 "Check that Windows lets desktop apps use the microphone (Settings > Privacy > Microphone) and that no other app is holding it.",
             ),
-            // Not ready, or warmup failed: a retry would hit the same wall.
-            ControllerError::Runtime(message)
-                if message.starts_with("Faster-Whisper runtime")
-                    || message.starts_with("Faster-Whisper warmup") =>
-            {
-                (
-                    "Speech engine didn't start",
-                    "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
-                )
-            }
+            // Not ready, warmup failed, or the worker never came up: a retry
+            // would hit the same wall.
+            ControllerError::EngineStart(_) => (
+                "Speech engine didn't start",
+                "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
+            ),
             // Decode failed, timed out, or came back empty.
             ControllerError::Runtime(message) if audio_kept => {
                 retry = true;
@@ -2169,14 +2169,10 @@ impl VoiceWaveController {
                 | AudioError::UnsupportedSampleFormat(_),
             ) => DictationFailureKind::MicOpen,
             ControllerError::Audio(AudioError::NoSpeechDetected) => DictationFailureKind::NoSpeech,
-            ControllerError::Runtime(message)
-                if message.starts_with("Faster-Whisper runtime")
-                    || message.starts_with("Faster-Whisper warmup") =>
-            {
-                DictationFailureKind::EngineStart
-            }
-            // The outer decode deadline says "timed out"; a whisper.cpp worker
-            // that misses its own deadline says "missed its ... deadline".
+            ControllerError::EngineStart(_) => DictationFailureKind::EngineStart,
+            // The outer decode deadline and the faster-whisper worker say
+            // "timed out"; a whisper.cpp worker that misses its own deadline
+            // says "missed its ... deadline".
             ControllerError::Runtime(message)
                 if message.contains("timed out") || message.contains("missed its") =>
             {
@@ -4201,7 +4197,7 @@ impl VoiceWaveController {
                 if is_faster_whisper_model(model_id) {
                     if !assume_fw_ready {
                         ensure_faster_whisper_ready().await.map_err(|err| {
-                            ControllerError::Runtime(format!(
+                            ControllerError::EngineStart(format!(
                                 "Faster-Whisper runtime is not ready: {err}. Reinstall the latest beta build or configure the bundled runtime."
                             ))
                         })?;
