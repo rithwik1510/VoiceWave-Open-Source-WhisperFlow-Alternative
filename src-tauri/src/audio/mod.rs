@@ -479,7 +479,7 @@ impl AudioCaptureService {
                 return Err(AudioError::RuntimeStream(stream_err));
             }
 
-            match audio_rx.recv_timeout(Duration::from_millis(10)) {
+            let timed_out = match audio_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(raw_chunk) => {
                     let normalized = self.normalize_frame(AudioFrame {
                         sample_rate,
@@ -512,15 +512,24 @@ impl AudioCaptureService {
                             segments.push(segment);
                         }
                     }
+                    false
                 }
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
-            }
+            };
 
-            // Silence deadlines run on every pass, chunk or timeout: a device
-            // that delivers a buffer at least every 10 ms never times out.
-            // Not while the release tail runs; it has its own exits above.
+            // Hands-free and end-on-silence deadlines run on every pass, chunk
+            // or timeout: a device that delivers a buffer at least every 10 ms
+            // never times out. Hold-to-talk keeps its first-speech wait on
+            // timeouts only, as before (the user is holding the key, so the
+            // release is the real stop). Not while the release tail runs; it
+            // has its own exits above.
             if stop_requested_at.is_some() {
+                continue;
+            }
+            let every_pass = hands_free.is_some()
+                || matches!(options.end_policy, CaptureEndPolicy::EndOnSilence { .. });
+            if !timed_out && !every_pass {
                 continue;
             }
             if !speech_detected {
