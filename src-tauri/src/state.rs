@@ -2153,7 +2153,9 @@ impl VoiceWaveController {
 
     /// Telemetry class of a failed dictation: the arms of
     /// `dictation_failure_notice` (plus the stream errors it shows raw);
-    /// keep the two in step.
+    /// keep the two in step. Nothing heard is not an error: capture
+    /// (`capture_from_mic`) and the no-speech gate (`format_transcript`)
+    /// record `NoSpeech` themselves and end the flow with `Ok`.
     fn failure_kind(err: &ControllerError) -> DictationFailureKind {
         match err {
             ControllerError::MissingModel(_) => DictationFailureKind::Setup,
@@ -2168,7 +2170,6 @@ impl VoiceWaveController {
                 | AudioError::RuntimeStream(_)
                 | AudioError::UnsupportedSampleFormat(_),
             ) => DictationFailureKind::MicOpen,
-            ControllerError::Audio(AudioError::NoSpeechDetected) => DictationFailureKind::NoSpeech,
             ControllerError::EngineStart(_) => DictationFailureKind::EngineStart,
             // The outer decode deadline and the faster-whisper worker say
             // "timed out"; a whisper.cpp worker that misses its own deadline
