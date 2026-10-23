@@ -768,7 +768,7 @@ pub fn return_focus_from_voicewave(target: isize) -> bool {
     {
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
+            IsIconic, IsWindow, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
         };
 
         if !voicewave_owns_foreground() {
@@ -778,13 +778,14 @@ pub fn return_focus_from_voicewave(target: isize) -> bool {
         // SAFETY: IsWindow accepts any value; the rest only run on a live
         // window. Our process just received the click, so Windows lets it hand
         // the foreground over. A minimized target is restored first: it can't
-        // take keystrokes while iconic.
+        // take keystrokes while iconic. ShowWindowAsync posts the restore, so
+        // a hung target can't block us; the caller's settle delay covers it.
         unsafe {
             if IsWindow(target) == 0 {
                 return false;
             }
             if IsIconic(target) != 0 {
-                ShowWindow(target, SW_RESTORE);
+                ShowWindowAsync(target, SW_RESTORE);
             }
             SetForegroundWindow(target) != 0
         }
