@@ -108,8 +108,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Prebuilt binary: compiling cargo-audit from source took minutes per run.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Dependency policy gate
         shell: pwsh
@@ -117,6 +120,10 @@ jobs:
 
   rust_quality:
     runs-on: windows-latest
+    env:
+      # The backend gate's cargo check otherwise builds into its own
+      # C:\voicewave-tauri target dir, which the cache below never sees.
+      VIBE_SAFE_TARGET_DIR: ${{ github.workspace }}\src-tauri\target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -129,15 +136,21 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Caches compiled dependencies (whisper included) between runs; the
+      # first run on a new Cargo.lock still builds from scratch.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-
-      - name: Cargo test (core without desktop feature)
-        run: cargo test --no-default-features --manifest-path src-tauri/Cargo.toml
 
       - name: Cargo desktop-feature compile check
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
 
+      # Runs cargo check, the core tests (cargo test --no-default-features)
+      # and the test-count floor.
       - name: Backend quality gate
         shell: pwsh
         run: npm run quality:backend:gate
@@ -157,9 +170,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
@@ -167,6 +177,8 @@ jobs:
         shell: pwsh
         run: npm run security:firestore-rules -- -Enforce
 
+      # The jobs this one needs already ran the tests, builds and security
+      # gates; here only the release-specific checks run.
       - name: Run release gate
         shell: pwsh
-        run: npm run release:gate
+        run: npm run release:gate -- -SkipRepeatedChecks

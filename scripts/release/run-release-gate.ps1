@@ -1,6 +1,10 @@
 param(
   [switch]$Enforce,
-  [datetime]$ReleaseCandidateDate = (Get-Date)
+  [datetime]$ReleaseCandidateDate = (Get-Date),
+  # CI: skip the test/build/security gates that other CI jobs already ran
+  # (frontend_quality, rust_quality, dependency_security, secrets_scan, and
+  # the job's own Firestore rules step). Local runs keep them.
+  [switch]$SkipRepeatedChecks
 )
 
 Set-StrictMode -Version Latest
@@ -33,18 +37,20 @@ function Invoke-NpmScript {
   param(
     [string]$ScriptName,
     [string]$Label,
-    [string[]]$Args = @()
+    # Not $Args: that is PowerShell's automatic variable, which silently
+    # stays empty and dropped every argument passed here.
+    [string[]]$ScriptArgs = @()
   )
 
   Push-Location $repoRoot
   try {
-    if ($Args.Count -gt 0) {
-      & npm run $ScriptName -- $Args
+    if ($ScriptArgs.Count -gt 0) {
+      & npm run $ScriptName -- $ScriptArgs
     }
     else {
       npm run $ScriptName
     }
-    Add-CheckResult $Label ($LASTEXITCODE -eq 0) "npm run $ScriptName $($Args -join ' ')"
+    Add-CheckResult $Label ($LASTEXITCODE -eq 0) "npm run $ScriptName $($ScriptArgs -join ' ')"
   }
   catch {
     Add-CheckResult $Label $false $_.Exception.Message
@@ -156,7 +162,12 @@ function Test-TabletopDrillArtifact {
   Add-CheckResult "Tabletop drill marked complete" $complete "Requires `Status: Complete` marker."
 }
 
-Invoke-NpmScript -ScriptName "phase4:gate" -Label "Phase 4 technical validation gate"
+if ($SkipRepeatedChecks) {
+  Invoke-NpmScript -ScriptName "phase4:gate" -Label "Phase 4 technical validation gate" -ScriptArgs @("-SkipValidation")
+}
+else {
+  Invoke-NpmScript -ScriptName "phase4:gate" -Label "Phase 4 technical validation gate"
+}
 
 Push-Location $repoRoot
 try {
@@ -181,11 +192,13 @@ finally {
 }
 
 Invoke-NpmScript -ScriptName "phase5:reliability:gate" -Label "Phase 5 reliability gate"
-Invoke-NpmScript -ScriptName "security:secrets" -Label "Secrets scan gate" -Args @("-Enforce")
-Invoke-NpmScript -ScriptName "security:deps" -Label "Dependency security gate" -Args @("-Enforce")
-Invoke-NpmScript -ScriptName "security:firestore-rules" -Label "Firestore rules gate" -Args @("-Enforce")
-Invoke-NpmScript -ScriptName "quality:frontend:gate" -Label "Frontend quality + coverage gate"
-Invoke-NpmScript -ScriptName "quality:backend:gate" -Label "Backend quality gate"
+if (-not $SkipRepeatedChecks) {
+  Invoke-NpmScript -ScriptName "security:secrets" -Label "Secrets scan gate" -ScriptArgs @("-Enforce")
+  Invoke-NpmScript -ScriptName "security:deps" -Label "Dependency security gate" -ScriptArgs @("-Enforce")
+  Invoke-NpmScript -ScriptName "security:firestore-rules" -Label "Firestore rules gate" -ScriptArgs @("-Enforce")
+  Invoke-NpmScript -ScriptName "quality:frontend:gate" -Label "Frontend quality + coverage gate"
+  Invoke-NpmScript -ScriptName "quality:backend:gate" -Label "Backend quality gate"
+}
 Test-LegalComplianceChecklist
 Test-RiskRegisterBlockingState
 Test-RunbookReleaseControls
