@@ -5,23 +5,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
-## [Unreleased]
+## [0.7.5] – 2026-10-23
 
-A smaller installer, no more Pro screens, and an easy way to report problems.
+Parakeet becomes the default speech model, with your dictionary words built
+in. Also a smaller installer, no more Pro screens, an easy way to report
+problems, and dictation that lands in terminals and survives a failed
+transcription.
 
 ### Added
 
-- **Report a problem.** Help → Report a problem opens a pre-filled GitHub
-  issue with your app version, Windows version and speech engine. Nothing is
-  sent until you submit it on GitHub. Open logs folder shows the log files to
-  attach.
+- **Parakeet, the new default speech model.** NVIDIA's Parakeet TDT 0.6B v3
+  is now what setup recommends on every PC that can run it. It is about 3 to
+  4 times faster than Large Turbo on a graphics card and faster than Small on
+  a processor, and returns nothing instead of made-up words when you say
+  nothing. It runs on your graphics card once its own one-time check passes,
+  and on your processor otherwise. It understands English and 24 European
+  languages and has no language setting. Small and Large Turbo are still in
+  Models. Parakeet TDT 0.6B v3 is by NVIDIA and licensed under CC BY 4.0.
+- **Your dictionary words steer Parakeet.** Words from your dictionary are
+  favoured while Parakeet decides what you said, so names like "Claude" come
+  out right more often instead of being fixed up afterwards. Common words
+  and all-caps acronyms are left alone, so ordinary speech isn't pushed
+  around.
+- **A one-time offer for existing users.** If you used VoiceWave before, Home
+  shows a card explaining the switch to Parakeet, with Switch to Parakeet and
+  Not now. Your current model keeps dictating until Parakeet is downloaded,
+  and you can switch back anytime in Models. It is never shown again after
+  you answer.
+- **Start with Windows.** A new switch in Settings > General (and on the last
+  setup screen) opens VoiceWave in the tray when you sign in, with the speech
+  model already loaded, so the first dictation after a reboot is as fast as
+  any other. Off by default. The app log (Help > Open logs folder) records
+  `startup prewarm started` and `finished` with the time it took.
+- **Dictation into terminals.** Windows Terminal, PowerShell, Command Prompt,
+  Git Bash and other terminals now get the text pasted at the prompt instead
+  of only copied. Line breaks become spaces there, so dictated text can never
+  run a command on its own.
+- **Say "press enter" to send.** End a dictation with "press enter" (or "hit
+  enter") as its own sentence and VoiceWave presses Enter after the text
+  lands. Say it on its own to press Enter only. It follows the Spoken edit
+  commands switch.
+- **Try again after a failed transcription.** When transcription fails or
+  times out, the pill offers Try again, which transcribes the same recording.
+  The audio stays in memory only, and only until your next dictation.
+- **Report a problem and Copy diagnostics.** Help and Settings →
+  Diagnostics have Report a problem, which opens a GitHub issue form filled
+  in with a diagnostics report: app and Windows versions, speech engine,
+  microphone name and recent warnings from the log. Opening the form sends
+  that report to GitHub to fill it in; submitting it publishes the issue.
+  Copy diagnostics copies the same report, with a preview of exactly what it
+  contains. Attaching log files (Help → Open logs folder) is optional. Never
+  audio or anything you dictated.
+- **Your first word is no longer clipped.** After a dictation the mic stays
+  on for 2 minutes and remembers the last 0.6 seconds, so the next dictation
+  starts with what you said just before the hotkey went down. The mic also
+  opens faster when it was off. That audio stays in memory and is thrown away
+  unless you press the hotkey.
+- **Keep mic ready** (Settings → Audio, off by default) keeps the mic on
+  whenever VoiceWave is running, so even the first dictation after a break
+  keeps its first word. Windows shows the microphone-in-use icon while it is
+  on.
 - **Log files.** VoiceWave now keeps a week of daily log files, including a
   record of any crash. Logs never contain what you dictated.
 - **Setup and reliability counts** in the anonymous usage count: which setup
   step was reached, whether setup finished or was skipped, whether the first
   dictation ran on the GPU or the CPU, failed model downloads, and GPU-to-CPU
-  fallbacks. Each carries one category and nothing else. The existing switch
-  in setup and Settings → Diagnostics turns all of it off.
+  fallbacks. Each carries fixed categories and nothing else. The existing
+  switch in setup and Settings → Diagnostics turns all of it off.
+- **More reliability counts** in the anonymous usage count, if it's on: a
+  once-a-day app launch (and whether VoiceWave started with Windows), the
+  type of a failed dictation, speech helper crashes, and internal errors by
+  app area. Every count also says whether speech runs on the GPU or the CPU,
+  the model family, the graphics card maker and Windows 10 or 11. Fixed
+  categories only, never content.
+- **Choose your own dictation shortcut.** Settings → Dictation → Dictation
+  shortcut: click Change, press the keys you want, and let go. It works right
+  away, no restart. Esc cancels, and Reset to default brings back Ctrl + Win.
+  Shortcuts that would fire while you type, or that Windows keeps for itself,
+  are refused with the reason. Home, setup and Settings show your shortcut.
 
 ### Changed
 
@@ -37,6 +98,27 @@ A smaller installer, no more Pro screens, and an easy way to report problems.
 - The sign-in screen and sync messages are hidden. Release builds have no
   cloud accounts, and the old sign-in accepted any email without doing
   anything.
+- **Hands-free waits while you think.** Hands-free ends when you press the
+  shortcut again (Escape cancels). It only stops on its own after 30 seconds
+  of silence or at 5 minutes, and long recordings get more time to
+  transcribe.
+- **Apps running as administrator.** Windows blocks typing into them from a
+  normal app, so VoiceWave now copies the text and says so, instead of
+  reporting it as inserted.
+- **Clearer messages when a dictation fails.** The pill offers Try again only
+  when it can help. If the speech engine didn't start it asks you to restart
+  VoiceWave, and if the model is still downloading it keeps your recording
+  and says to try again when the download finishes.
+- **Fonts ship with the app.** The interface fonts are now part of the
+  install instead of being downloaded from Google Fonts at every launch, so
+  the app looks the same offline and makes no font requests.
+- The window title is now just "VoiceWave".
+
+### Fixed
+
+- **Helper processes close with VoiceWave.** The speech and AI polish helpers
+  now close when VoiceWave closes, even after a crash or an End task in Task
+  Manager, instead of staying behind and holding memory.
 
 ---
 

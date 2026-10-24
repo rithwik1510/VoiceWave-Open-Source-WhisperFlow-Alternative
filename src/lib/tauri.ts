@@ -19,6 +19,7 @@ import type {
   EntitlementSnapshot,
   FormatProfile,
   HotkeyAction,
+  HotkeyCaptureKey,
   HotkeyConfig,
   HotkeyEvent,
   HotkeyPhase,
@@ -49,6 +50,7 @@ import type {
   SessionHistoryRecord,
   StatsSummary,
   SupportContext,
+  TelemetryEvent,
   TranscriptEvent,
   UndoResult,
   VoiceWaveSettings,
@@ -155,6 +157,16 @@ export async function listenVoicewavePermission(
   }
   const { listen } = await import("@tauri-apps/api/event");
   return listen("voicewave://permission", (event: Event<PermissionSnapshot>) => callback(event.payload));
+}
+
+export async function listenVoicewaveHotkeyCapture(
+  callback: (payload: HotkeyCaptureKey) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://hotkey-capture", (event: Event<HotkeyCaptureKey>) => callback(event.payload));
 }
 
 export async function listenVoicewaveHotkey(
@@ -267,6 +279,16 @@ export async function listenVoicewaveHistoryUpdated(callback: () => void): Promi
   return listen("voicewave://history-updated", () => callback());
 }
 
+/** Fired by the backend whenever it queues a telemetry fact; the payload is
+ * empty, so drain with `drainTelemetry`. */
+export async function listenVoicewaveTelemetryPending(callback: () => void): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://telemetry-pending", () => callback());
+}
+
 export function canUseTauri(): boolean {
   return isTauriRuntime();
 }
@@ -364,10 +386,23 @@ export async function getSupportContext(): Promise<SupportContext> {
   return invokeVoicewave<SupportContext>("get_support_context");
 }
 
-/** Opens a pre-filled GitHub issue form in the browser. `engine` is a short
- * speech-engine summary (device, engine, model id) — never user text. */
+/** Opens a pre-filled GitHub issue form in the browser, with the diagnostics
+ * report in its `diagnostics` field. `engine` is a short speech-engine
+ * summary (device, engine, model id) — never user text. */
 export async function openIssueReport(engine: string): Promise<void> {
   await invokeVoicewave<void>("open_issue_report", { engine });
+}
+
+/** Plain-text diagnostics (versions, speech engine, mic, recent warnings);
+ * never audio or dictated text. Also what `openIssueReport` attaches. */
+export async function getDiagnosticsReport(): Promise<string> {
+  return invokeVoicewave<string>("get_diagnostics_report");
+}
+
+/** Returns and clears the backend's queued telemetry facts, including a panic
+ * recorded by the previous run. */
+export async function drainTelemetry(): Promise<TelemetryEvent[]> {
+  return invokeVoicewave<TelemetryEvent[]>("drain_telemetry");
 }
 
 export async function openLogsFolder(): Promise<void> {
@@ -380,6 +415,11 @@ export async function loadHotkeyConfig(): Promise<HotkeySnapshot> {
 
 export async function updateHotkeyConfig(config: HotkeyConfig): Promise<HotkeySnapshot> {
   return invokeVoicewave<HotkeySnapshot>("update_hotkey_config", { config });
+}
+
+/** Pauses the global hotkey while the Settings recorder listens for a new one. */
+export async function setHotkeyCapture(active: boolean): Promise<void> {
+  await invokeVoicewave<void>("set_hotkey_capture", { active });
 }
 
 export async function getPermissionSnapshot(): Promise<PermissionSnapshot> {
@@ -442,6 +482,11 @@ export async function cancelDictation(): Promise<void> {
   await invokeVoicewave<void>("cancel_dictation");
 }
 
+/** Reruns transcription on the audio kept after a failed dictation. */
+export async function retryLastDictation(): Promise<void> {
+  await invokeVoicewave<void>("retry_last_dictation");
+}
+
 export async function stopDictation(): Promise<void> {
   await invokeVoicewave<void>("stop_dictation");
 }
@@ -489,12 +534,7 @@ export async function getSpeechEngineStatus(): Promise<SpeechEngineStatus> {
   return invokeVoicewave<SpeechEngineStatus>("get_speech_engine_status");
 }
 
-/** Accept (returns the model to download) or decline the one-time GPU upgrade. */
-export async function answerGpuUpgrade(accept: boolean): Promise<string | null> {
-  return invokeVoicewave<string | null>("answer_gpu_upgrade", { accept });
-}
-
-/** Qualify the accepted upgrade model and switch to it; a no-op otherwise. */
+/** Qualify a GPU upgrade accepted before 0.7.5 and switch to it; a no-op otherwise. */
 export async function finishGpuUpgrade(): Promise<void> {
   return invokeVoicewave<void>("finish_gpu_upgrade");
 }

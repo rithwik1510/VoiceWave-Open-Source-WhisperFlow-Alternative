@@ -71,8 +71,8 @@ const ONYX_PALETTE = {
 
 const SHARED_STRUCTURE = {
   typography: {
-    fontDisplay: 'font-["Fraunces"]',
-    fontBody: 'font-["Manrope"]',
+    fontDisplay: "font-display",
+    fontBody: 'font-["Manrope_Variable"]',
     weightHeading: "font-semibold"
   },
   shapes: {

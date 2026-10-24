@@ -22,6 +22,8 @@ use super::gpu_select::{
 };
 use super::InferenceError;
 use crate::settings::DecodeMode;
+use crate::support::redact_profile_dir;
+use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
 use flate2::{write::ZlibEncoder, Compression};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -210,6 +212,13 @@ pub struct AsrModel {
     pub sha256: String,
 }
 
+impl AsrModel {
+    /// NVIDIA Parakeet (the worker's "parakeet" engine) rather than whisper.
+    pub fn is_parakeet(&self) -> bool {
+        super::is_parakeet_model(&self.id)
+    }
+}
+
 /// Why a dictation did not decode on the GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDownKind {
@@ -284,6 +293,10 @@ enum Fault {
         class: ErrorClass,
         reason: String,
         timed_out: bool,
+        /// Set where the worker died, hung or never came up (telemetry, and
+        /// `InferenceError::AsrWorker::failed_start`); `None` for an error
+        /// the worker itself reported.
+        exit: Option<WorkerExit>,
     },
 }
 
@@ -293,6 +306,43 @@ impl Fault {
             class,
             reason: reason.into(),
             timed_out: false,
+            exit: None,
+        }
+    }
+
+    /// Any failure on the way to a ready worker is a failed start.
+    fn failed_start(self) -> Self {
+        match self {
+            Fault::Worker {
+                class,
+                reason,
+                timed_out,
+                ..
+            } => Fault::Worker {
+                class,
+                reason,
+                timed_out,
+                exit: Some(WorkerExit::SpawnFailed),
+            },
+            other => other,
+        }
+    }
+
+    /// Telemetry for a failure on the dictation or prewarm path. Never
+    /// called for qualification: failing there is the check doing its job.
+    fn record(&self, rung: Rung) {
+        if let Fault::Worker {
+            exit: Some(exit), ..
+        } = self
+        {
+            let worker = match rung {
+                Rung::Gpu => WorkerKind::AsrGpu,
+                Rung::Cpu => WorkerKind::AsrCpu,
+            };
+            telemetry::record(TelemetryEvent::WorkerCrashed {
+                worker,
+                exit: *exit,
+            });
         }
     }
 }
@@ -305,9 +355,15 @@ impl From<Fault> for InferenceError {
                 model_id: "speech-worker".to_string(),
                 reason,
             },
-            Fault::Worker { class, reason, .. } => InferenceError::AsrWorker {
+            Fault::Worker {
+                class,
+                reason,
+                exit,
+                ..
+            } => InferenceError::AsrWorker {
                 class,
                 reason: trim_reason(&reason),
+                failed_start: exit == Some(WorkerExit::SpawnFailed),
             },
         }
     }
@@ -324,28 +380,6 @@ pub(crate) fn trim_reason(reason: &str) -> String {
     let mut trimmed: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
     trimmed.push('…');
     trimmed
-}
-
-/// `C:\Users\<name>` → `%USERPROFILE%`, ignoring ASCII case like Windows.
-fn redact_profile_dir(text: &str) -> String {
-    let needle = std::env::var("USERPROFILE")
-        .unwrap_or_default()
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase();
-    if needle.len() <= 3 {
-        return text.to_string();
-    }
-    // ASCII lowercasing keeps byte offsets, so they index `text` too.
-    let haystack = text.to_ascii_lowercase();
-    let mut redacted = String::with_capacity(text.len());
-    let mut at = 0;
-    while let Some(found) = haystack[at..].find(&needle) {
-        redacted.push_str(&text[at..at + found]);
-        redacted.push_str("%USERPROFILE%");
-        at += found + needle.len();
-    }
-    redacted.push_str(&text[at..]);
-    redacted
 }
 
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
@@ -430,6 +464,7 @@ impl WorkerProcess {
                 class: ErrorClass::Backend,
                 reason: format!("{} worker missed its {what} deadline", self.rung.dir_name()),
                 timed_out: true,
+                exit: Some(WorkerExit::Timeout),
             });
         }
         match self.responses.recv_timeout(POLL_SLICE.min(until - now)) {
@@ -442,14 +477,16 @@ impl WorkerProcess {
     fn exited(&self, what: &str) -> Fault {
         // Give the stderr drain a moment to capture the last lines.
         std::thread::sleep(Duration::from_millis(100));
-        Fault::worker(
-            ErrorClass::Backend,
-            format!(
+        Fault::Worker {
+            class: ErrorClass::Backend,
+            reason: format!(
                 "{} worker exited during {what}. stderr: {}",
                 self.rung.dir_name(),
                 self.stderr_text()
             ),
-        )
+            timed_out: false,
+            exit: Some(WorkerExit::Crash),
+        }
     }
 
     fn wait_ready(&mut self, deadline: Duration) -> Result<(), Fault> {
@@ -640,7 +677,15 @@ fn ensure_spawned(
         );
         *guard = None;
     }
-    *guard = Some(spawn(rung, ready_deadline)?);
+    // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
+    // it would crash on. A known hardware limit, not a failed start.
+    if cpu_support() != CpuSupport::Full {
+        return Err(Fault::worker(
+            ErrorClass::Backend,
+            "this processor lacks AVX2, which this speech model needs; choose a model in Models",
+        ));
+    }
+    *guard = Some(spawn(rung, ready_deadline).map_err(Fault::failed_start)?);
     Ok(())
 }
 
@@ -656,14 +701,6 @@ fn worker_command(exe: &Path) -> Command {
 }
 
 fn spawn(rung: Rung, ready_deadline: Duration) -> Result<WorkerProcess, Fault> {
-    // Both workers are built for AVX2 + FMA + F16C; never start one on a CPU
-    // it would crash on.
-    if cpu_support() != CpuSupport::Full {
-        return Err(Fault::worker(
-            ErrorClass::Backend,
-            "this processor lacks AVX2, which this speech model needs; choose a model in Models",
-        ));
-    }
     let exe = resolve_worker_exe(rung)?;
     let mut command = worker_command(&exe);
     command
@@ -676,6 +713,7 @@ fn spawn(rung: Rung, ready_deadline: Duration) -> Result<WorkerProcess, Fault> {
             format!("failed to start {}: {err}", exe.display()),
         )
     })?;
+    crate::job_object::assign(&child);
     lock(&LIVE_PIDS).push(child.id());
     let stdio = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let (request_tx, request_rx) = mpsc::channel::<String>();
@@ -771,6 +809,7 @@ pub(crate) fn list_devices() -> Result<Vec<Value>, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("failed to start {}: {err}", exe.display()))?;
+    crate::job_object::assign(&child);
     let mut stdout = child.stdout.take().ok_or("list-devices stdout unavailable")?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -939,6 +978,7 @@ fn note_gpu_fault(fault: &Fault, background_load: bool) {
         class,
         reason,
         timed_out,
+        ..
     } = fault
     else {
         return;
@@ -989,14 +1029,15 @@ fn note_report(model_path: &Path, reply: &Value) {
     lock(&SESSION).last_report = Some((model_path.to_path_buf(), RunningOn { device, name }));
 }
 
-/// Make sure the slot's worker is alive with `model_path` loaded. Returns
+/// Make sure the slot's worker is alive with `model` loaded. Returns
 /// (model_init_ms, already_loaded).
 fn ensure_loaded(
     guard: &mut Option<WorkerProcess>,
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     deadline: Duration,
 ) -> Result<(u64, bool), Fault> {
+    let model_path = model.path.as_path();
     // A short load deadline (the fresh-worker retry) shortens the start
     // too: a worker that hangs while starting must not cost the full 10 s.
     ensure_spawned(guard, rung, SPAWN_READY_DEADLINE.min(deadline / 3))?;
@@ -1013,6 +1054,9 @@ fn ensure_loaded(
         "device": "cpu",
         "warmup": true,
     });
+    if model.is_parakeet() {
+        body["engine"] = json!("parakeet");
+    }
     if rung == Rung::Gpu {
         let device = hardware_profile()
             .gpu
@@ -1068,7 +1112,7 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
         Rung::Cpu => LOAD_CPU_DEADLINE,
     };
     let started = Instant::now();
-    let result = ensure_loaded(&mut guard, rung, &model.path, deadline);
+    let result = ensure_loaded(&mut guard, rung, model, deadline);
     match &result {
         Ok((_, false)) => tracing::info!(
             "{} speech worker ready in {} ms",
@@ -1076,8 +1120,12 @@ fn prewarm_blocking(model: &AsrModel) -> Result<Prewarm, Fault> {
             started.elapsed().as_millis()
         ),
         Ok((_, true)) => {}
-        Err(fault) if rung == Rung::Gpu => note_gpu_fault(fault, true),
-        Err(_) => {}
+        Err(fault) => {
+            fault.record(rung);
+            if rung == Rung::Gpu {
+                note_gpu_fault(fault, true);
+            }
+        }
     }
     result.map(|_| Prewarm::Done)
 }
@@ -1088,14 +1136,17 @@ struct TranscribeJob {
     audio_ms: u64,
     beam_size: u32,
     initial_prompt: Option<String>,
+    /// Parakeet only: dictionary terms its decoder boosts (plan 021).
+    boost_terms: Vec<String>,
 }
 
 fn transcribe_blocking(
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     job: TranscribeJob,
     cancel: &CancellationToken,
 ) -> Result<FasterWhisperDecodeOutput, Fault> {
+    let model_path = model.path.as_path();
     // A busy slot means a load is in flight (startup or dictation-start
     // prewarm). Wait for it when it can finish within a normal load.
     let Some(mut guard) = lock_slot(rung, SPAWN_READY_DEADLINE + load_deadline(rung)) else {
@@ -1108,7 +1159,7 @@ fn transcribe_blocking(
         return Err(Fault::Cancelled);
     }
 
-    let result = ensure_loaded(&mut guard, rung, model_path, job.load_deadline).and_then(
+    let result = ensure_loaded(&mut guard, rung, model, job.load_deadline).and_then(
         |(model_init_ms, cache_hit)| {
             let mut body = json!({
                 "command": "transcribe",
@@ -1119,6 +1170,9 @@ fn transcribe_blocking(
             });
             if let Some(prompt) = &job.initial_prompt {
                 body["initialPrompt"] = json!(prompt);
+            }
+            if !job.boost_terms.is_empty() {
+                body["boostTerms"] = json!(job.boost_terms);
             }
             let reply = with_worker(&mut guard, |worker| {
                 // Only dictation decodes count: the qualification's two clip
@@ -1133,6 +1187,17 @@ fn transcribe_blocking(
             note_report(model_path, &reply);
             if rung == Rung::Gpu {
                 lock(&SESSION).gpu_failures = 0;
+            }
+            // Counts only: never a term or transcript text in the log.
+            if let Some(boost) = reply.get("boost") {
+                tracing::debug!(
+                    "parakeet boost: {} terms, {} skipped, {} matched, {} changed, {} ms",
+                    boost["terms"],
+                    boost["skipped"],
+                    boost["completed"],
+                    boost["flipped"],
+                    boost["ms"]
+                );
             }
             let text = reply["text"]
                 .as_str()
@@ -1155,6 +1220,11 @@ fn transcribe_blocking(
         },
     );
     if let Err(fault) = &result {
+        // A worker that missed its deadline while cancelling is the user's
+        // cancel, not a hang.
+        if !cancel.is_cancelled() {
+            fault.record(rung);
+        }
         if rung == Rung::Gpu {
             note_gpu_fault(fault, false);
         }
@@ -1296,6 +1366,7 @@ fn fault_verdict(fault: Fault, during_load: bool) -> Verdict {
             class: ErrorClass::Backend,
             timed_out: true,
             reason,
+            ..
         } if during_load => Verdict::Retry(format!("load ran past 120 s (driver still preparing): {reason}")),
         Fault::Worker {
             class: ErrorClass::Backend,
@@ -1320,7 +1391,7 @@ fn qualify_gpu_blocking(model: &AsrModel, clips: &[QualifyClip]) -> (Verdict, Qu
     // Start clean so the load (and any shader compile) is measured honestly.
     *guard = None;
     let started = Instant::now();
-    if let Err(fault) = ensure_loaded(&mut guard, Rung::Gpu, &model.path, LOAD_GPU_FIRST_USE_DEADLINE) {
+    if let Err(fault) = ensure_loaded(&mut guard, Rung::Gpu, model, LOAD_GPU_FIRST_USE_DEADLINE) {
         return (fault_verdict(fault, true), timings);
     }
     timings.load_ms = started.elapsed().as_millis() as u64;
@@ -1668,16 +1739,19 @@ pub(crate) async fn wait_for_gpu_check(
 }
 
 /// One decode on `rung`. `overrides` carries the shared pipeline's beam size
-/// and prompt; the worker always decodes at temperature 0 without previous
-/// text conditioning. `load_deadline` overrides the rung's default (the
-/// fresh-worker retry after a GPU fault uses a short one).
+/// and prompt (Parakeet ignores both; it takes `boost_terms` instead, which
+/// whisper models never send); the worker always decodes at temperature 0
+/// without previous text conditioning. `load_deadline`
+/// overrides the rung's default (the fresh-worker retry after a GPU fault
+/// uses a short one).
 pub(crate) async fn transcribe(
     rung: Rung,
-    model_path: &Path,
+    model: &AsrModel,
     load_deadline: Option<Duration>,
     samples: &[f32],
     decode_mode: DecodeMode,
     overrides: &FasterWhisperRequestOverrides,
+    boost_terms: &[String],
     cancel: &CancellationToken,
 ) -> Result<FasterWhisperDecodeOutput, InferenceError> {
     if cancel.is_cancelled() {
@@ -1699,10 +1773,15 @@ pub(crate) async fn transcribe(
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty())
             .map(str::to_string),
+        boost_terms: if model.is_parakeet() {
+            boost_terms.to_vec()
+        } else {
+            Vec::new()
+        },
     };
-    let model_path = model_path.to_path_buf();
+    let model = model.clone();
     let cancel = cancel.clone();
-    tokio::task::spawn_blocking(move || transcribe_blocking(rung, &model_path, job, &cancel))
+    tokio::task::spawn_blocking(move || transcribe_blocking(rung, &model, job, &cancel))
         .await
         .map_err(join_error)?
         .map_err(InferenceError::from)

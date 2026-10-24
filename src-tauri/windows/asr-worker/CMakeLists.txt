@@ -51,14 +51,22 @@ set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
 set(WHISPER_SDL2 OFF CACHE BOOL "" FORCE)
 
-# Pinned upstream whisper.cpp 1.9.5. To build from a local checkout instead,
-# pass -DFETCHCONTENT_SOURCE_DIR_WHISPER=<path> (skips the download).
+# Pinned upstream whisper.cpp 1.9.5 plus our Parakeet logits-filter patch
+# (plan 021). A patch that does not apply fails the configure. To build from a
+# local checkout instead, pass -DFETCHCONTENT_SOURCE_DIR_WHISPER=<path> (skips
+# the download AND the patch: apply it to that checkout first).
 include(FetchContent)
+find_package(Git REQUIRED)
+set(parakeet_patch "${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/asr-worker/parakeet-logits-filter.patch")
 FetchContent_Declare(
   whisper
   URL https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.9.5.tar.gz
   URL_HASH SHA256=ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0dc1720
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  # The ceiling stops git from finding an enclosing repository, which would
+  # make `git apply` resolve paths against that repo and silently skip files.
+  PATCH_COMMAND "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=${FETCHCONTENT_BASE_DIR}"
+                "${GIT_EXECUTABLE}" apply --verbose "${parakeet_patch}"
 )
 FetchContent_MakeAvailable(whisper)
 
@@ -71,7 +79,9 @@ endif()
 add_executable(${worker_name} main.cpp)
 # nlohmann/json ships inside the pinned whisper.cpp tree (examples/json.hpp).
 target_include_directories(${worker_name} PRIVATE "${whisper_SOURCE_DIR}/examples")
-target_link_libraries(${worker_name} PRIVATE whisper ggml psapi)
+# parakeet: NVIDIA Parakeet TDT models via the same tree's parakeet.h (static,
+# shares the ggml build above).
+target_link_libraries(${worker_name} PRIVATE whisper parakeet ggml psapi)
 target_compile_definitions(${worker_name} PRIVATE
   NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS
   VOICEWAVE_ASR_VARIANT="$<IF:$<BOOL:${VOICEWAVE_ASR_VULKAN}>,vk,cpu>")

@@ -195,12 +195,16 @@ pub struct VoiceWaveSettings {
     /// default; NO per-field serde default here so the container-level
     /// default (true) applies when the field is absent from older settings.
     pub spoken_edit_commands: bool,
-    pub prefer_clipboard_only_for_terminals: bool,
     /// OS input-volume guard behavior at dictation start. Defaults to Warn:
     /// external apps (browser AGC, call apps) silently lower the system mic
     /// volume and tank transcription quality for every model at once.
     #[serde(default)]
     pub mic_volume_guard: MicVolumeGuardMode,
+    /// Keep the dictation mic stream (and its in-memory pre-roll) running
+    /// while the app runs, not just for the warm window after a dictation.
+    /// Off by default: Windows shows the mic-in-use icon the whole time.
+    #[serde(default)]
+    pub keep_mic_ready: bool,
     /// Opt-in one-tap "Add to dictionary?" suggestion in the pill after a
     /// dictation with a single high-confidence correction candidate. Off by
     /// default so the calm default UX never regresses; the dictionary review
@@ -239,6 +243,12 @@ pub struct VoiceWaveSettings {
     /// GPU acceleration for dictation; Auto by default.
     #[serde(default)]
     pub gpu_acceleration: GpuAcceleration,
+    /// The one-time Home card offering existing users the switch to Parakeet
+    /// (0.7.5) was answered: "Not now", or Parakeet was made active (the
+    /// card or Models). Finishing onboarding sets it too, since setup already
+    /// offers Parakeet. False for settings files that predate it.
+    #[serde(default)]
+    pub parakeet_offer_answered: bool,
 }
 
 impl VoiceWaveSettings {
@@ -264,7 +274,7 @@ impl Default for VoiceWaveSettings {
             anonymous_usage_opt_in: true,
             analytics_consent_version: 0,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
-            push_to_talk_hotkey: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
+            push_to_talk_hotkey: DEFAULT_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
             format_profile: FormatProfile::Default,
             active_domain_packs: Vec::new(),
@@ -272,8 +282,8 @@ impl Default for VoiceWaveSettings {
             code_mode: CodeModeSettings::default(),
             pro_post_processing_enabled: true,
             spoken_edit_commands: true,
-            prefer_clipboard_only_for_terminals: true,
             mic_volume_guard: MicVolumeGuardMode::default(),
+            keep_mic_ready: false,
             pill_action_suggestions: false,
             llm_polish_enabled: false,
             onboarding_completed: false,
@@ -281,6 +291,7 @@ impl Default for VoiceWaveSettings {
             polish_profile: Some(PolishProfile::Standard),
             polish_profile_customized: false,
             gpu_acceleration: GpuAcceleration::Auto,
+            parakeet_offer_answered: false,
         }
     }
 }
@@ -352,7 +363,11 @@ fn normalize_active_model_id(active_model: &str) -> String {
         // Both families are valid (plan 019): faster-whisper (fw-*) and
         // whisper.cpp GGML (wcpp-*). An active model is never rewritten to
         // the other family.
-        "fw-small.en" | "fw-large-v3-turbo" | "wcpp-small.en" | "wcpp-large-v3-turbo" => {
+        "fw-small.en"
+        | "fw-large-v3-turbo"
+        | "wcpp-small.en"
+        | "wcpp-large-v3-turbo"
+        | "wcpp-parakeet-tdt-0.6b-v3" => {
             active_model.trim().to_string()
         }
         // Retired catalog entries migrate to the closest surviving model.
@@ -400,12 +415,26 @@ fn migrate_analytics_consent(settings: &mut VoiceWaveSettings) {
     }
 }
 
+/// The hands-free toggle is fixed; only hold-to-talk is user-rebindable.
 pub const LOCKED_TOGGLE_HOTKEY: &str = "Ctrl+Alt+X";
-pub const LOCKED_PUSH_TO_TALK_HOTKEY: &str = "Ctrl+Windows";
+pub const DEFAULT_PUSH_TO_TALK_HOTKEY: &str = "Ctrl+Windows";
 
+/// Pins the toggle and canonicalizes the hold-to-talk shortcut, falling back
+/// to the default when a saved value is unusable (hand-edited file, or a combo
+/// an older build accepted).
 pub fn normalize_hotkey_bindings(settings: &mut VoiceWaveSettings) {
     settings.toggle_hotkey = LOCKED_TOGGLE_HOTKEY.to_string();
-    settings.push_to_talk_hotkey = LOCKED_PUSH_TO_TALK_HOTKEY.to_string();
+    settings.push_to_talk_hotkey =
+        match crate::hotkey::validate_push_to_talk(&settings.push_to_talk_hotkey) {
+            Ok(canonical) => canonical,
+            Err(err) => {
+                tracing::warn!(
+                    "saved hold-to-talk shortcut {:?} is unusable ({err}); using the default",
+                    settings.push_to_talk_hotkey
+                );
+                DEFAULT_PUSH_TO_TALK_HOTKEY.to_string()
+            }
+        };
 }
 
 #[cfg(test)]
@@ -472,15 +501,15 @@ mod tests {
     }
 
     #[test]
-    fn load_enforces_locked_hotkey_pair() {
+    fn load_pins_toggle_and_resets_unusable_push_to_talk() {
         let path = temp_settings_path();
         let store = SettingsStore::from_path(path.clone());
-        let raw = r#"{"toggleHotkey":"Ctrl+Shift+Space","pushToTalkHotkey":"Ctrl+Alt+Space"}"#;
+        let raw = r#"{"toggleHotkey":"Ctrl+Shift+Space","pushToTalkHotkey":"Q"}"#;
         std::fs::write(&path, raw).expect("write should succeed");
 
         let loaded = store.load().expect("load should succeed");
         assert_eq!(loaded.toggle_hotkey, LOCKED_TOGGLE_HOTKEY);
-        assert_eq!(loaded.push_to_talk_hotkey, LOCKED_PUSH_TO_TALK_HOTKEY);
+        assert_eq!(loaded.push_to_talk_hotkey, DEFAULT_PUSH_TO_TALK_HOTKEY);
 
         let _ = std::fs::remove_file(path);
     }
@@ -609,26 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn prefer_clipboard_only_for_terminals_defaults_to_true() {
-        let settings = VoiceWaveSettings::default();
-        assert!(settings.prefer_clipboard_only_for_terminals);
-    }
-
-    #[test]
-    fn prefer_clipboard_only_for_terminals_round_trips() {
-        let path = temp_settings_path();
-        let store = SettingsStore::from_path(path.clone());
-        let mut settings = VoiceWaveSettings::default();
-        settings.prefer_clipboard_only_for_terminals = false;
-        store.save(&settings).expect("save should succeed");
-
-        let loaded = store.load().expect("load should succeed");
-        assert!(!loaded.prefer_clipboard_only_for_terminals);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn theme_defaults_to_system_and_round_trips() {
         assert_eq!(VoiceWaveSettings::default().theme, ThemePreference::System);
 
@@ -644,21 +653,6 @@ mod tests {
         assert!(raw.contains("\"theme\": \"dark\""), "{raw}");
         let loaded = store.load().expect("load should succeed");
         assert_eq!(loaded.theme, ThemePreference::Dark);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn backward_compat_missing_field_defaults_to_true() {
-        // Old settings JSON without preferClipboardOnlyForTerminals
-        // should deserialize with the default (true).
-        let path = temp_settings_path();
-        let store = SettingsStore::from_path(path.clone());
-        let raw = r#"{"activeModel":"fw-small.en"}"#;
-        std::fs::write(&path, raw).expect("write should succeed");
-
-        let loaded = store.load().expect("load should succeed");
-        assert!(loaded.prefer_clipboard_only_for_terminals);
 
         let _ = std::fs::remove_file(path);
     }

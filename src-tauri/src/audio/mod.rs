@@ -1,4 +1,5 @@
 pub mod input_volume;
+pub mod mic_keeper;
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -6,7 +7,11 @@ use cpal::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -91,7 +96,26 @@ pub enum CaptureEndPolicy {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Limits that replace the base ones while a capture is hands-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandsFreeLimits {
+    pub max_capture_duration: Duration,
+    /// Both the wait for first speech and the trailing silence that ends the
+    /// capture. Long on purpose: hands-free ends on the user's second press,
+    /// and this only catches a forgotten open mic.
+    pub silence_timeout: Duration,
+}
+
+/// Hands-free switch for a capture (plan 020). The flag can flip mid-capture
+/// (a double-tap locks a hold-to-talk session), so the loop reads it on every
+/// pass instead of fixing the limits at start.
+#[derive(Debug, Clone)]
+pub struct HandsFreeSwitch {
+    pub active: Arc<AtomicBool>,
+    pub limits: HandsFreeLimits,
+}
+
+#[derive(Debug, Clone)]
 pub struct CaptureOptions {
     pub vad_config: VadConfig,
     pub max_capture_duration: Duration,
@@ -99,6 +123,8 @@ pub struct CaptureOptions {
     /// capture. This is independent of how a capture ends after speech.
     pub initial_speech_timeout: Duration,
     pub end_policy: CaptureEndPolicy,
+    /// While active, overrides the three limits above (see HandsFreeLimits).
+    pub hands_free: Option<HandsFreeSwitch>,
     pub preserve_full_capture: bool,
     /// During the first `vad_warmup_duration` of capture, use this lower
     /// threshold instead of `vad_config.threshold`. Prevents the system
@@ -118,10 +144,21 @@ impl Default for CaptureOptions {
                 trailing_silence: Duration::from_millis(750),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: false,
             vad_warmup_threshold: None,
             vad_warmup_duration: Duration::from_millis(0),
         }
+    }
+}
+
+impl CaptureOptions {
+    /// Hands-free limits when the switch is on right now.
+    fn active_hands_free(&self) -> Option<HandsFreeLimits> {
+        self.hands_free
+            .as_ref()
+            .filter(|switch| switch.active.load(Ordering::Relaxed))
+            .map(|switch| switch.limits)
     }
 }
 
@@ -246,8 +283,17 @@ impl AudioCaptureService {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
         let (error_tx, error_rx) = mpsc::channel::<String>();
 
-        let stream =
-            build_input_stream(&device, &stream_config, sample_format, audio_tx, error_tx)?;
+        let stream = build_input_stream(
+            &device,
+            &stream_config,
+            sample_format,
+            move |chunk| {
+                let _ = audio_tx.send(chunk);
+            },
+            move |err| {
+                let _ = error_tx.send(err);
+            },
+        )?;
         stream.play().map_err(AudioError::PlayStream)?;
         on_stream_ready();
 
@@ -378,7 +424,15 @@ impl AudioCaptureService {
             | CaptureEndPolicy::EndOnSilence { release_tail, .. } => release_tail,
         };
 
-        while started.elapsed() <= options.max_capture_duration {
+        loop {
+            let hands_free = options.active_hands_free();
+            let max_capture_duration =
+                hands_free.map_or(options.max_capture_duration, |limits| {
+                    limits.max_capture_duration
+                });
+            if started.elapsed() > max_capture_duration {
+                break;
+            }
             if should_cancel() {
                 return Err(AudioError::Cancelled);
             }
@@ -425,7 +479,7 @@ impl AudioCaptureService {
                 return Err(AudioError::RuntimeStream(stream_err));
             }
 
-            match audio_rx.recv_timeout(Duration::from_millis(10)) {
+            let timed_out = match audio_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(raw_chunk) => {
                     let normalized = self.normalize_frame(AudioFrame {
                         sample_rate,
@@ -458,30 +512,51 @@ impl AudioCaptureService {
                             segments.push(segment);
                         }
                     }
+                    false
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    if stop_requested_at.is_some() {
-                        continue;
-                    }
-                    if !speech_detected {
-                        if started.elapsed() >= options.initial_speech_timeout {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if let CaptureEndPolicy::EndOnSilence {
-                        trailing_silence, ..
-                    } = options.end_policy
-                    {
-                        if let Some(last_voice_at) = last_voice_at {
-                            if last_voice_at.elapsed() >= trailing_silence {
-                                break;
-                            }
-                        }
-                    }
-                }
+                Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
+            };
+
+            // Hands-free and end-on-silence deadlines run on every pass, chunk
+            // or timeout: a device that delivers a buffer at least every 10 ms
+            // never times out. Hold-to-talk keeps its first-speech wait on
+            // timeouts only, as before (the user is holding the key, so the
+            // release is the real stop). Not while the release tail runs; it
+            // has its own exits above.
+            if stop_requested_at.is_some() {
+                continue;
+            }
+            let every_pass = hands_free.is_some()
+                || matches!(options.end_policy, CaptureEndPolicy::EndOnSilence { .. });
+            if !timed_out && !every_pass {
+                continue;
+            }
+            if !speech_detected {
+                let initial_speech_timeout = hands_free
+                    .map_or(options.initial_speech_timeout, |limits| {
+                        limits.silence_timeout
+                    });
+                if started.elapsed() >= initial_speech_timeout {
+                    break;
+                }
+                continue;
+            }
+            let trailing_silence = match (hands_free, options.end_policy) {
+                (Some(limits), _) => Some(limits.silence_timeout),
+                (
+                    None,
+                    CaptureEndPolicy::EndOnSilence {
+                        trailing_silence, ..
+                    },
+                ) => Some(trailing_silence),
+                (None, CaptureEndPolicy::ExplicitStop { .. }) => None,
+            };
+            if let (Some(trailing_silence), Some(last_voice_at)) = (trailing_silence, last_voice_at)
+            {
+                if last_voice_at.elapsed() >= trailing_silence {
+                    break;
+                }
             }
         }
 
@@ -534,23 +609,21 @@ fn is_likely_low_quality_asr_input(device_name: &str) -> bool {
         || normalized.contains("sco")
 }
 
+/// Raw input stream: `on_data` gets each callback buffer as interleaved f32
+/// at the device's own rate and channel count.
 fn build_input_stream(
     device: &cpal::Device,
     stream_config: &StreamConfig,
     sample_format: SampleFormat,
-    audio_tx: Sender<Vec<f32>>,
-    error_tx: Sender<String>,
+    mut on_data: impl FnMut(Vec<f32>) + Send + 'static,
+    mut on_error: impl FnMut(String) + Send + 'static,
 ) -> Result<Stream, AudioError> {
     match sample_format {
         SampleFormat::F32 => device
             .build_input_stream(
                 stream_config,
-                move |data: &[f32], _| {
-                    let _ = audio_tx.send(data.to_vec());
-                },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |data: &[f32], _| on_data(data.to_vec()),
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
@@ -558,15 +631,13 @@ fn build_input_stream(
             .build_input_stream(
                 stream_config,
                 move |data: &[i16], _| {
-                    let converted = data
-                        .iter()
-                        .map(|sample| *sample as f32 / i16::MAX as f32)
-                        .collect::<Vec<_>>();
-                    let _ = audio_tx.send(converted);
+                    on_data(
+                        data.iter()
+                            .map(|sample| *sample as f32 / i16::MAX as f32)
+                            .collect(),
+                    )
                 },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
@@ -574,15 +645,13 @@ fn build_input_stream(
             .build_input_stream(
                 stream_config,
                 move |data: &[u16], _| {
-                    let converted = data
-                        .iter()
-                        .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect::<Vec<_>>();
-                    let _ = audio_tx.send(converted);
+                    on_data(
+                        data.iter()
+                            .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                            .collect(),
+                    )
                 },
-                move |err| {
-                    let _ = error_tx.send(err.to_string());
-                },
+                move |err| on_error(err.to_string()),
                 None,
             )
             .map_err(AudioError::BuildStream),
@@ -1418,6 +1487,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(120),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1464,6 +1534,7 @@ mod tests {
                 trailing_silence,
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1512,6 +1583,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(700),
                 release_tail,
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1562,6 +1634,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(600),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1616,6 +1689,7 @@ mod tests {
             end_policy: CaptureEndPolicy::ExplicitStop {
                 release_tail: Duration::from_millis(600),
             },
+            hands_free: None,
             preserve_full_capture: false,
             ..CaptureOptions::default()
         };
@@ -1675,6 +1749,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(40),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };
@@ -1716,6 +1791,7 @@ mod tests {
                 trailing_silence: Duration::from_millis(40),
                 release_tail: Duration::ZERO,
             },
+            hands_free: None,
             preserve_full_capture: true,
             ..CaptureOptions::default()
         };

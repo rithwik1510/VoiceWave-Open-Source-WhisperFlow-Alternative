@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -31,6 +32,45 @@ pub struct InsertResult {
     pub target_app: Option<String>,
     pub transaction_id: String,
     pub undo_available: bool,
+    /// The focused app runs at a higher integrity level (usually "as
+    /// administrator"), so Windows would silently drop our keystrokes. The
+    /// text went to the clipboard instead (plan 020).
+    #[serde(default)]
+    pub blocked_by_elevation: bool,
+}
+
+/// `dwExtraInfo` tag on every keystroke VoiceWave sends (typing, paste
+/// chords, Enter, undo). The hotkey hook passes these straight through, so
+/// a paste chord that happens to match the user's hotkey does not start a
+/// session. Other injected input (AutoHotkey, PowerToys remaps) carries no
+/// tag and still reaches the hotkey logic.
+pub const VOICEWAVE_INPUT_MARKER: usize = 0x5657_4156; // "VWAV"
+
+/// HUD message for an elevated target; the pill carries the same facts.
+const ELEVATED_TARGET_MESSAGE: &str =
+    "This app runs as administrator, so VoiceWave can't type into it. Press Ctrl+V.";
+
+/// Keystroke that pastes in a given target. Terminals bind paste to
+/// different chords, and a wrong one is not harmless (Ctrl+V is bash's
+/// quoted-insert in mintty), so each terminal family gets its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteChord {
+    CtrlV,
+    CtrlShiftV,
+    ShiftInsert,
+}
+
+/// Why a spoken submit (plan 020) did not press Enter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitError {
+    /// The text only reached the clipboard (or nothing), so Enter would
+    /// submit an empty or stale prompt.
+    NotDelivered,
+    /// The foreground window changed after the text went in.
+    FocusMoved,
+    /// The focused app runs as administrator; Windows would drop the key.
+    Elevated,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +120,18 @@ pub trait InsertionBackend: Send {
         None
     }
 
+    /// True when the foreground app runs at a higher integrity level than
+    /// VoiceWave, where UIPI drops injected input without reporting it.
+    fn target_is_elevated(&mut self) -> bool {
+        false
+    }
+
+    /// Opaque id of the foreground window, used to confirm focus has not
+    /// moved between inserting text and pressing Enter after it.
+    fn foreground_window(&mut self) -> Option<isize> {
+        None
+    }
+
     fn direct_insert(
         &mut self,
         text: &str,
@@ -90,6 +142,7 @@ pub trait InsertionBackend: Send {
         &mut self,
         text: &str,
         target_app: Option<&str>,
+        chord: PasteChord,
     ) -> Result<BackendInsertSuccess, String>;
 
     fn clipboard_only(
@@ -99,6 +152,9 @@ pub trait InsertionBackend: Send {
     ) -> Result<BackendInsertSuccess, String>;
 
     fn undo(&mut self, token: &UndoToken) -> Result<Option<String>, String>;
+
+    /// One Enter keystroke into the foreground window.
+    fn press_enter(&mut self) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +167,10 @@ pub struct InsertionEngine {
     backend: Box<dyn InsertionBackend>,
     history: VecDeque<RecentInsertion>,
     last_successful: Option<UndoRecord>,
+    /// Window that received the last insertion via keystrokes or paste;
+    /// None after a clipboard-only or failed insert. Spoken submit presses
+    /// Enter only while this window still has focus.
+    last_landed_window: Option<isize>,
     next_id: u64,
     history_limit: usize,
 }
@@ -127,6 +187,7 @@ impl InsertionEngine {
             backend,
             history: VecDeque::with_capacity(32),
             last_successful: None,
+            last_landed_window: None,
             next_id: 1,
             history_limit: 50,
         }
@@ -136,6 +197,8 @@ impl InsertionEngine {
         &mut self,
         request: InsertTextRequest,
     ) -> Result<InsertResult, InsertionError> {
+        // A submit may only follow the insertion it belongs to.
+        self.last_landed_window = None;
         if request.text.trim().is_empty() {
             return Err(InsertionError::EmptyText);
         }
@@ -154,11 +217,42 @@ impl InsertionEngine {
             self.backend.detect_target_process()
         };
 
-        let prefer_clipboard = request.prefer_clipboard
-            || should_auto_prefer_clipboard(&request.text, target_ref, target_process.as_deref());
+        // UIPI drops keystrokes into a higher-integrity app without any error,
+        // so an elevated target goes straight to the clipboard (plan 020).
+        let blocked_by_elevation = request.target_app.is_none()
+            && !request.force_clipboard_only
+            && self.backend.target_is_elevated();
+        let terminal = classify_terminal(target_process.as_deref(), target_ref);
+        // Terminal text is flattened to one line so nothing in it can act as
+        // an Enter (see `terminal_safe_text`).
+        let text: Cow<str> = if terminal.is_some() {
+            Cow::Owned(terminal_safe_text(&request.text))
+        } else {
+            Cow::Borrowed(request.text.as_str())
+        };
+        if text.trim().is_empty() {
+            return Err(InsertionError::EmptyText);
+        }
+        let paste_chord = match terminal {
+            Some(TerminalTarget::Paste(chord)) => chord,
+            _ => PasteChord::CtrlV,
+        };
+        let landing_window = self.backend.foreground_window();
 
-        let method_order = if request.force_clipboard_only {
+        let prefer_clipboard = request.prefer_clipboard
+            || should_auto_prefer_clipboard(&text, target_ref, target_process.as_deref());
+
+        let method_order = if request.force_clipboard_only
+            || blocked_by_elevation
+            || terminal == Some(TerminalTarget::ClipboardOnly)
+        {
             vec![InsertionMethod::ClipboardOnly]
+        } else if terminal.is_some() {
+            // Keystroke typing is unreliable through ConPTY; paste only.
+            vec![
+                InsertionMethod::ClipboardPaste,
+                InsertionMethod::ClipboardOnly,
+            ]
         } else if prefer_clipboard {
             vec![
                 InsertionMethod::ClipboardPaste,
@@ -178,18 +272,24 @@ impl InsertionEngine {
 
         for method in method_order {
             let attempt = match method {
-                InsertionMethod::Direct => self.backend.direct_insert(&request.text, target_ref),
+                InsertionMethod::Direct => self.backend.direct_insert(&text, target_ref),
                 InsertionMethod::ClipboardPaste => {
-                    self.backend.clipboard_paste(&request.text, target_ref)
+                    self.backend.clipboard_paste(&text, target_ref, paste_chord)
                 }
-                InsertionMethod::ClipboardOnly => {
-                    self.backend.clipboard_only(&request.text, target_ref)
-                }
+                InsertionMethod::ClipboardOnly => self.backend.clipboard_only(&text, target_ref),
                 InsertionMethod::HistoryFallback => unreachable!("history fallback is synthetic"),
             };
 
             match attempt {
-                Ok(result) => {
+                Ok(mut result) => {
+                    // Undo sends Ctrl+Z, which suspends the foreground job in
+                    // a Unix-style shell. Never offer it for a terminal.
+                    if terminal.is_some() {
+                        result.undo_token = None;
+                    }
+                    if blocked_by_elevation {
+                        result.message = Some(ELEVATED_TARGET_MESSAGE.to_string());
+                    }
                     let undo_available = result.undo_token.is_some();
                     success_undo = result.undo_token;
                     success_result = Some(InsertResult {
@@ -199,6 +299,7 @@ impl InsertionEngine {
                         target_app: resolved_target.clone(),
                         transaction_id: transaction_id.clone(),
                         undo_available,
+                        blocked_by_elevation,
                     });
                     break;
                 }
@@ -217,6 +318,7 @@ impl InsertionEngine {
             target_app: resolved_target.clone(),
             transaction_id: transaction_id.clone(),
             undo_available: false,
+            blocked_by_elevation,
         });
 
         if !result.success && result.message.is_none() {
@@ -224,15 +326,52 @@ impl InsertionEngine {
                 Some("Insertion blocked. Transcript saved to quick history.".to_string());
         }
 
+        self.last_landed_window = if result.success
+            && matches!(
+                result.method,
+                InsertionMethod::Direct | InsertionMethod::ClipboardPaste
+            ) {
+            landing_window
+        } else {
+            None
+        };
+        // History keeps what was said, not the flattened terminal copy, so it
+        // matches the main History and copies back with its line breaks.
         self.record_history(&result, &request.text);
-        if let Some(token) = success_undo {
-            self.last_successful = Some(UndoRecord {
+        // Undo always refers to the latest landed insertion. One that can't be
+        // undone (a terminal paste, clipboard only) clears the older record,
+        // so Ctrl+Z is never sent on behalf of text from an earlier app.
+        if result.success {
+            self.last_successful = success_undo.map(|token| UndoRecord {
                 transaction_id: transaction_id.clone(),
                 token,
             });
         }
 
         Ok(result)
+    }
+
+    /// Spoken submit after an insertion (plan 020): one Enter into the window
+    /// that just received the text. Refuses when the text never reached an
+    /// app or focus has moved since, so Enter cannot land somewhere the user
+    /// didn't dictate into. Consumes the landing record either way.
+    pub fn press_enter_after_insert(&mut self) -> Result<(), SubmitError> {
+        let Some(expected) = self.last_landed_window.take() else {
+            return Err(SubmitError::NotDelivered);
+        };
+        if self.backend.foreground_window() != Some(expected) {
+            return Err(SubmitError::FocusMoved);
+        }
+        self.backend.press_enter().map_err(SubmitError::Failed)
+    }
+
+    /// Spoken submit with no text ("press enter" on its own): Enter into the
+    /// focused window, unless Windows would drop it.
+    pub fn press_enter_now(&mut self) -> Result<(), SubmitError> {
+        if self.backend.target_is_elevated() {
+            return Err(SubmitError::Elevated);
+        }
+        self.backend.press_enter().map_err(SubmitError::Failed)
     }
 
     pub fn undo_last(&mut self) -> UndoResult {
@@ -369,38 +508,99 @@ pub fn title_contains_word(lowered_title: &str, word: &str) -> bool {
     })
 }
 
-/// Executable names of terminal hosts where SendInput keystroke injection
-/// and synthetic Ctrl+V are unreliable (ConPTY translation, raw stdin mode).
-/// Matching on the foreground *process* is authoritative: window titles lie.
-/// The Codex and Claude desktop apps carry "codex"/"claude" in their window
-/// titles but are ordinary Electron GUIs that paste fine — only the real
-/// terminal hosts belong here.
-pub fn is_terminal_process_exe(exe_name: &str) -> bool {
-    const TERMINAL_PROCESS_EXES: &[&str] = &[
+/// Paste chord for a terminal host, by executable name; None when the
+/// process is not a terminal. Matching on the foreground *process* is
+/// authoritative because window titles lie: the Codex and Claude desktop apps
+/// carry "codex"/"claude" in their titles but are ordinary Electron GUIs.
+///
+/// Chords are each family's default paste binding (plan 020):
+/// - Windows Terminal binds Ctrl+V, Ctrl+Shift+V and Shift+Insert. Ctrl+V is
+///   the one power users unbind so vim/readline receive ^V; Ctrl+Shift+V has
+///   been bound since the first release.
+/// - Console windows report their client shell as the owning process. conhost
+///   pastes on Ctrl+V ("Ctrl key shortcuts", on by default since Windows 10)
+///   and PSReadLine binds Ctrl+V to its own paste.
+/// - mintty passes Ctrl+V to bash (quoted-insert); Shift+Insert pastes.
+/// - The rest paste on Ctrl+Shift+V; Shift+Insert in alacritty and wezterm
+///   pastes the selection buffer, not the clipboard.
+pub fn terminal_paste_chord(exe_name: &str) -> Option<PasteChord> {
+    match exe_name.to_ascii_lowercase().as_str() {
         // Windows Terminal (and the ConPTY console host it spawns)
-        "windowsterminal.exe",
-        "openconsole.exe",
-        // Legacy console host (cmd/powershell outside Windows Terminal)
-        "conhost.exe",
-        // Shells that own their own console window
-        "powershell.exe",
-        "pwsh.exe",
-        "cmd.exe",
-        // Third-party terminals
-        "alacritty.exe",
-        "wezterm-gui.exe",
-        "wezterm.exe",
-        "kitty.exe",
-        "hyper.exe",
-        "tabby.exe",
-        "warp.exe",
+        "windowsterminal.exe" | "openconsole.exe" => Some(PasteChord::CtrlShiftV),
+        // Classic console host (cmd/PowerShell outside Windows Terminal)
+        "conhost.exe" | "powershell.exe" | "pwsh.exe" | "cmd.exe" => Some(PasteChord::CtrlV),
         // Git Bash / MSYS2 / Cygwin
-        "mintty.exe",
-    ];
-    let lowered = exe_name.to_ascii_lowercase();
-    TERMINAL_PROCESS_EXES
-        .iter()
-        .any(|candidate| lowered == *candidate)
+        "mintty.exe" => Some(PasteChord::ShiftInsert),
+        // Third-party terminals
+        "alacritty.exe" | "wezterm-gui.exe" | "wezterm.exe" | "kitty.exe" | "hyper.exe"
+        | "tabby.exe" | "warp.exe" => Some(PasteChord::CtrlShiftV),
+        _ => None,
+    }
+}
+
+pub fn is_terminal_process_exe(exe_name: &str) -> bool {
+    terminal_paste_chord(exe_name).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalTarget {
+    /// A known terminal host: paste with its chord.
+    Paste(PasteChord),
+    /// Only the window title looks like a terminal (the process could not be
+    /// resolved), so no chord is known to be safe.
+    ClipboardOnly,
+}
+
+fn classify_terminal(
+    target_process: Option<&str>,
+    window_title: Option<&str>,
+) -> Option<TerminalTarget> {
+    match target_process {
+        Some(exe) => terminal_paste_chord(exe).map(TerminalTarget::Paste),
+        None => is_terminal_target(window_title).then_some(TerminalTarget::ClipboardOnly),
+    }
+}
+
+/// Text bound for a terminal must never run anything on its own (plan 020).
+/// Unless the program inside has turned on bracketed paste, which VoiceWave
+/// cannot see from outside, every pasted line break is an Enter. A tab
+/// triggers completion and an escape can end a bracketed paste early. So every
+/// run of control characters (and Unicode line/paragraph separators) becomes
+/// one space and trailing whitespace is dropped: the paste is always a single
+/// line with nothing after it. Submitting is the explicit spoken command.
+pub fn terminal_safe_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !out.is_empty() && !out.ends_with(' ') && ch != ' ' {
+            out.push(' ');
+        }
+        pending_space = false;
+        out.push(ch);
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// Process id owning the current foreground window.
+#[cfg(target_os = "windows")]
+fn foreground_process_id() -> Option<u32> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: hwnd is a live window handle and pid is a valid out pointer.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    (pid != 0).then_some(pid)
 }
 
 /// Resolve the executable file name (e.g. "windowsterminal.exe") of the
@@ -413,20 +613,8 @@ fn foreground_process_exe_name() -> Option<String> {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
 
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_null() {
-        return None;
-    }
-    let mut pid: u32 = 0;
-    // SAFETY: hwnd is a live window handle and pid is a valid out pointer.
-    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-    if pid == 0 {
-        return None;
-    }
+    let pid = foreground_process_id()?;
     // SAFETY: PROCESS_QUERY_LIMITED_INFORMATION succeeds without admin for
     // same-or-lower integrity processes; failure returns null, handled below.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -452,29 +640,172 @@ fn foreground_process_exe_name() -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// Combined terminal detection used by the live insertion paths. The
-/// foreground process executable is checked first because it cannot be
-/// confused by window titles (the "codex"/"claude" title fragments below
-/// also match the Codex/Claude *desktop* apps, which are normal GUI targets).
-/// The title heuristic only runs when the process cannot be resolved.
-fn foreground_is_terminal(window_title: Option<&str>) -> bool {
-    #[cfg(target_os = "windows")]
-    if let Some(exe) = foreground_process_exe_name() {
-        return is_terminal_process_exe(&exe);
+/// SECURITY_MANDATORY_HIGH_RID (winnt.h): the integrity level of an
+/// elevated ("Run as administrator") process.
+#[cfg(target_os = "windows")]
+const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
+
+/// Integrity level RID of `process`'s token, or the Win32 error code when the
+/// token cannot be read.
+#[cfg(target_os = "windows")]
+fn token_integrity_rid(process: windows_sys::Win32::Foundation::HANDLE) -> Result<u32, u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: process is a valid handle (or the current-process pseudo
+    // handle) and token is a valid out pointer.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+        return Err(unsafe { GetLastError() });
     }
-    is_terminal_target(window_title)
+    // A TOKEN_MANDATORY_LABEL plus its one-subauthority SID is ~28 bytes;
+    // u64 storage keeps the struct aligned.
+    let mut buffer = [0u64; 16];
+    let mut needed = 0u32;
+    // SAFETY: buffer is writable for the length passed.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            buffer.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buffer) as u32,
+            &mut needed,
+        )
+    };
+    let result = if ok == 0 {
+        Err(unsafe { GetLastError() })
+    } else {
+        // SAFETY: GetTokenInformation filled the buffer with a
+        // TOKEN_MANDATORY_LABEL whose SID points inside the same buffer.
+        unsafe {
+            let label = &*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count == 0 {
+                Err(0)
+            } else {
+                Ok(*GetSidSubAuthority(sid, u32::from(count) - 1))
+            }
+        }
+    };
+    // SAFETY: token came from OpenProcessToken above.
+    unsafe { CloseHandle(token) };
+    result
 }
 
-/// Returns true if the foreground window title suggests the target is a
-/// terminal/console application where SendInput keystroke injection is
-/// unreliable (ConPTY, raw stdin mode, etc.). When true, the insertion
-/// engine should skip Direct and ClipboardPaste and go straight to
-/// ClipboardOnly.
+/// True when the foreground app runs at a higher integrity level than
+/// VoiceWave. UIPI blocks input from lower to higher integrity and SendInput
+/// reports success anyway, so this is the only honest signal (plan 020). A
+/// token we may not even query counts as higher when VoiceWave itself is not
+/// elevated; that is how an elevated process looks from below.
+#[cfg(target_os = "windows")]
+fn foreground_integrity_above_ours() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let Some(pid) = foreground_process_id() else {
+        return false;
+    };
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no close.
+    let Ok(ours) = token_integrity_rid(unsafe { GetCurrentProcess() }) else {
+        return false;
+    };
+    // SAFETY: failure returns null, handled below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let theirs = token_integrity_rid(handle);
+    // SAFETY: handle came from OpenProcess above.
+    unsafe { CloseHandle(handle) };
+    match theirs {
+        Ok(rid) => rid > ours,
+        Err(code) => code == ERROR_ACCESS_DENIED && ours < SECURITY_MANDATORY_HIGH_RID,
+    }
+}
+
+/// Foreground window handle as an opaque id.
+pub fn foreground_window_id() -> Option<isize> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        let hwnd = unsafe { GetForegroundWindow() };
+        (!hwnd.is_null()).then_some(hwnd as isize)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// Whether a VoiceWave window (main or pill) holds the foreground.
+pub fn voicewave_owns_foreground() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+        foreground_process_id() == Some(unsafe { GetCurrentProcessId() })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Retry support (plan 020): clicking the pill's Try again can activate a
+/// VoiceWave window. When one of ours holds the foreground, hand focus back to
+/// `target`, the window the user dictated into. Never takes focus from another
+/// app the user picked. Returns true when focus was moved.
+pub fn return_focus_from_voicewave(target: isize) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsIconic, IsWindow, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
+        };
+
+        if !voicewave_owns_foreground() {
+            return false;
+        }
+        let target = target as HWND;
+        // SAFETY: IsWindow accepts any value; the rest only run on a live
+        // window. Our process just received the click, so Windows lets it hand
+        // the foreground over. A minimized target is restored first: it can't
+        // take keystrokes while iconic. ShowWindowAsync posts the restore, so
+        // a hung target can't block us; the caller's settle delay covers it.
+        unsafe {
+            if IsWindow(target) == 0 {
+                return false;
+            }
+            if IsIconic(target) != 0 {
+                ShowWindowAsync(target, SW_RESTORE);
+            }
+            SetForegroundWindow(target) != 0
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target;
+        false
+    }
+}
+
+/// Returns true if the foreground window title suggests a terminal/console
+/// application. Only consulted when the foreground process can't be resolved
+/// (see `classify_terminal`); with no known host there is no paste chord
+/// known to be safe, so such targets get clipboard-only.
 ///
-/// Title matching is a fallback only — `foreground_is_terminal` prefers the
-/// foreground process executable, which distinguishes the Codex/Claude CLIs
-/// (running inside a terminal host) from the Codex/Claude desktop apps
-/// (whose titles also contain those words but which paste normally).
+/// The process executable is preferred because it distinguishes the
+/// Codex/Claude CLIs (inside a terminal host) from the Codex/Claude desktop
+/// apps, whose titles also contain those words but which paste normally.
 pub fn is_terminal_target(window_title: Option<&str>) -> bool {
     let Some(title) = window_title else {
         return false;
@@ -638,16 +969,7 @@ impl InsertionBackend for PlatformInsertionBackend {
                     current_title
                 ));
             }
-            // SendInput keystroke injection is unreliable for terminal
-            // applications (ConPTY translation, raw stdin mode). Route
-            // through clipboard instead.
-            if foreground_is_terminal(current_title.as_deref()) {
-                return Err(format!(
-                    "Terminal target detected ({:?}); \
-                     falling back to clipboard.",
-                    current_title
-                ));
-            }
+            // Terminals never reach here: the engine routes them to paste.
             send_unicode_text(text)?;
             return Ok(BackendInsertSuccess {
                 message: None,
@@ -666,29 +988,30 @@ impl InsertionBackend for PlatformInsertionBackend {
         &mut self,
         text: &str,
         _target_app: Option<&str>,
+        chord: PasteChord,
     ) -> Result<BackendInsertSuccess, String> {
         #[cfg(target_os = "windows")]
         {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                VK_CONTROL, VK_INSERT, VK_SHIFT,
+            };
+
             // Intentionally NO save-and-restore of the previous clipboard
             // contents. See the comment block near the top of this file
             // above the removed schedule_clipboard_restore: restoring
             // caused either stale content to be pasted into slow targets
             // or the wrong text on repeat Ctrl+V. Dictation text stays in
             // the clipboard.
-            let current_title = self.detect_target_app();
-            if foreground_is_terminal(current_title.as_deref()) {
-                return Err(format!(
-                    "Terminal target detected ({:?}); \
-                     falling back to clipboard-only.",
-                    current_title
-                ));
-            }
             let mut clipboard =
                 arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
             clipboard
                 .set_text(text.to_string())
                 .map_err(|err| format!("failed to write clipboard text: {err}"))?;
-            send_ctrl_chord(b'V' as u16)?;
+            match chord {
+                PasteChord::CtrlV => send_key_chord(&[VK_CONTROL], b'V' as u16)?,
+                PasteChord::CtrlShiftV => send_key_chord(&[VK_CONTROL, VK_SHIFT], b'V' as u16)?,
+                PasteChord::ShiftInsert => send_key_chord(&[VK_SHIFT], VK_INSERT)?,
+            }
             return Ok(BackendInsertSuccess {
                 message: Some("Inserted via clipboard fallback.".to_string()),
                 undo_token: Some(UndoToken::KeyboardUndo),
@@ -697,7 +1020,7 @@ impl InsertionBackend for PlatformInsertionBackend {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = text;
+            let _ = (text, chord);
             Err(
                 "Clipboard paste fallback is currently available only on Windows runtime."
                     .to_string(),
@@ -724,9 +1047,10 @@ impl InsertionBackend for PlatformInsertionBackend {
     fn undo(&mut self, token: &UndoToken) -> Result<Option<String>, String> {
         #[cfg(target_os = "windows")]
         {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
             match token {
                 UndoToken::KeyboardUndo => {
-                    send_ctrl_chord(b'Z' as u16)?;
+                    send_key_chord(&[VK_CONTROL], b'Z' as u16)?;
                     Ok(Some("Undo sent to active application.".to_string()))
                 }
             }
@@ -737,6 +1061,41 @@ impl InsertionBackend for PlatformInsertionBackend {
             let _ = token;
             Err("Undo is currently available only on Windows runtime.".to_string())
         }
+    }
+
+    fn press_enter(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+            let current_title = self.detect_target_app();
+            if foreground_is_dangerous_for_send_input(current_title.as_deref()) {
+                return Err(format!(
+                    "Refusing Enter into system security dialog ({current_title:?})."
+                ));
+            }
+            send_key_chord(&[], VK_RETURN)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err("Enter is currently available only on Windows runtime.".to_string())
+        }
+    }
+
+    fn target_is_elevated(&mut self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            foreground_integrity_above_ours()
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
+    fn foreground_window(&mut self) -> Option<isize> {
+        foreground_window_id()
     }
 }
 
@@ -754,7 +1113,7 @@ fn send_unicode_text(text: &str) -> Result<(), String> {
                 wScan: code_unit,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: VOICEWAVE_INPUT_MARKER,
             },
         },
     };
@@ -793,64 +1152,45 @@ fn send_unicode_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Press `key` with `modifiers` held, released in reverse order, as one
+/// SendInput call so other input cannot interleave. Real scan codes go with
+/// each key (terminals read them), and Insert is flagged as an extended key
+/// so it is not read as Numpad 0.
 #[cfg(target_os = "windows")]
-fn send_ctrl_chord(key_vk: u16) -> Result<(), String> {
+fn send_key_chord(modifiers: &[u16], key: u16) -> Result<(), String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
+        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VK_INSERT,
     };
 
-    let mut inputs = [
+    let event = |vk: u16, key_up: bool| {
+        let mut flags = if key_up { KEYEVENTF_KEYUP } else { 0 };
+        if vk == VK_INSERT {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        // SAFETY: MapVirtualKeyW is a pure table lookup.
+        let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VK_CONTROL as u16,
-                    wScan: 0,
-                    dwFlags: 0,
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: VOICEWAVE_INPUT_MARKER,
                 },
             },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: key_vk,
-                    wScan: 0,
-                    dwFlags: 0,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: key_vk,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_CONTROL as u16,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-    ];
+        }
+    };
 
-    // SAFETY: INPUT payload is fully initialized and SendInput is called with a valid pointer.
+    let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+    inputs.extend(modifiers.iter().map(|&vk| event(vk, false)));
+    inputs.push(event(key, false));
+    inputs.push(event(key, true));
+    inputs.extend(modifiers.iter().rev().map(|&vk| event(vk, true)));
+
+    // SAFETY: every INPUT is fully initialized and the pointer/length match.
     let sent = unsafe {
         SendInput(
             inputs.len() as u32,
@@ -860,7 +1200,7 @@ fn send_ctrl_chord(key_vk: u16) -> Result<(), String> {
     };
     if sent != inputs.len() as u32 {
         return Err(format!(
-            "SendInput failed while sending Ctrl chord: {}",
+            "SendInput failed while sending a key chord: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -945,6 +1285,7 @@ impl InsertionBackend for DeterministicMatrixBackend {
         &mut self,
         _text: &str,
         target_app: Option<&str>,
+        _chord: PasteChord,
     ) -> Result<BackendInsertSuccess, String> {
         if self.should_fail(target_app, InsertionMethod::ClipboardPaste) {
             return Err("Clipboard paste failed for focused app.".to_string());
@@ -974,6 +1315,10 @@ impl InsertionBackend for DeterministicMatrixBackend {
             return Err("active app rejected Ctrl+Z".to_string());
         }
         Ok(Some("Undo sent to active application.".to_string()))
+    }
+
+    fn press_enter(&mut self) -> Result<(), String> {
+        Ok(())
     }
 }
 

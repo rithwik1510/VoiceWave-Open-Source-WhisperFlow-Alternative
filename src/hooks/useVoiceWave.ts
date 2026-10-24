@@ -7,6 +7,7 @@ import {
   canUseTauri,
   clearHistory,
   downloadModel,
+  drainTelemetry,
   exportDiagnosticsBundle as exportDiagnosticsBundleCommand,
   exportDictionary as exportDictionaryCommand,
   exportSessionHistoryPreset,
@@ -20,6 +21,7 @@ import {
   getPermissionSnapshot,
   getRecentInsertions,
   getSessionHistory,
+  getSupportContext,
   insertText,
   listenVoicewaveAudioQuality,
   listenVoicewaveHistoryUpdated,
@@ -30,12 +32,12 @@ import {
   listenVoicewavePermission,
   listenVoicewaveSettingsChanged,
   listenVoicewaveState,
+  listenVoicewaveTelemetryPending,
   listenVoicewaveTranscript,
   listInstalledModels,
   listInputDevices,
   listModelCatalog,
   listVoiceSnippets,
-  answerGpuUpgrade,
   finishGpuUpgrade,
   getSpeechEngineStatus,
   removeModel,
@@ -65,6 +67,7 @@ import {
   runModelBenchmark,
   setActiveModel,
   setHistoryRetention,
+  setHotkeyCapture as setHotkeyCaptureCommand,
   setOwnerDeviceOverride as setOwnerDeviceOverrideCommand,
   startMicLevelMonitor,
   startProCheckout as startProCheckoutCommand,
@@ -84,10 +87,14 @@ import {
   type PolishModelProgress
 } from "../lib/tauri";
 import { syncDictionaryWithCloud as syncDictionaryRecordsWithCloud } from "../lib/dictionarySync";
+import { DEFAULT_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY } from "../lib/hotkeys";
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
 import {
   ANALYTICS_CONSENT_VERSION,
   classifyGpuStepDown,
+  funnelEventFromTelemetry,
+  setTelemetryProviders,
+  speechModelFamily,
   speechModelKind,
   trackAnonymousUsage,
   trackFunnelEvent
@@ -108,7 +115,6 @@ import type {
   DictionaryImportSummary,
   DictionaryQueueItem,
   DictionaryTerm,
-  HotkeyConfig,
   HotkeyEvent,
   HotkeySnapshot,
   InsertResult,
@@ -130,6 +136,7 @@ import type {
   HistoryExportPreset,
   HistoryExportResult,
   SessionHistoryRecord,
+  SupportContext,
   LatencyBreakdownEvent,
   VoiceWaveHudState,
   VoiceSnippet,
@@ -146,9 +153,15 @@ const MAX_RELEASE_TAIL_MS = 1_500;
 const DEFAULT_DECODE_MODE: DecodeMode = "balanced";
 // Both model families are valid (plan 019): faster-whisper (fw-*) and
 // whisper.cpp GGML (wcpp-*). The backend's catalog shows each PC one family as
-// its two primary rows ("Small", "Large Turbo"), plus installed models of the
-// other family.
-const SUPPORTED_MODEL_IDS = ["fw-small.en", "fw-large-v3-turbo", "wcpp-small.en", "wcpp-large-v3-turbo"] as const;
+// its "Small" and "Large Turbo" rows, plus installed models of the other
+// family, plus the recommended Parakeet row (run by the same speech workers).
+const SUPPORTED_MODEL_IDS = [
+  "fw-small.en",
+  "fw-large-v3-turbo",
+  "wcpp-small.en",
+  "wcpp-large-v3-turbo",
+  "wcpp-parakeet-tdt-0.6b-v3"
+] as const;
 // Retired catalog models migrate to the closest surviving option (mirrors
 // normalize_active_model_id in src-tauri/src/settings/mod.rs).
 const RETIRED_LARGE_MODEL_IDS = ["fw-large-v3"] as const;
@@ -179,8 +192,8 @@ const fallbackSettings: VoiceWaveSettings = {
   // Current in the pre-load fallback for the same reason as
   // onboardingCompleted below: the consent notice must not flash pre-load.
   analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
-  toggleHotkey: "Ctrl+Alt+X",
-  pushToTalkHotkey: "Ctrl+Windows",
+  toggleHotkey: LOCKED_TOGGLE_HOTKEY,
+  pushToTalkHotkey: DEFAULT_PUSH_TO_TALK_HOTKEY,
   preferClipboardFallback: false,
   formatProfile: "default",
   activeDomainPacks: [],
@@ -200,9 +213,12 @@ const fallbackSettings: VoiceWaveSettings = {
   proPostProcessingEnabled: false,
   spokenEditCommands: true,
   micVolumeGuard: "warn",
+  keepMicReady: false,
   // True in the pre-load fallback so the onboarding flow never flashes before
   // real settings arrive; the backend value replaces this immediately.
   onboardingCompleted: true,
+  // Same reason: the Parakeet offer card must not flash pre-load.
+  parakeetOfferAnswered: true,
   theme: "system",
   polishProfile: "standard",
   polishProfileCustomized: false
@@ -217,8 +233,8 @@ const fallbackSnapshot: VoiceWaveSnapshot = {
 
 const fallbackHotkeys: HotkeySnapshot = {
   config: {
-    toggle: "Ctrl+Alt+X",
-    pushToTalk: "Ctrl+Windows"
+    toggle: LOCKED_TOGGLE_HOTKEY,
+    pushToTalk: DEFAULT_PUSH_TO_TALK_HOTKEY
   },
   conflicts: [],
   registrationSupported: true,
@@ -294,8 +310,6 @@ const fallbackModelCatalog: ModelCatalogItem[] = [
 const RECOMMENDED_VAD_THRESHOLD = 0.014;
 const MIN_VAD_THRESHOLD = 0.005;
 const MAX_VAD_THRESHOLD = 0.04;
-const LOCKED_TOGGLE_HOTKEY = "Ctrl+Alt+X";
-const LOCKED_PUSH_TO_TALK_HOTKEY = "Ctrl+Windows";
 const MODIFIER_TOKENS = [
   "CTRL",
   "CONTROL",
@@ -450,14 +464,15 @@ function normalizeSettings(settings: VoiceWaveSettings): VoiceWaveSettings {
     proPostProcessingEnabled: settings.proPostProcessingEnabled ?? false,
     spokenEditCommands: settings.spokenEditCommands ?? true,
     micVolumeGuard: settings.micVolumeGuard ?? "warn",
+    keepMicReady: settings.keepMicReady ?? false,
     onboardingCompleted: settings.onboardingCompleted ?? false,
     theme: settings.theme ?? "system",
     gpuAcceleration: settings.gpuAcceleration ?? "auto",
     // polishProfile / polishProfileCustomized are deliberately NOT defaulted:
     // their absence is the "legacy backend" signal the UI uses to fall back
     // to inferring a profile from the old deterministic fields (plan 010).
-    toggleHotkey: LOCKED_TOGGLE_HOTKEY,
-    pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
+    // pushToTalkHotkey passes through: the backend already validated it.
+    toggleHotkey: LOCKED_TOGGLE_HOTKEY
   };
 }
 
@@ -551,6 +566,13 @@ export function useVoiceWave() {
   const [settings, setSettings] = useState<VoiceWaveSettings>(fallbackSettings);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  // Real settings arrived from the backend: the fallback has usage counting
+  // on, so telemetry must not send (or drop) anything before this. The ref is
+  // set during render, together with settingsRef, so the telemetry consent
+  // check never pairs "loaded" with the fallback settings.
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const settingsLoadedRef = useRef(settingsLoaded);
+  settingsLoadedRef.current = settingsLoaded;
   const [hotkeys, setHotkeys] = useState<HotkeySnapshot>(fallbackHotkeys);
   const [permissions, setPermissions] = useState<PermissionSnapshot>(fallbackPermissions);
   const [inputDevices, setInputDevices] = useState<string[]>([]);
@@ -578,10 +600,10 @@ export function useVoiceWave() {
   );
   const modelStatusesRef = useRef(modelStatuses);
   modelStatusesRef.current = modelStatuses;
-  // Set by the first non-empty final transcript; the latency event that
-  // follows it says which engine actually decoded (funnel firstSuccess).
-  const firstSuccessPendingRef = useRef(false);
   const [speechEngine, setSpeechEngine] = useState<SpeechEngineStatus | null>(null);
+  const speechEngineRef = useRef(speechEngine);
+  speechEngineRef.current = speechEngine;
+  const supportContextRef = useRef<SupportContext | null>(null);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkRun | null>(null);
   const [modelRecommendation, setModelRecommendation] = useState<ModelRecommendation | null>(null);
   const [modelSpeeds, setModelSpeeds] = useState<Record<string, number>>({});
@@ -1128,6 +1150,22 @@ export function useVoiceWave() {
     [settings, tauriAvailable]
   );
 
+  const setKeepMicReady = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = normalizeSettings({ ...settings, keepMicReady: enabled });
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save keep mic ready");
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
   const setTheme = useCallback(
     async (preference: ThemePreference) => {
       const nextSettings = normalizeSettings({ ...settings, theme: preference });
@@ -1303,12 +1341,14 @@ export function useVoiceWave() {
   );
 
   // Onboarding shows the analytics disclosure on its first screen, so finishing
-  // or skipping it also counts as having seen the notice.
+  // or skipping it also counts as having seen the notice. Its model step
+  // already offers Parakeet, so the existing-user Parakeet card never follows.
   const completeOnboarding = useCallback(async () => {
     const nextSettings = {
       ...settings,
       onboardingCompleted: true,
-      analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+      analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
+      parakeetOfferAnswered: true
     };
     setSettings(nextSettings);
     if (!tauriAvailable) {
@@ -1411,10 +1451,7 @@ export function useVoiceWave() {
     void listenVoicewavePolishModelProgress((payload) => {
       setPolishModelProgress(payload);
       if (payload.error) {
-        void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-          type: "Model.downloadFailed",
-          model: "polish"
-        }).catch(() => undefined);
+        void trackFunnelEvent({ type: "Model.downloadFailed", model: "polish" }).catch(() => undefined);
       }
     }).then((fn) => {
       if (active) {
@@ -1512,29 +1549,49 @@ export function useVoiceWave() {
     }
   }, [tauriAvailable]);
 
-  const updateHotkeys = useCallback(
-    async (_config: HotkeyConfig) => {
-      const lockedConfig = {
-        toggle: LOCKED_TOGGLE_HOTKEY,
-        pushToTalk: LOCKED_PUSH_TO_TALK_HOTKEY
-      };
-      setHotkeys((prev) => ({ ...prev, config: lockedConfig }));
-      setSettings((prev) => ({
-        ...prev,
-        toggleHotkey: LOCKED_TOGGLE_HOTKEY,
-        pushToTalkHotkey: LOCKED_PUSH_TO_TALK_HOTKEY
-      }));
-      if (!tauriAvailable) {
-        return;
-      }
-      try {
-        setHotkeys(await updateHotkeyConfig(lockedConfig));
-      } catch (hotkeyErr) {
-        setError(hotkeyErr instanceof Error ? hotkeyErr.message : "Failed to update hotkeys");
-      }
+  /** Rebinds hold-to-talk. Throws the backend's plain-language reason when
+   * the combo is rejected, for the Settings recorder to show inline. */
+  const setPushToTalkHotkey = useCallback(
+    async (pushToTalk: string) => {
+      const snapshot = tauriAvailable
+        ? await updateHotkeyConfig({ toggle: LOCKED_TOGGLE_HOTKEY, pushToTalk })
+        : { ...fallbackHotkeys, config: { toggle: LOCKED_TOGGLE_HOTKEY, pushToTalk } };
+      setHotkeys(snapshot);
+      setSettings((prev) => ({ ...prev, pushToTalkHotkey: snapshot.config.pushToTalk }));
     },
     [tauriAvailable]
   );
+
+  // Tauri runs each invoke as its own task, so a quick Change -> Cancel could
+  // land `true` after `false` and leave the lease armed. Chaining each call
+  // on the previous one keeps them in order.
+  const hotkeyCaptureQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const setHotkeyCapture = useCallback(
+    (active: boolean) => {
+      if (!tauriAvailable) {
+        return;
+      }
+      hotkeyCaptureQueueRef.current = hotkeyCaptureQueueRef.current
+        .then(() => setHotkeyCaptureCommand(active))
+        .catch(() => {
+          // Best effort: the backend capture lease expires on its own.
+        });
+    },
+    [tauriAvailable]
+  );
+
+  // The keyboard hook starts after the first load, so Settings re-reads its
+  // status to report a failed start honestly.
+  const refreshHotkeys = useCallback(async () => {
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setHotkeys(await loadHotkeyConfig());
+    } catch {
+      // Keep the last known snapshot.
+    }
+  }, [tauriAvailable]);
 
   const requestMicAccess = useCallback(async () => {
     if (!tauriAvailable) {
@@ -1657,10 +1714,7 @@ export function useVoiceWave() {
         // after a cancel is not a failure.
         const kind = speechModelKind(modelId);
         if (kind && modelStatusesRef.current[modelId]?.state !== "cancelled") {
-          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-            type: "Model.downloadFailed",
-            model: kind
-          }).catch(() => undefined);
+          void trackFunnelEvent({ type: "Model.downloadFailed", model: kind }).catch(() => undefined);
         }
         // Belt and braces: even if the backend never emitted a terminal status
         // (or the IPC call itself rejected), the row must leave "downloading"
@@ -1694,36 +1748,6 @@ export function useVoiceWave() {
       }
     },
     [modelCatalog, refreshPhase3Data, refreshSpeechEngine, settings.activeModel, tauriAvailable]
-  );
-
-  /** One-time "your graphics card can make dictation faster" notice. Accept
-   * downloads the GGML model with the normal downloader; the backend then
-   * qualifies it and switches. Decline, cancel or failure leave the current
-   * model dictating. */
-  const answerUpgradeOffer = useCallback(
-    async (accept: boolean) => {
-      if (!tauriAvailable) {
-        return;
-      }
-      try {
-        const modelId = await answerGpuUpgrade(accept);
-        await refreshSpeechEngine();
-        if (!modelId) {
-          return;
-        }
-        if (installedModels.some((row) => row.modelId === modelId)) {
-          void finishGpuUpgrade()
-            .catch(() => undefined)
-            .finally(() => void refreshPhase3Data());
-          void refreshSpeechEngine();
-        } else {
-          await installModel(modelId);
-        }
-      } catch (upgradeErr) {
-        setError(upgradeErr instanceof Error ? upgradeErr.message : "The upgrade could not start");
-      }
-    },
-    [installModel, installedModels, refreshPhase3Data, refreshSpeechEngine, tauriAvailable]
   );
 
   const removeInstalledModel = useCallback(
@@ -1865,6 +1889,32 @@ export function useVoiceWave() {
       }
     },
     [installModel, installedModels, makeModelActive]
+  );
+
+  /** The one-time Home card offering existing users Parakeet. Switch
+   * downloads it with the normal downloader and makes it active only once it
+   * installed (the backend marks the offer answered in that same save); the
+   * current model keeps dictating until then, and after a failure or cancel.
+   * Not now only records the answer. */
+  const answerParakeetOffer = useCallback(
+    async (accept: boolean) => {
+      const parakeetId = modelCatalog.find((row) => row.tier === "parakeet")?.modelId;
+      if (accept && parakeetId) {
+        await installAndActivateModel(parakeetId);
+        return;
+      }
+      const nextSettings = { ...settings, parakeetOfferAnswered: true };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      } catch (persistErr) {
+        setError(persistErr instanceof Error ? persistErr.message : "Failed to save your answer");
+      }
+    },
+    [installAndActivateModel, modelCatalog, settings, tauriAvailable]
   );
 
   const runBenchmarkAndRecommend = useCallback(async () => {
@@ -2282,6 +2332,7 @@ export function useVoiceWave() {
         });
         setSnapshot(loadedSnapshot);
         setSettings(safeLoadedSettings);
+        setSettingsLoaded(true);
         setDiagnosticsStatus(diagnostics);
         setHotkeys(loadedHotkeys);
         setPermissions(permissionSnapshot);
@@ -2320,10 +2371,6 @@ export function useVoiceWave() {
           lastPartial: event.isFinal ? prev.lastPartial : event.text,
           lastFinal: event.isFinal ? event.text : prev.lastFinal
         }));
-        if (event.isFinal && event.text.trim()) {
-          void trackAnonymousUsage(settingsRef.current.anonymousUsageOptIn).catch(() => undefined);
-          firstSuccessPendingRef.current = true;
-        }
       }));
 
       await keep(listenVoicewaveInsertion((result) => {
@@ -2378,10 +2425,7 @@ export function useVoiceWave() {
         }));
         const failedKind = payload.state === "failed" ? speechModelKind(payload.modelId) : null;
         if (failedKind) {
-          void trackFunnelEvent(settingsRef.current.anonymousUsageOptIn, {
-            type: "Model.downloadFailed",
-            model: failedKind
-          }).catch(() => undefined);
+          void trackFunnelEvent({ type: "Model.downloadFailed", model: failedKind }).catch(() => undefined);
         }
       }));
 
@@ -2391,12 +2435,12 @@ export function useVoiceWave() {
 
       await keep(listenVoicewaveLatency((payload: LatencyBreakdownEvent) => {
         setLastLatency(payload);
-        // Funnel: both are deduped in telemetry.ts (once per install / once
-        // per reason per session), so firing on every dictation is cheap.
-        const optedIn = settingsRef.current.anonymousUsageOptIn;
-        if (firstSuccessPendingRef.current) {
-          firstSuccessPendingRef.current = false;
-          void trackFunnelEvent(optedIn, {
+        // Usage and the funnel events are deduped in telemetry.ts (once per
+        // day / install / reason per session), so firing on every dictation
+        // is cheap. Only a microphone dictation whose text landed counts.
+        if (payload.dictationLanded) {
+          void trackAnonymousUsage().catch(() => undefined);
+          void trackFunnelEvent({
             type: "Dictation.firstSuccess",
             engine: payload.backendUsed === "cpu" ? "cpu" : "gpu"
           }).catch(() => undefined);
@@ -2405,9 +2449,7 @@ export function useVoiceWave() {
           ? classifyGpuStepDown(payload.asrStepDownReason, payload.backendFallback)
           : null;
         if (stepDown) {
-          void trackFunnelEvent(optedIn, { type: "Speech.gpuStepDown", reason: stepDown }).catch(
-            () => undefined
-          );
+          void trackFunnelEvent({ type: "Speech.gpuStepDown", reason: stepDown }).catch(() => undefined);
         }
       }));
 
@@ -2430,6 +2472,90 @@ export function useVoiceWave() {
       }
     };
   }, [refreshPhase3Data, refreshRecentInsertions, refreshSessionHistory, settings.activeModel, tauriAvailable]);
+
+  // Consent and context for every usage signal, read at send time through
+  // refs so they are never stale. Consent stays off until the real settings
+  // load (the fallback has it on). Fixed categories only (see
+  // ANONYMOUS_USAGE_DETAILS).
+  useEffect(() => {
+    setTelemetryProviders({
+      consent: () => settingsLoadedRef.current && settingsRef.current.anonymousUsageOptIn,
+      context: () => {
+        const engine = speechEngineRef.current;
+        const osVersion = supportContextRef.current?.osVersion ?? "";
+        return {
+          "VoiceWave.Speech.path": engine?.runningOn?.device ?? (engine?.preparing ? "preparing" : "none"),
+          "VoiceWave.Speech.modelFamily": speechModelFamily(settingsRef.current.activeModel),
+          "VoiceWave.Gpu.vendor": engine?.gpuVendor ?? "none",
+          "VoiceWave.Os.major": osVersion.startsWith("Windows 11")
+            ? "11"
+            : osVersion.startsWith("Windows 10")
+              ? "10"
+              : "other"
+        };
+      }
+    });
+  }, []);
+
+  // Plan 022: the daily launch marker, plus the backend's queued failure,
+  // crash, and panic facts. Draining always clears the queue; while usage
+  // counting is off the drained facts are simply dropped (telemetry.ts's
+  // consent gate), so the queue never fills. Waits for the real settings so
+  // nothing is drained (and dropped) before the user's choice is known.
+  useEffect(() => {
+    if (!tauriAvailable || !settingsLoaded) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let launchTimer: number | undefined;
+
+    const drain = () => {
+      void drainTelemetry()
+        .then((events) => {
+          for (const event of events) {
+            void trackFunnelEvent(funnelEventFromTelemetry(event)).catch(() => undefined);
+          }
+        })
+        .catch(() => undefined);
+    };
+
+    void (async () => {
+      try {
+        supportContextRef.current = await getSupportContext();
+      } catch {
+        // Context falls back to "other"; the launch marker needs it, so skip.
+      }
+      if (disposed) {
+        return;
+      }
+      const context = supportContextRef.current;
+      if (context) {
+        const launchMode = context.launchedAtLogin ? "autostart" : "manual";
+        // Deduped once per UTC day; the hourly re-check covers an app left
+        // running past midnight.
+        const trackLaunch = () =>
+          void trackFunnelEvent({ type: "App.launchedDaily", launchMode }).catch(() => undefined);
+        trackLaunch();
+        launchTimer = window.setInterval(trackLaunch, 60 * 60 * 1000);
+      }
+
+      // Listen before the first drain so nothing queued in between is missed.
+      const stop = await listenVoicewaveTelemetryPending(drain);
+      if (disposed) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+      drain();
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.clearInterval(launchTimer);
+    };
+  }, [settingsLoaded, tauriAvailable]);
 
   useEffect(() => {
     return () => {
@@ -2649,6 +2775,7 @@ export function useVoiceWave() {
     setReleaseTailMs,
     setDecodeMode,
     setMicVolumeGuard,
+    setKeepMicReady,
     setTheme,
     setFormatProfile,
     setDomainPacks,
@@ -2663,7 +2790,7 @@ export function useVoiceWave() {
     setPreferClipboardFallback,
     setSpokenEditCommands,
     setGpuAcceleration,
-    answerUpgradeOffer,
+    answerParakeetOffer,
     removeInstalledModel,
     refreshSpeechEngine,
     completeOnboarding,
@@ -2671,7 +2798,9 @@ export function useVoiceWave() {
     resolveAnalyticsConsent,
     setLlmPolishEnabled,
     polishModelProgress,
-    updateHotkeys,
+    setPushToTalkHotkey,
+    setHotkeyCapture,
+    refreshHotkeys,
     requestMicAccess,
     runAudioQualityDiagnostic,
     undoInsertion,

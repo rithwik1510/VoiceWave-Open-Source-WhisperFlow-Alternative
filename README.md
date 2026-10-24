@@ -169,3 +169,11 @@ The release build stages the Python runtime and the whisper.cpp workers; see
 ## License
 
 [Apache-2.0](LICENSE). Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Speech models are downloaded separately under their own licenses:
+
+- [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA, the
+  default model, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  VoiceWave uses the [GGUF conversion by ggml-org](https://huggingface.co/ggml-org/parakeet-GGUF)
+  as published, without changes.
+- Whisper by OpenAI (Small and Large Turbo), MIT.

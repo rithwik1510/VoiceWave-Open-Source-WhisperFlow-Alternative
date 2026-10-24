@@ -7,12 +7,12 @@ body:
       value: |
         Thanks for taking the time to report this. **Please don't paste anything you dictated that is private** (messages, passwords, names). Describe the problem instead, or use made-up text.
 
-        Opened this from the app (Help → Report a problem)? The version, Windows and engine fields below are already filled in.
+        Opened this from the app (Help → Report a problem)? The version, Windows, engine and diagnostics fields below are already filled in.
   - type: input
     id: version
     attributes:
       label: VoiceWave version
-      placeholder: "0.7.0"
+      placeholder: "0.7.5"
     validations:
       required: true
   - type: input
@@ -43,12 +43,18 @@ body:
         1. Hold the dictation hotkey in Notepad
         2. Say a short sentence
         3. ...
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (filled in by the app)
+      description: Setup details and recent warnings from the log. Check it before posting; it includes your microphone's name and Windows version, never audio or anything you dictated. From the app without Report a problem? Settings → Diagnostics → Copy diagnostics.
+      render: text
   - type: markdown
     attributes:
       value: |
-        ### Attach logs (recommended)
+        ### Attach logs (optional)
 
-        These two files make most bugs fixable. Drag them into a comment box on this issue.
+        The diagnostics above are usually enough. If we ask for more, these files help. Drag them into a comment box on this issue.
 
         - **Log files:** Help → Report a problem → **Open logs folder**, then attach the newest `voicewave.*.log`. Logs record what the app did (timings, errors, engine choices). They never contain what you dictated.
         - **Diagnostics bundle:** Settings → Diagnostics, turn diagnostics on, then **Export Diagnostics Bundle** and attach the exported file.

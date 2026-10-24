@@ -9,6 +9,7 @@ pub mod history;
 pub mod hotkey;
 pub mod inference;
 pub mod insertion;
+mod job_object;
 pub mod model_manager;
 pub mod permissions;
 pub mod phase1;
@@ -18,8 +19,12 @@ mod secure_store;
 pub mod settings;
 pub mod snippet;
 pub mod stats;
-#[cfg(feature = "desktop")]
+// Not desktop-gated: the inference workers record telemetry and redact
+// paths with these.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod support;
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod telemetry;
 pub mod transcript;
 
 #[cfg(feature = "desktop")]
@@ -165,6 +170,9 @@ const PILL_WINDOW_SPIKE_QUICK_HEIGHT: f64 = 184.0;
 const PILL_WINDOW_SPIKE_QUICK_BOTTOM_MARGIN: f64 = 12.0;
 #[cfg(feature = "desktop")]
 const TRAY_ID: &str = "voicewave-tray";
+/// Argument the "Start with Windows" Run-key entry launches the app with.
+#[cfg(feature = "desktop")]
+const AUTOSTART_ARG: &str = "--autostart";
 #[cfg(feature = "desktop")]
 const TRAY_SHOW_ID: &str = "show";
 #[cfg(feature = "desktop")]
@@ -1168,6 +1176,13 @@ struct SupportContext {
     app_version: String,
     os_version: String,
     log_dir: String,
+    launched_at_login: bool,
+}
+
+/// This process was started by the "Start with Windows" Run-key entry.
+#[cfg(feature = "desktop")]
+fn launched_at_login() -> bool {
+    std::env::args().any(|arg| arg == AUTOSTART_ARG)
 }
 
 #[cfg(feature = "desktop")]
@@ -1179,17 +1194,72 @@ fn get_support_context() -> SupportContext {
         log_dir: support::log_dir()
             .map(|dir| dir.display().to_string())
             .unwrap_or_default(),
+        launched_at_login: launched_at_login(),
     }
 }
 
-/// Opens the prefilled GitHub bug form in the default browser. The frontend
-/// only supplies the engine label; the URL itself is built from fixed parts.
+/// Gathers the diagnostics report's setup facts (see
+/// `support::DiagnosticsReport`).
+#[cfg(feature = "desktop")]
+async fn diagnostics_report(controller: &VoiceWaveController) -> support::DiagnosticsReport {
+    use inference::gpu_select::{CpuSupport, QualOutcome};
+
+    let settings = controller.load_settings().await;
+    let engine = controller.speech_engine_status().await;
+    let model_installed = controller
+        .list_installed_models()
+        .await
+        .iter()
+        .any(|row| row.model_id == settings.active_model);
+    let running_on = match &engine.running_on {
+        _ if engine.preparing => "preparing (one-time graphics card check)".to_string(),
+        Some(running) if running.device == inference::AsrRung::Gpu => "GPU".to_string(),
+        Some(_) => "processor".to_string(),
+        None => "unknown".to_string(),
+    };
+    let gpu_check = match (&engine.gpu_name, engine.qualification) {
+        (None, _) => "no GPU",
+        (_, Some(QualOutcome::Passed)) => "passed",
+        (_, Some(QualOutcome::Failed)) => "failed",
+        (_, Some(QualOutcome::Retry)) => "retrying next launch",
+        (_, None) => "not run",
+    };
+    support::DiagnosticsReport::new(&support::DiagnosticsFacts {
+        launched_at_login: launched_at_login(),
+        cpu_support: match engine.cpu_support {
+            CpuSupport::Full => "full",
+            CpuSupport::NoAvx2 => "no AVX2 (faster-whisper models only)",
+            CpuSupport::Unsupported => "unsupported",
+        },
+        active_model: settings.active_model,
+        model_installed,
+        running_on,
+        gpu_name: engine.gpu_name,
+        gpu_check,
+        microphone: settings.input_device,
+        hotkey: settings.push_to_talk_hotkey,
+    })
+}
+
+/// Plain-text diagnostics for "Copy diagnostics" and the issue form.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn open_issue_report(engine: String) -> Result<(), String> {
-    let url = support::issue_report_url(&engine)?;
-    support::shell_open(url.as_ref())
-        .map_err(|err| format!("failed to open the issue form: {err}"))
+async fn get_diagnostics_report(runtime: State<'_, RuntimeContext>) -> Result<String, String> {
+    Ok(diagnostics_report(&runtime.controller).await.text())
+}
+
+/// Opens the prefilled GitHub bug form in the default browser. The frontend
+/// only supplies the engine label; the URL itself is built from fixed parts
+/// plus the diagnostics report.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn open_issue_report(
+    engine: String,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
+    let report = diagnostics_report(&runtime.controller).await;
+    let url = support::issue_report_url(&engine, &report)?;
+    support::shell_open(url.as_ref()).map_err(|err| format!("failed to open the issue form: {err}"))
 }
 
 #[cfg(feature = "desktop")]
@@ -1558,6 +1628,20 @@ async fn cancel_dictation(
     Ok(())
 }
 
+/// Pill "Try again" after a failed transcription (plan 020).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn retry_last_dictation(
+    app: tauri::AppHandle,
+    runtime: State<'_, RuntimeContext>,
+) -> Result<(), String> {
+    runtime
+        .controller
+        .retry_last_dictation(app)
+        .await
+        .map_err(|err| AppError::Controller(err).into())
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn stop_dictation(
@@ -1585,6 +1669,14 @@ async fn update_hotkey_config(
         .update_hotkey_config(config)
         .await
         .map_err(|err| AppError::Controller(err).into())
+}
+
+/// Pauses the global hotkey while Settings records a new shortcut.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn set_hotkey_capture(runtime: State<'_, RuntimeContext>, active: bool) -> Result<(), String> {
+    runtime.controller.set_hotkey_capture(active).await;
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -1716,21 +1808,6 @@ async fn get_speech_engine_status(
     runtime: State<'_, RuntimeContext>,
 ) -> Result<state::SpeechEngineStatus, String> {
     Ok(runtime.controller.speech_engine_status().await)
-}
-
-/// Answer the one-time GPU upgrade notice; returns the model to download
-/// when accepted.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn answer_gpu_upgrade(
-    runtime: State<'_, RuntimeContext>,
-    accept: bool,
-) -> Result<Option<String>, String> {
-    runtime
-        .controller
-        .answer_gpu_upgrade(accept)
-        .await
-        .map_err(|err| AppError::Controller(err).into())
 }
 
 /// Qualify the accepted upgrade model and switch to it (no-op otherwise).
@@ -2330,7 +2407,22 @@ pub fn run() {
         // setup. `process` provides the relaunch after a successful install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // "Start with Windows": the Run-key entry launches us with
+        // `--autostart`, which keeps the window hidden (see `setup`).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARG]),
+        ))
         .setup(|app| {
+            // The main window is created hidden (tauri.conf.json) so a login
+            // launch never flashes it. Normal launches show it straight away.
+            telemetry::attach(app.handle().clone());
+            let launched_at_login = launched_at_login();
+            if !launched_at_login {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             let controller = Arc::new(
                 VoiceWaveController::new()
                     .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
@@ -2381,6 +2473,13 @@ pub fn run() {
                 }
             };
             configure_main_window_close_behavior(&app_handle, tray_ready);
+            // A login launch lives in the tray; without a tray there would be
+            // no way back to the app, so show the window instead.
+            if launched_at_login && !tray_ready {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             sync_pill_visibility(&app.handle().clone(), initial_settings.show_floating_hud)
                 .map_err(|err| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::other(err))
@@ -2473,7 +2572,9 @@ pub fn run() {
             show_main_window,
             open_microphone_privacy_settings,
             get_support_context,
+            get_diagnostics_report,
             open_issue_report,
+            telemetry::drain_telemetry,
             open_logs_folder,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
@@ -2486,9 +2587,11 @@ pub fn run() {
             export_diagnostics_bundle,
             start_dictation,
             cancel_dictation,
+            retry_last_dictation,
             stop_dictation,
             load_hotkey_config,
             update_hotkey_config,
+            set_hotkey_capture,
             get_permission_snapshot,
             list_input_devices,
             request_microphone_access,
@@ -2502,7 +2605,6 @@ pub fn run() {
             trigger_hotkey_action,
             list_model_catalog,
             get_speech_engine_status,
-            answer_gpu_upgrade,
             finish_gpu_upgrade,
             remove_model,
             list_installed_models,

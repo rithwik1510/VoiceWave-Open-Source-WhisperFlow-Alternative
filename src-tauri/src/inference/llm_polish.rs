@@ -9,6 +9,7 @@
 //! `Ok(None)` and the caller silently keeps the deterministic text.
 
 use super::InferenceError;
+use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
@@ -252,7 +253,9 @@ fn checkout_worker() -> Result<PolishWorkerProcess, InferenceError> {
         None => true,
     };
     if needs_spawn {
-        *guard = Some(spawn_polish_worker()?);
+        // Recorded here because `polish_text_blocking` swallows the error.
+        *guard =
+            Some(spawn_polish_worker().inspect_err(|_| record_crash(WorkerExit::SpawnFailed))?);
     }
     guard
         .take()
@@ -296,6 +299,15 @@ fn response_timeout() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Telemetry for a worker that died, hung or never came up. A worker that
+/// answers with an error ("model not found") is not one.
+fn record_crash(exit: WorkerExit) {
+    telemetry::record(TelemetryEvent::WorkerCrashed {
+        worker: WorkerKind::Polish,
+        exit,
+    });
+}
+
 fn read_response_line_with_timeout(
     worker: &mut PolishWorkerProcess,
     timeout: Duration,
@@ -320,6 +332,7 @@ fn read_response_line_with_timeout(
         Ok(Ok((stdout, bytes, line))) => {
             worker.stdout = Some(stdout);
             if bytes == 0 {
+                record_crash(WorkerExit::Crash);
                 return Err(InferenceError::RuntimeJoin(
                     "polish worker exited unexpectedly".to_string(),
                 ));
@@ -328,11 +341,13 @@ fn read_response_line_with_timeout(
         }
         Ok(Err((stdout, err))) => {
             worker.stdout = Some(stdout);
+            record_crash(WorkerExit::Crash);
             Err(InferenceError::RuntimeJoin(format!(
                 "polish stdout read failed: {err}"
             )))
         }
         Err(RecvTimeoutError::Timeout) => {
+            record_crash(WorkerExit::Timeout);
             let _ = worker.child.kill();
             let _ = worker.child.wait();
             Err(InferenceError::RuntimeJoin(format!(
@@ -341,6 +356,7 @@ fn read_response_line_with_timeout(
             )))
         }
         Err(RecvTimeoutError::Disconnected) => {
+            record_crash(WorkerExit::Crash);
             let _ = worker.child.kill();
             let _ = worker.child.wait();
             Err(InferenceError::RuntimeJoin(
@@ -379,6 +395,7 @@ fn spawn_polish_worker() -> Result<PolishWorkerProcess, InferenceError> {
         ))
     })?;
 
+    crate::job_object::assign(&child);
     let stdin = child
         .stdin
         .take()

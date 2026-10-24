@@ -88,6 +88,10 @@ export interface VoiceWaveSettings {
    * "bullet point") independent of the format profile. Defaults to true. */
   spokenEditCommands: boolean;
   micVolumeGuard: MicVolumeGuardMode;
+  /** Keep the mic stream and its in-memory pre-roll running while the app
+   * runs, so even the first dictation after a break keeps its first word.
+   * Optional here since the backend supplies a `false` default. */
+  keepMicReady?: boolean;
   /** Opt-in one-tap "Add to dictionary?" pill suggestion. Off by default;
    * optional here since the backend supplies a default when absent. */
   pillActionSuggestions?: boolean;
@@ -111,6 +115,10 @@ export interface VoiceWaveSettings {
   /** Settings → Dictation → GPU acceleration (plan 019). Off keeps dictation
    * on the processor. The backend defaults it to "auto". */
   gpuAcceleration?: GpuAccelerationMode;
+  /** The one-time Home card offering existing users Parakeet was answered
+   * ("Not now", Parakeet made active, or onboarding finished). The backend
+   * defaults it to false. */
+  parakeetOfferAnswered?: boolean;
 }
 
 export type GpuAccelerationMode = "auto" | "off";
@@ -128,7 +136,8 @@ export interface VoiceWaveSnapshot {
 /** A typed one-tap action carried by a pill notice. The frontend switches on
  * `kind` to render the button and dispatch the handler. */
 export interface PillAction {
-  kind: "copyTranscript" | "addDictionaryTerm";
+  /** `retryDictation` reruns transcription on audio kept from a failed run. */
+  kind: "copyTranscript" | "addDictionaryTerm" | "retryDictation";
   /** Button label, e.g. "Copy" or 'Add "foo"'. */
   label: string;
   /** Action data (e.g. the term to add). `copyTranscript` reads the rescue
@@ -235,6 +244,8 @@ export interface LatencyBreakdownEvent {
   correctionCandidatesCount?: number;
   insertionMethod: InsertionMethod | string;
   insertionTargetClass: string;
+  /** A microphone dictation whose text landed (clipboard-only counts). */
+  dictationLanded: boolean;
 }
 
 export interface DiagnosticsStatus {
@@ -250,7 +261,39 @@ export interface SupportContext {
   appVersion: string;
   osVersion: string;
   logDir: string;
+  /** This process was started with `--autostart` (Windows sign-in). */
+  launchedAtLogin: boolean;
 }
+
+/** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
+ * never messages, paths, or user text. Mirrors src-tauri/src/telemetry.rs. */
+export type DictationFailureKind =
+  | "setup"
+  | "mic-missing"
+  | "mic-open"
+  | "engine-start"
+  | "timeout"
+  | "transcription"
+  | "empty-result"
+  | "insert"
+  | "no-speech"
+  | "other";
+export type WorkerKind = "asr-gpu" | "asr-cpu" | "faster-whisper" | "polish";
+export type WorkerExit = "crash" | "timeout" | "spawn-failed";
+export type PanicArea =
+  | "state"
+  | "inference"
+  | "audio"
+  | "insertion"
+  | "hotkey"
+  | "models"
+  | "settings"
+  | "other"
+  | "dependency";
+export type TelemetryEvent =
+  | { type: "dictation-failed"; kind: DictationFailureKind }
+  | { type: "worker-crashed"; worker: WorkerKind; exit: WorkerExit }
+  | { type: "panicked"; area: PanicArea };
 
 export interface DiagnosticsExportResult {
   filePath: string;
@@ -277,6 +320,14 @@ export type HotkeyPhase = "pressed" | "released" | "triggered";
 export interface HotkeyEvent {
   action: HotkeyAction;
   phase: HotkeyPhase;
+}
+
+/** A key edge from the keyboard hook while Settings records a shortcut.
+ * `key` is a canonical token ("Ctrl", "Windows", "F9", "Escape"), or null for
+ * a key that cannot be part of a shortcut. */
+export interface HotkeyCaptureKey {
+  key: string | null;
+  pressed: boolean;
 }
 
 export type MicrophonePermission = "granted" | "denied" | "unknown";
@@ -371,6 +422,9 @@ export interface InsertResult {
   targetApp?: string | null;
   transactionId: string;
   undoAvailable: boolean;
+  /** The focused app runs as administrator, so the text went to the
+   * clipboard instead of being typed. */
+  blockedByElevation?: boolean;
 }
 
 export interface UndoResult {
@@ -403,17 +457,18 @@ export interface ModelCatalogItem {
   recommended: boolean;
   /** One-line, hardware-specific note shown next to the model. */
   hardwareNote: string;
-  /** "Small" or "Large Turbo", whichever engine family the row belongs to. */
+  /** "Small" or "Large Turbo", whichever engine family the row belongs to, or
+   * Parakeet (one file for both; recommended wherever it runs). */
   tier: ModelTier;
-  /** One of the two rows offered on this PC. False for an installed model of
-   * the other family (e.g. an upgrader's processor fallback), listed only so
-   * it can be used or removed. */
+  /** One of the rows setup offers on this PC (Parakeet, Small, Large Turbo).
+   * False for an installed model of the other family (e.g. an upgrader's
+   * processor fallback), listed only so it can be used or removed. */
   primary: boolean;
 }
 
-export type ModelTier = "small" | "largeTurbo";
+export type ModelTier = "small" | "largeTurbo" | "parakeet";
 
-/** A model the backend offers to download (GPU upgrade, or the processor model). */
+/** A model the backend offers to download (the processor model). */
 export interface ModelOffer {
   modelId: string;
   tier: ModelTier;
@@ -427,6 +482,8 @@ export interface SpeechEngineStatus {
   cpuSupport: "full" | "noAvx2" | "unsupported";
   /** The graphics card dictation uses, on machines that have one that qualifies. */
   gpuName: string | null;
+  /** Graphics vendor from the PCI vendor id; null with no graphics card. */
+  gpuVendor: "nvidia" | "amd" | "intel" | "other" | null;
   recommendedModelId: string;
   /** Where the active model runs, as the speech worker reported it; null
    * while the one-time graphics card check runs or is about to. */
@@ -436,7 +493,7 @@ export interface SpeechEngineStatus {
   preparing: boolean;
   qualification: "passed" | "failed" | "retry" | null;
   qualificationDetail: string | null;
-  upgradeOffer: ModelOffer | null;
+  /** A GPU upgrade accepted before 0.7.5, switched to once it qualifies. */
   pendingUpgrade: string | null;
   /** The active graphics-card model is stuck on the processor (check failed,
    * GPU cooling down or gone, acceleration off) with no processor model

@@ -30,7 +30,8 @@ const HEARD_LEVEL = 0.045;
 const HEARD_HOLD_MS = 600;
 
 interface OnboardingProps {
-  /** This PC's two primary rows (Small, Large Turbo) from the per-machine catalog. */
+  /** The rows setup offers on this PC (Parakeet where it runs, Small, Large
+   * Turbo), recommended first, from the per-machine catalog. */
   catalog: ModelCatalogItem[];
   /** Plan 019 engine state: unsupported CPUs, and the one-time graphics card check. */
   speechEngine: SpeechEngineStatus | null;
@@ -51,6 +52,10 @@ interface OnboardingProps {
    * Setup funnel events read the value current when each one fires. */
   usageOptIn: boolean;
   onUsageOptInChange: (enabled: boolean) => void;
+  /** "Start with Windows" on the final step. Off unless the user opts in;
+   * null (not offered) outside the desktop app. */
+  autostart?: boolean | null;
+  onAutostartChange?: (enabled: boolean) => void;
   onComplete: () => void;
   /** Test/host override. Desktop normally resolves the internal rollout flag
    * from the native snapshot so onboarding never advertises a disabled card. */
@@ -369,6 +374,8 @@ export function Onboarding({
   snapshot,
   usageOptIn,
   onUsageOptInChange,
+  autostart,
+  onAutostartChange,
   onComplete,
   quickControlsAvailable: quickControlsAvailableOverride
 }: OnboardingProps) {
@@ -398,13 +405,11 @@ export function Onboarding({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const rehearsalBaselineRef = useRef<string | null>(null);
   const { canvasRef, burst } = useParticleBurst();
-  const usageOptInRef = useRef(usageOptIn);
-  usageOptInRef.current = usageOptIn;
-
-  // Funnel events honour the usage toggle as it stands at each event.
-  // telemetry.ts keeps every step and the outcome to once per install.
+  // Funnel events honour the usage toggle as it stands when each is sent
+  // (telemetry.ts reads the live setting). It keeps every step and the
+  // outcome to once per install.
   const track = useCallback((event: FunnelEvent) => {
-    void trackFunnelEvent(usageOptInRef.current, event).catch(() => undefined);
+    void trackFunnelEvent(event).catch(() => undefined);
   }, []);
 
   // Welcome counts when the user acts on it (not on mount), so the toggle
@@ -452,6 +457,7 @@ export function Onboarding({
   const status = statuses[modelChoice];
   const modelReady =
     hasInstalledModel || status?.installed === true || status?.state === "installed";
+  const parakeetRow = catalog.find((row) => row.tier === "parakeet");
   const smallRow = catalog.find((row) => row.tier === "small");
   const turboRow = catalog.find((row) => row.tier === "largeTurbo");
   const gpuMachine = speechEngine?.gpuName != null;
@@ -635,7 +641,7 @@ export function Onboarding({
             {step === "welcome" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">VOICEWAVE</p>
-                <h1 className='mt-3 font-["Fraunces"] text-[44px] leading-[1.06] tracking-tight text-ink-strong'>
+                <h1 className='mt-3 font-display text-[44px] leading-[1.06] tracking-tight text-ink-strong'>
                   Your voice,
                   <br />
                   everywhere.
@@ -659,6 +665,15 @@ export function Onboarding({
                       Speech model
                     </p>
                     <div className="vw-seg mt-2 inline-flex" role="group" aria-label="Speech model choice">
+                      {parakeetRow && (
+                        <button
+                          type="button"
+                          className={`vw-seg-btn ${modelChoice === parakeetRow.modelId ? "vw-seg-btn-active" : ""}`}
+                          onClick={() => chooseModel(parakeetRow.modelId)}
+                        >
+                          {parakeetRow.recommended ? "Parakeet · recommended" : "Parakeet"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={`vw-seg-btn ${modelChoice === smallRow.modelId ? "vw-seg-btn-active" : ""}`}
@@ -691,7 +706,7 @@ export function Onboarding({
                     <p className="vw-set-title">Anonymous usage count · on by default</p>
                     <p className="vw-set-desc">
                       Counts installs and setup progress with a random ID. Never audio, transcripts, or
-                      settings. Change it anytime in Settings.
+                      your other settings. Change it anytime in Settings.
                     </p>
                     <UsageCountDetails />
                   </div>
@@ -724,7 +739,7 @@ export function Onboarding({
             {step === "mic" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">MICROPHONE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-3 font-display text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Say something.
                 </h2>
                 <p className="mt-2 text-[15px] text-faint">
@@ -780,7 +795,7 @@ export function Onboarding({
             {step === "speak" && (
               <div className="vw-onb-step flex flex-1 flex-col">
                 <p className="vw-onb-kicker">THE ONE GESTURE</p>
-                <h2 className='mt-3 font-["Fraunces"] text-[34px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-3 font-display text-[34px] leading-tight tracking-tight text-ink-strong'>
                   Hold the key. Speak. Let go.
                 </h2>
 
@@ -822,7 +837,7 @@ export function Onboarding({
                             : " "}
                     </p>
                     <p className="mt-1 text-xs text-hint">
-                      Longer thought? Double-tap {hotkeyLabel} for hands-free, then pause or press it again.
+                      Longer thought? Double-tap {hotkeyLabel} for hands-free, then press it again when you're done.
                     </p>
                   </>
                 ) : (
@@ -837,7 +852,7 @@ export function Onboarding({
                       </div>
                       <div className="flex items-center gap-3 px-4 py-3 text-[15px] text-faint">
                         <kbd className="vw-onb-kbd">{hotkeyLabel}</kbd>
-                        <span>Double-tap for hands-free. Pause when you're done, or press it again.</span>
+                        <span>Double-tap for hands-free. Take your time, then press it again when you're done.</span>
                       </div>
                     </div>
                     <div className="mt-5">
@@ -894,7 +909,7 @@ export function Onboarding({
                 <div className="vw-onb-done-orb">
                   <Check size={40} strokeWidth={3} />
                 </div>
-                <h2 className='mt-6 font-["Fraunces"] text-[38px] leading-tight tracking-tight text-ink-strong'>
+                <h2 className='mt-6 font-display text-[38px] leading-tight tracking-tight text-ink-strong'>
                   You're set.
                 </h2>
                 <p className="mt-3 max-w-[24rem] text-[15px] leading-relaxed text-faint">
@@ -934,6 +949,25 @@ export function Onboarding({
                     AI polish · waiting in Settings
                   </span>
                 </div>
+                {autostart != null && onAutostartChange ? (
+                  <div className="mt-6 flex w-full max-w-[26rem] items-start justify-between gap-6 text-left">
+                    <div>
+                      <p className="vw-set-title">Start with Windows</p>
+                      <p className="vw-set-desc">
+                        Opens in the tray at sign-in with the model loaded. Change it anytime in Settings.
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Start VoiceWave with Windows"
+                        checked={autostart}
+                        onChange={(event) => onAutostartChange(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
+                ) : null}
                 <button type="button" className="vw-btn-primary mt-8" onClick={() => leaveSetup("finished")}>
                   Start dictating
                 </button>

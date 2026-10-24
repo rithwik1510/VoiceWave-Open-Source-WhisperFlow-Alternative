@@ -8,14 +8,25 @@
 // whisper/ggml logging on stderr. stdout never carries anything but JSON: fd 1
 // is redirected to stderr at startup and responses go through a private dup.
 //
-//   on start   -> {"ready":true,"protocol":1,"variant":"vk"|"cpu","whisperVersion":"1.9.5"}
+//   on start   -> {"ready":true,"protocol":1,"variant":"vk"|"cpu","whisperVersion":"1.9.5",
+//                  "engines":["whisper","parakeet"]}
 //   {"id":..,"command":"list_devices"}
-//   {"id":..,"command":"load","modelPath":..,"device":"gpu"|"cpu","luid"?:..,"ggmlIndex"?:n,
-//                             "flashAttention"?:bool,"threads"?:n,"warmup"?:bool}
+//   {"id":..,"command":"load","modelPath":..,"engine"?:"whisper"|"parakeet","device":"gpu"|"cpu",
+//                             "luid"?:..,"ggmlIndex"?:n,"flashAttention"?:bool,"threads"?:n,"warmup"?:bool}
 //   {"id":..,"command":"transcribe","audioPcm16B64":..,"sampleRateHz"?:16000,"beamSize"?:5,
-//                                   "language"?:"en","initialPrompt"?:..}
+//                                   "language"?:"en","initialPrompt"?:..,
+//                                   "boostTerms"?:[..],"boostStrength"?:1.0}
 //   {"id":..,"command":"cancel","targetId"?:..}   abandons the running transcribe
 //   {"id":..,"command":"shutdown"}
+//
+// Engines: "whisper" (default) runs whisper.cpp; "parakeet" runs NVIDIA Parakeet
+// TDT via whisper.cpp's parakeet.h. Parakeet decodes greedily, detects the
+// language itself and has no prompt, so it ignores beamSize, language,
+// initialPrompt and flashAttention; its noSpeechProb is always 0. Instead of a
+// prompt it takes dictionary terms as boostTerms (plan 021, see "boosting"
+// below); its transcribe reply then adds
+// "boost":{"terms","skipped","steps","completed","flipped","ms"}. Whisper
+// ignores them.
 //
 // Every response echoes the request id. Failures are
 // {"id":..,"ok":false,"errorClass":"artifact"|"resource"|"backend"|"protocol","error":..}.
@@ -30,6 +41,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -41,10 +53,12 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "ggml-backend.h"
 #include "json.hpp"
+#include "parakeet.h"
 #include "whisper.h"
 
 #ifdef VOICEWAVE_ASR_VULKAN
@@ -156,6 +170,33 @@ std::wstring utf8_to_wide(const std::string &s) {
     std::wstring w((size_t) n, L'\0');
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int) s.size(), w.data(), n);
     return w;
+}
+
+std::string wide_to_utf8(const std::wstring &w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string s((size_t) n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// Unicode case mapping (LCMAP_LOWERCASE / LCMAP_UPPERCASE), ASCII fast path.
+// Invalid UTF-8 comes back unchanged.
+std::string utf8_case(const std::string &s, DWORD flag) {
+    if (std::all_of(s.begin(), s.end(), [](unsigned char c) { return c < 0x80; })) {
+        std::string out(s);
+        for (char &c : out) c = (char) (flag == LCMAP_LOWERCASE ? tolower((unsigned char) c) : toupper((unsigned char) c));
+        return out;
+    }
+    const std::wstring w = utf8_to_wide(s);
+    if (w.empty()) return s;
+    std::wstring mapped(w.size(), L'\0');
+    if (LCMapStringEx(LOCALE_NAME_INVARIANT, flag, w.data(), (int) w.size(), mapped.data(), (int) mapped.size(),
+                      nullptr, nullptr, 0) != (int) w.size()) {
+        return s;
+    }
+    return wide_to_utf8(mapped);
 }
 
 bool base64_decode(const std::string &in, std::vector<uint8_t> &out) {
@@ -418,8 +459,9 @@ json device_list_response(const json &id) {
 // ----------------------------------------------------------------- model ---
 
 struct Loaded {
-    whisper_context *ctx = nullptr;
-    std::string backend;  // "vulkan" | "cpu": what whisper actually initialized
+    whisper_context *ctx = nullptr;    // engine "whisper"
+    parakeet_context *pctx = nullptr;  // engine "parakeet"; at most one of the two is set
+    std::string backend;  // "vulkan" | "cpu": what the engine actually initialized
     std::string device_name;
     std::string luid;
     int ggml_index = -1;
@@ -445,6 +487,7 @@ void file_close(void *ctx) { fclose((FILE *) ctx); }
 
 void unload() {
     if (g_model.ctx) whisper_free(g_model.ctx);
+    if (g_model.pctx) parakeet_free(g_model.pctx);
     g_model = Loaded{};
 }
 
@@ -467,15 +510,342 @@ whisper_full_params decode_params(int beam_size, int threads) {
     return wp;
 }
 
-// Which backend did whisper really initialize? whisper silently falls back to
-// CPU when the GPU backend fails, so we read its own allocation report: the
-// state's "using VulkanN backend" line and the model weights' buffer name.
-std::string detect_backend(const std::string &log, int ggml_index) {
+parakeet_full_params parakeet_decode_params(int threads) {
+    parakeet_full_params pp = parakeet_full_default_params(PARAKEET_SAMPLING_GREEDY);
+    pp.n_threads = threads;
+    pp.no_context = true;
+    pp.abort_callback = [](void *) { return g_cancel.load(); };
+    return pp;
+}
+
+// -------------------------------------------------------------- boosting ---
+// Dictionary boosting for Parakeet (plan 021): shallow fusion with a term
+// trie inside the greedy decoder. Before each token choice, word-pieces that
+// continue spelling a dictionary term get a bonus on their raw logit (so the
+// term wins ambiguous audio and loses clear audio). Matching is
+// case-insensitive on the piece text, so any tokenization of a term matches.
+// A completed term is re-cased to the dictionary spelling only when the bonus
+// changed at least one decision inside it.
+
+// Raw-logit bonuses, tuned on the plan 021 test set (TTS clean and 10 dB
+// noise, 34- and 200-term dictionaries): the highest that changed no trap
+// sentence. A start bonus beyond ~2 lets a term's first piece displace common
+// words under noise; a continuation bonus beyond ~8 spells "cloud" as "claud".
+constexpr float kBoostStart = 1.5f;  // bonus for a piece that starts a term, or a later word of one
+constexpr float kBoostCont = 7.0f;   // bonus for a piece that continues a word of one
+constexpr int kBoostTopK = 16;       // candidates considered per step
+constexpr size_t kMaxBoostTerms = 200;
+constexpr size_t kMaxActiveMatches = 16;
+const std::string kSpmSpace = "\xE2\x96\x81";  // SentencePiece word marker
+
+// Per-model piece tables, built once at load.
+struct PieceTable {
+    std::vector<std::string> raw;     // piece as in the vocab ("▁Claude")
+    std::vector<std::string> lower;   // lowercased, for matching
+    std::vector<char> word_start;     // starts with ▁
+    std::vector<char> starts_match;   // ▁ plus a character: may open a match when emitted
+    std::vector<char> start_bonus;    // ▁ plus at least 2 characters: may get the start bonus
+    std::unordered_set<std::string> set;  // raw pieces, for the known-word check
+};
+PieceTable g_pieces;
+
+void build_piece_table(parakeet_context *pctx) {
+    g_pieces = PieceTable{};
+    const int n = parakeet_n_vocab(pctx);
+    for (int i = 0; i < n; i++) {
+        const std::string piece = parakeet_token_to_str(pctx, i);
+        g_pieces.lower.push_back(utf8_case(piece, LCMAP_LOWERCASE));
+        const bool word_start = piece.rfind(kSpmSpace, 0) == 0;
+        // Code points after the ▁. A 1-letter start bonus ("▁T") would tilt
+        // every word with that initial and re-case or re-split it ("8GB" ->
+        // "8 GB"); but names often begin that way ("▁V ul kan"), so a 1-letter
+        // piece the model chose itself still opens a match.
+        const size_t chars = word_start ? std::count_if(piece.begin() + kSpmSpace.size(), piece.end(),
+                                                        [](unsigned char c) { return (c & 0xC0) != 0x80; })
+                                        : 0;
+        g_pieces.word_start.push_back(word_start);
+        g_pieces.starts_match.push_back(chars >= 1);
+        g_pieces.start_bonus.push_back(chars >= 2);
+        g_pieces.set.insert(piece);
+        g_pieces.raw.push_back(piece);
+    }
+}
+
+struct TermTrie {
+    struct Node {
+        std::vector<std::pair<char, int>> next;
+        int term = -1;  // index into Booster::terms when a term ends here
+    };
+    std::vector<Node> nodes{1};  // node 0 is the root
+
+    int walk(int node, const std::string &s) const {
+        for (char c : s) {
+            const auto &next = nodes[node].next;
+            auto it = std::find_if(next.begin(), next.end(), [c](const auto &e) { return e.first == c; });
+            if (it == next.end()) return -1;
+            node = it->second;
+        }
+        return node;
+    }
+
+    void insert(const std::string &key, int term) {
+        int node = 0;
+        for (char c : key) {
+            int child = walk(node, std::string(1, c));
+            if (child < 0) {
+                child = (int) nodes.size();
+                nodes[node].next.push_back({c, child});
+                nodes.emplace_back();
+            }
+            node = child;
+        }
+        nodes[node].term = term;
+    }
+};
+
+struct Booster {
+    float start = kBoostStart, cont = kBoostCont;
+    TermTrie trie;
+    std::vector<std::string> terms;  // dictionary spelling, by trie term index
+    int skipped = 0;
+
+    struct Match {
+        int node;
+        int first;     // index of its first piece in `emitted`
+        bool flipped;  // the bonus changed a decision inside it
+    };
+    struct Span {
+        int first, last, term;
+    };
+    std::vector<Match> active, scratch;
+    std::vector<int> emitted;  // token ids, in order
+    std::vector<Span> recase;
+    std::vector<int> cand;
+    std::vector<char> kinds;  // Kind per candidate
+    int greedy_choice = -1;  // argmax before the bonus, for the step in flight
+    int steps = 0;           // logits-filter calls: proves the patched hook ran
+    int completed = 0, flipped = 0;
+    double ms = 0;
+
+    bool enabled() const { return !terms.empty() && (start > 0 || cont > 0); }
+
+    // Normalizes and filters the requested terms into the trie. Skipped:
+    // under 3 characters, acronyms (no lowercase letter), and single words
+    // the model already has as one vocab piece ("these"; its multilingual
+    // vocab holds few whole English words, so most terms pass).
+    void add_terms(const json &list) {
+        std::unordered_set<std::string> seen;
+        for (const auto &item : list) {
+            if (!item.is_string()) continue;
+            std::string display;
+            for (char c : item.get<std::string>()) {
+                const bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r';
+                if (space) {
+                    if (!display.empty() && display.back() != ' ') display += ' ';
+                } else {
+                    display += c;
+                }
+            }
+            if (!display.empty() && display.back() == ' ') display.pop_back();
+            if (display.empty()) continue;
+            const std::wstring wide = utf8_to_wide(display);
+            const bool has_lower = std::any_of(wide.begin(), wide.end(), [](wchar_t c) { return IsCharLowerW(c); });
+            const std::string lower = utf8_case(display, LCMAP_LOWERCASE);
+            if (wide.size() < 3 || !has_lower) {
+                skipped++;
+                continue;
+            }
+            if (display.find(' ') == std::string::npos) {
+                const std::wstring wl = utf8_to_wide(lower);
+                const std::string capitalized = utf8_case(wide_to_utf8(wl.substr(0, 1)), LCMAP_UPPERCASE) + wide_to_utf8(wl.substr(1));
+                if (g_pieces.set.count(kSpmSpace + lower) || g_pieces.set.count(kSpmSpace + capitalized)) {
+                    skipped++;
+                    continue;
+                }
+            }
+            std::string key = kSpmSpace;
+            for (char c : lower) key += c == ' ' ? kSpmSpace : std::string(1, c);
+            if (!seen.insert(key).second) continue;
+            if (terms.size() >= kMaxBoostTerms) {
+                skipped++;
+                continue;
+            }
+            trie.insert(key, (int) terms.size());
+            terms.push_back(display);
+        }
+    }
+
+    // logits: n token logits, blank last. The blank-vs-token decision is the
+    // model's alone: the bonus only reorders word-pieces when the model has
+    // already chosen to emit one, so boosting never inserts a word.
+    void filter(float *logits, int n) {
+        const double t0 = now_ms();
+        steps++;
+        const int blank = n - 1;
+        const int best = (int) (std::max_element(logits, logits + n) - logits);
+        greedy_choice = best;
+        if (best != blank) {
+            const float floor = logits[best] - std::max(start, active.empty() ? 0.0f : cont);
+            cand.clear();
+            for (int i = 0; i < blank; i++) {
+                if (logits[i] > floor) cand.push_back(i);
+            }
+            if ((int) cand.size() > kBoostTopK) {
+                std::partial_sort(cand.begin(), cand.begin() + kBoostTopK, cand.end(),
+                                  [logits](int a, int b) { return logits[a] > logits[b]; });
+                cand.resize(kBoostTopK);
+            }
+            // Continuing a word outranks starting one (a new term, or the
+            // next word of a multi-word term): when a continuation is on
+            // offer, start bonuses sit this step out ("▁goat|co" over "▁Co").
+            kinds.resize(cand.size());
+            bool continuing = false;
+            for (size_t k = 0; k < cand.size(); k++) {
+                kinds[k] = kind(cand[k], best);
+                continuing |= kinds[k] == kCont;
+            }
+            for (size_t k = 0; k < cand.size(); k++) {
+                if (kinds[k] == kCont) logits[cand[k]] += cont;
+                if (kinds[k] == kStart && !continuing) logits[cand[k]] += start;
+            }
+        }
+        ms += now_ms() - t0;
+    }
+
+    enum Kind : char { kNone, kStart, kCont };
+
+    // One piece is a prefix of the other ignoring case, but not with it.
+    static bool case_conflict(int a, int b) {
+        const std::string &la = g_pieces.lower[a], &lb = g_pieces.lower[b];
+        if (la.size() > lb.size()) return case_conflict(b, a);
+        return lb.rfind(la, 0) == 0 && g_pieces.raw[b].rfind(g_pieces.raw[a], 0) != 0;
+    }
+
+    // Which bonus `token` earns when the model's own choice is `top`.
+    Kind kind(int token, int top) const {
+        if (token >= (int) g_pieces.lower.size()) return kNone;
+        const std::string &piece = g_pieces.lower[token];
+        // Same letters as the model's choice in another case ("▁T" over
+        // "▁tem", "▁cl" over "▁C"): winning would only re-case the word.
+        if (token != top && case_conflict(token, top)) return kNone;
+        const bool word_start = g_pieces.word_start[token];
+        for (const Match &m : active) {
+            if (trie.walk(m.node, piece) < 0) continue;
+            if (!word_start) return kCont;
+            // The next word of a multi-word term is a new word the audio has
+            // to carry, so it earns only the start bonus: after "▁Claude",
+            // "▁co" must not turn "called" into "Code".
+            if (g_pieces.start_bonus[token]) return kStart;
+        }
+        if (g_pieces.start_bonus[token] && trie.walk(0, piece) >= 0) return kStart;
+        return kNone;
+    }
+
+    void on_token(int token) {
+        const double t0 = now_ms();
+        const bool flip = token != greedy_choice;
+        const int idx = (int) emitted.size();
+        emitted.push_back(token);
+        if (token < (int) g_pieces.lower.size()) {
+            const std::string &piece = g_pieces.lower[token];
+            const bool word_start = g_pieces.word_start[token];
+            // A term completes at a word boundary: a new word or punctuation.
+            if (word_start || ((unsigned char) piece[0] < 0x80 && !isalnum((unsigned char) piece[0]))) {
+                for (const Match &m : active) {
+                    if (trie.nodes[m.node].term >= 0) complete(m, idx - 1);
+                }
+            }
+            scratch.clear();
+            auto keep = [this](int node, int first, bool flipped) {
+                if (node < 0 || scratch.size() >= kMaxActiveMatches) return;
+                for (Match &m : scratch) {
+                    if (m.node == node) {  // same prefix, so the same start
+                        m.flipped |= flipped;
+                        return;
+                    }
+                }
+                scratch.push_back({node, first, flipped});
+            };
+            for (const Match &m : active) keep(trie.walk(m.node, piece), m.first, m.flipped || flip);
+            if (g_pieces.starts_match[token]) keep(trie.walk(0, piece), idx, flip);
+            active.swap(scratch);
+        } else {
+            active.clear();
+        }
+        ms += now_ms() - t0;
+    }
+
+    void complete(const Match &m, int last) {
+        completed++;
+        if (!m.flipped) return;
+        flipped++;
+        recase.push_back({m.first, last, trie.nodes[m.node].term});
+    }
+
+    // End of the decode: matches still open at the end of the text complete.
+    void finish() {
+        for (const Match &m : active) {
+            if (trie.nodes[m.node].term >= 0) complete(m, (int) emitted.size() - 1);
+        }
+        active.clear();
+    }
+
+    // The transcript rebuilt from the emitted pieces (as parakeet.cpp builds
+    // a segment), with each flipped term in its dictionary spelling. Overlaps
+    // keep the earlier, then longer, span ("Claude Code" over "Claude").
+    std::string text() {
+        std::sort(recase.begin(), recase.end(), [](const Span &a, const Span &b) {
+            return a.first != b.first ? a.first < b.first : a.last > b.last;
+        });
+        std::string out;
+        size_t next_span = 0;
+        char buf[256];
+        for (int i = 0; i < (int) emitted.size();) {
+            while (next_span < recase.size() && recase[next_span].first < i) next_span++;
+            if (next_span < recase.size() && recase[next_span].first == i) {
+                const Span &s = recase[next_span];
+                if (!out.empty() && g_pieces.word_start[emitted[i]]) out += ' ';
+                out += terms[s.term];
+                i = s.last + 1;
+                continue;
+            }
+            const int len = parakeet_token_to_text(g_pieces.raw[emitted[i]].c_str(), out.empty(), buf, sizeof buf);
+            out.append(buf, std::min(len, (int) sizeof buf - 1));
+            i++;
+        }
+        return out;
+    }
+};
+
+// Bonus sizes for this request: the defaults scaled by `boostStrength`. The
+// dev env var VOICEWAVE_PARAKEET_BOOST overrides it: "0" disables, "1.5"
+// scales, "1.5,3" sets the start and continuation bonuses directly.
+void boost_strength(const json &req, Booster &b) {
+    float strength = req.value("boostStrength", 1.0f);
+    if (const char *env = getenv("VOICEWAVE_PARAKEET_BOOST"); env && *env) {
+        float s = 0, c = 0;
+        if (sscanf(env, "%f,%f", &s, &c) == 2) {
+            b.start = s;
+            b.cont = c;
+            return;
+        }
+        strength = (float) atof(env);
+    }
+    strength = std::clamp(strength, 0.0f, 4.0f);
+    b.start = kBoostStart * strength;
+    b.cont = kBoostCont * strength;
+}
+
+// Which backend did the engine really initialize? whisper and parakeet both
+// silently fall back to CPU when the GPU backend fails, so we read their own
+// allocation report: the state's "using VulkanN backend" line and the model
+// weights' buffer name, logged by `model_load_fn`.
+std::string detect_backend(const std::string &log, int ggml_index, const char *model_load_fn) {
     if (ggml_index < 0) return "cpu";
     const std::string dev = "Vulkan" + std::to_string(ggml_index);
     const bool backend_up = log.find("using " + dev + " backend") != std::string::npos &&
                             log.find("failed to initialize " + dev) == std::string::npos;
-    const std::regex weights("whisper_model_load:\\s+" + dev + " total size");
+    const std::regex weights(std::string(model_load_fn) + ":\\s+" + dev + " total size");
     const bool weights_on_gpu = std::regex_search(log, weights);
     return backend_up && weights_on_gpu ? "vulkan" : "cpu";
 }
@@ -489,11 +859,14 @@ json handle_load(const json &req) {
     if (!g_devices.vulkan_ok) return fail(id, "backend", "Vulkan unavailable: " + g_devices.vulkan_error);
 #endif
     if (!req.contains("modelPath") || !req["modelPath"].is_string()) return fail(id, "protocol", "modelPath is required");
+    const std::string engine = req.value("engine", "whisper");
+    if (engine != "whisper" && engine != "parakeet") return fail(id, "protocol", "engine must be \"whisper\" or \"parakeet\"");
+    const bool parakeet = engine == "parakeet";
     const std::string device = req.value("device", "cpu");
     if (device != "cpu" && device != "gpu") return fail(id, "protocol", "device must be \"gpu\" or \"cpu\"");
     const bool want_gpu = device == "gpu";
     const int threads = req.value("threads", default_threads());
-    const bool flash_attn = req.value("flashAttention", false);
+    const bool flash_attn = !parakeet && req.value("flashAttention", false);
     const bool warmup = req.value("warmup", true);
 
     const Device *target = nullptr;
@@ -537,18 +910,27 @@ json handle_load(const json &req) {
     const std::string path = req["modelPath"].get<std::string>();
     FILE *f = _wfopen(utf8_to_wide(path).c_str(), L"rb");
     if (!f) return fail(id, "artifact", "cannot open model file: " + path);
-    whisper_model_loader loader{f, file_read, file_eof, file_close};
-
-    whisper_context_params cp = whisper_context_default_params();
-    cp.use_gpu = want_gpu;
-    cp.gpu_device = target ? target->ggml_index : 0;
-    cp.flash_attn = flash_attn;
 
     LogCapture capture;
     const double t0 = now_ms();
     whisper_context *ctx = nullptr;
+    parakeet_context *pctx = nullptr;
     try {
-        ctx = whisper_init_with_params(&loader, cp);  // closes the file via loader.close
+        // Both loaders close the file via loader.close.
+        if (parakeet) {
+            parakeet_model_loader loader{f, file_read, file_eof, file_close};
+            parakeet_context_params pcp = parakeet_context_default_params();
+            pcp.use_gpu = want_gpu;
+            pcp.gpu_device = target ? target->ggml_index : 0;
+            pctx = parakeet_init_with_params(&loader, pcp);
+        } else {
+            whisper_model_loader loader{f, file_read, file_eof, file_close};
+            whisper_context_params cp = whisper_context_default_params();
+            cp.use_gpu = want_gpu;
+            cp.gpu_device = target ? target->ggml_index : 0;
+            cp.flash_attn = flash_attn;
+            ctx = whisper_init_with_params(&loader, cp);
+        }
     } catch (const std::bad_alloc &) {
         return fail(id, "resource", "out of memory while loading the model");
     } catch (const std::exception &e) {
@@ -556,19 +938,24 @@ json handle_load(const json &req) {
     }
     const double load_ms = now_ms() - t0;
     const std::string log = capture.snapshot();
-    if (!ctx) {
+    if (!ctx && !pctx) {
         const std::string detail = last_error_line(log);
         return fail(id, classify(log, want_gpu ? "backend" : "artifact"),
                     "model load failed" + (detail.empty() ? std::string() : ": " + detail));
     }
 
-    const std::string backend = detect_backend(log, target ? target->ggml_index : -1);
+    const std::string backend = detect_backend(log, target ? target->ggml_index : -1,
+                                               parakeet ? "parakeet_model_load" : "whisper_model_load");
     if (want_gpu && backend != "vulkan") {
-        whisper_free(ctx);
-        return fail(id, classify(log, "backend"), "GPU backend did not initialize; whisper fell back to CPU");
+        if (ctx) whisper_free(ctx);
+        if (pctx) parakeet_free(pctx);
+        return fail(id, classify(log, "backend"),
+                    std::string("GPU backend did not initialize; ") + engine + " fell back to CPU");
     }
 
     g_model.ctx = ctx;
+    g_model.pctx = pctx;
+    if (pctx) build_piece_table(pctx);
     g_model.backend = backend;
     g_model.threads = threads;
     if (target) {
@@ -583,10 +970,18 @@ json handle_load(const json &req) {
     double warmup_ms = 0;
     if (warmup) {
         std::vector<float> silence(kSampleRate, 0.0f);
-        whisper_full_params wp = decode_params(5, threads);
-        wp.abort_callback = nullptr;
         const double tw = now_ms();
-        if (whisper_full(ctx, wp, silence.data(), (int) silence.size()) != 0) {
+        int rc;
+        if (parakeet) {
+            parakeet_full_params pp = parakeet_decode_params(threads);
+            pp.abort_callback = nullptr;
+            rc = parakeet_full(pctx, pp, silence.data(), (int) silence.size());
+        } else {
+            whisper_full_params wp = decode_params(5, threads);
+            wp.abort_callback = nullptr;
+            rc = whisper_full(ctx, wp, silence.data(), (int) silence.size());
+        }
+        if (rc != 0) {
             const std::string wlog = capture.snapshot();
             unload();
             return fail(id, classify(wlog, "backend"), "warm-up decode failed");
@@ -596,6 +991,7 @@ json handle_load(const json &req) {
 
     json out = {{"id", id},
                 {"ok", true},
+                {"engine", engine},
                 {"backendUsed", g_model.backend},
                 {"deviceName", g_model.device_name},
                 {"modelInitMs", (int64_t) load_ms},
@@ -611,11 +1007,12 @@ json handle_load(const json &req) {
 
 json handle_transcribe(const json &req) {
     const json id = req["id"];
-    if (!g_model.ctx) return fail(id, "protocol", "no model loaded");
+    const bool parakeet = g_model.pctx != nullptr;
+    if (!g_model.ctx && !parakeet) return fail(id, "protocol", "no model loaded");
     if (req.value("sampleRateHz", kSampleRate) != kSampleRate) return fail(id, "protocol", "sampleRateHz must be 16000");
     if (!req.contains("audioPcm16B64") || !req["audioPcm16B64"].is_string()) return fail(id, "protocol", "audioPcm16B64 is required");
     const std::string language = req.value("language", "en");
-    if (language != "en") return fail(id, "protocol", "only language \"en\" is supported");
+    if (!parakeet && language != "en") return fail(id, "protocol", "only language \"en\" is supported");
     const int beam_size = req.value("beamSize", 5);
     if (beam_size < 1 || beam_size > 8) return fail(id, "protocol", "beamSize must be 1..8");
 
@@ -637,9 +1034,15 @@ json handle_transcribe(const json &req) {
 
     whisper_full_params wp = decode_params(beam_size, g_model.threads);
     std::string prompt;
-    if (req.contains("initialPrompt") && req["initialPrompt"].is_string()) {
+    if (!parakeet && req.contains("initialPrompt") && req["initialPrompt"].is_string()) {
         prompt = req["initialPrompt"].get<std::string>();
         if (!prompt.empty()) wp.initial_prompt = prompt.c_str();
+    }
+    Booster booster;
+    const bool boost_requested = parakeet && req.contains("boostTerms") && req["boostTerms"].is_array();
+    if (boost_requested) {
+        boost_strength(req, booster);
+        booster.add_terms(req["boostTerms"]);
     }
 
     {
@@ -652,7 +1055,25 @@ json handle_transcribe(const json &req) {
     int rc = 0;
     std::string exception;
     try {
-        rc = whisper_full(g_model.ctx, wp, pcm.data(), (int) pcm.size());
+        if (parakeet) {
+            // parakeet_full encodes the whole clip in one graph (up to ~10 min
+            // before it switches to local attention), so long clips need no
+            // chunking here.
+            parakeet_full_params pp = parakeet_decode_params(g_model.threads);
+            if (booster.enabled()) {
+                pp.logits_filter_callback = [](parakeet_context *, parakeet_state *, float *logits, int n, void *b) {
+                    static_cast<Booster *>(b)->filter(logits, n);
+                };
+                pp.logits_filter_callback_user_data = &booster;
+                pp.new_token_callback = [](parakeet_context *, parakeet_state *, const parakeet_token_data *td, void *b) {
+                    static_cast<Booster *>(b)->on_token(td->id);
+                };
+                pp.new_token_callback_user_data = &booster;
+            }
+            rc = parakeet_full(g_model.pctx, pp, pcm.data(), (int) pcm.size());
+        } else {
+            rc = whisper_full(g_model.ctx, wp, pcm.data(), (int) pcm.size());
+        }
     } catch (const std::exception &e) {
         rc = -1;
         exception = e.what();
@@ -677,22 +1098,41 @@ json handle_transcribe(const json &req) {
     std::string text;
     double logprob_sum = 0, no_speech_sum = 0;
     int logprob_n = 0;
-    const int segments = whisper_full_n_segments(g_model.ctx);
-    const whisper_token eot = whisper_token_eot(g_model.ctx);
-    for (int s = 0; s < segments; s++) {
-        std::string seg = whisper_full_get_segment_text(g_model.ctx, s);
+    auto append_segment = [&text](const std::string &seg) {
         const size_t a = seg.find_first_not_of(" \t\n");
         const size_t b = seg.find_last_not_of(" \t\n");
         if (a != std::string::npos) {
             if (!text.empty()) text += ' ';
             text += seg.substr(a, b - a + 1);
         }
-        no_speech_sum += whisper_full_get_segment_no_speech_prob(g_model.ctx, s);
-        for (int t = 0; t < whisper_full_n_tokens(g_model.ctx, s); t++) {
-            const whisper_token_data td = whisper_full_get_token_data(g_model.ctx, s, t);
-            if (td.id >= eot) continue;  // special and timestamp tokens
-            logprob_sum += td.plog;
-            logprob_n++;
+    };
+    int segments;
+    if (parakeet) {
+        booster.finish();
+        segments = parakeet_full_n_segments(g_model.pctx);
+        for (int s = 0; s < segments; s++) {
+            // A single segment per decode, so the boosted rebuild replaces it.
+            append_segment(booster.recase.empty() ? parakeet_full_get_segment_text(g_model.pctx, s) : booster.text());
+            // Parakeet's own plog is not a log-probability; ln(p) of each
+            // emitted token is comparable to whisper's avg_logprob.
+            for (int t = 0; t < parakeet_full_n_tokens(g_model.pctx, s); t++) {
+                const float p = parakeet_full_get_token_p(g_model.pctx, s, t);
+                logprob_sum += std::log(std::max(p, 1e-6f));
+                logprob_n++;
+            }
+        }
+    } else {
+        segments = whisper_full_n_segments(g_model.ctx);
+        const whisper_token eot = whisper_token_eot(g_model.ctx);
+        for (int s = 0; s < segments; s++) {
+            append_segment(whisper_full_get_segment_text(g_model.ctx, s));
+            no_speech_sum += whisper_full_get_segment_no_speech_prob(g_model.ctx, s);
+            for (int t = 0; t < whisper_full_n_tokens(g_model.ctx, s); t++) {
+                const whisper_token_data td = whisper_full_get_token_data(g_model.ctx, s, t);
+                if (td.id >= eot) continue;  // special and timestamp tokens
+                logprob_sum += td.plog;
+                logprob_n++;
+            }
         }
     }
     out.update({{"ok", true},
@@ -701,6 +1141,15 @@ json handle_transcribe(const json &req) {
                 {"decodeComputeMs", (int64_t) decode_ms},
                 {"avgLogProb", logprob_n ? logprob_sum / logprob_n : 0.0},
                 {"noSpeechProb", segments ? no_speech_sum / segments : 0.0}});
+    if (boost_requested) {
+        // Counts only: no term or transcript text leaves through diagnostics.
+        out["boost"] = {{"terms", booster.terms.size()},
+                        {"skipped", booster.skipped},
+                        {"steps", booster.steps},
+                        {"completed", booster.completed},
+                        {"flipped", booster.flipped},
+                        {"ms", std::round(booster.ms * 100) / 100}};
+    }
     return out;
 }
 
@@ -769,6 +1218,7 @@ int main(int argc, char **argv) {
     if (!g_out) return 2;
 
     whisper_log_set(log_callback, nullptr);
+    parakeet_log_set(log_callback, nullptr);
     ggml_log_set(log_callback, nullptr);
 
     if (argc > 1 && strcmp(argv[1], "--list-devices") == 0) {
@@ -779,7 +1229,8 @@ int main(int argc, char **argv) {
     emit({{"ready", true},
           {"protocol", kProtocolVersion},
           {"variant", VOICEWAVE_ASR_VARIANT},
-          {"whisperVersion", whisper_version()}});
+          {"whisperVersion", whisper_version()},
+          {"engines", {"whisper", "parakeet"}}});
 
     std::thread(reader_thread).detach();
     for (;;) {

@@ -68,8 +68,21 @@ try {
     $result = 'warn-local-skip'
     Write-Warning 'cargo-audit is not installed; skipping Rust advisory scan outside CI.'
   } else {
+    # Rust advisories accepted until the date, with the reason they can't
+    # reach us. RUSTSEC-2026-0367/0368/0369: zip <9 (Unix SUID bits, symlink
+    # targets, permissions through symlinks on extract), only via
+    # tauri-plugin-updater 2.10.1, the latest stable. With
+    # createUpdaterArtifacts=true Windows updates are the minisign-verified
+    # NSIS .exe, so the updater never extracts a zip on our only platform.
+    $rustAllowlist = @{
+      'RUSTSEC-2026-0367' = [datetime]'2027-01-31'
+      'RUSTSEC-2026-0368' = [datetime]'2027-01-31'
+      'RUSTSEC-2026-0369' = [datetime]'2027-01-31'
+    }
+    $rustIgnores = @($rustAllowlist.Keys | Where-Object { (Get-Date) -lt $rustAllowlist[$_] } |
+        ForEach-Object { '--ignore', $_ })
     # The Rust crate lives in src-tauri/, so there is no Cargo.lock at the repo root.
-    cargo audit -q --file (Join-Path $repoRoot 'src-tauri/Cargo.lock')
+    cargo audit -q --file (Join-Path $repoRoot 'src-tauri/Cargo.lock') @rustIgnores
     if ($LASTEXITCODE -ne 0) {
       throw 'cargo audit reported Rust advisories.'
     }

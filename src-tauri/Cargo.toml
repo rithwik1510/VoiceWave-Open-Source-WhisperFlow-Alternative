@@ -1,6 +1,6 @@
 [package]
 name = "voicewave_core"
-version = "0.7.0"
+version = "0.7.5"
 edition = "2021"
 description = "VoiceWave Phase I local core"
 default-run = "voicewave_core"
@@ -14,7 +14,7 @@ tauri-build = { version = "2.0.2", features = [] }
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:tauri-plugin-single-instance"]
+desktop = ["dep:tauri", "dep:tauri-plugin-autostart", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:tauri-plugin-single-instance"]
 
 [dependencies]
 aes-gcm = "0.10.3"
@@ -30,6 +30,7 @@ serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.9"
 tauri = { version = "2.10", features = ["tray-icon"], optional = true }
+tauri-plugin-autostart = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
@@ -41,9 +42,8 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 unicode-normalization = "0.1.24"
 url = "2.5.4"
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 ureq = "2.12.0"
-zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }

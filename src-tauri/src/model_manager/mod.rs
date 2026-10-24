@@ -1,5 +1,8 @@
 use crate::atomic_file;
-use crate::inference::gpu_select::{model_tier, HardwareProfile, ModelTier};
+use crate::inference::gpu_select::{
+    model_tier, CpuSupport, HardwareProfile, ModelTier, PARAKEET_MODEL_ID,
+};
+use crate::inference::AsrRung;
 use base64::Engine;
 use directories::ProjectDirs;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -34,6 +37,11 @@ const BUILTIN_WCPP_SMALL_EN_SIGNATURE: &str =
     "R7gA3H6JW+GI+vJamDV53bLHKTS4/WMpyLphTSvAjjZIkyt1IYC/x61Uzc+MGo8QHgVA+b663bP6j8UHFvY4Dw==";
 const BUILTIN_WCPP_LARGE_TURBO_SIGNATURE: &str =
     "501QKU4taYPMqEXngLpXgowESdwCbDfZK5WQljaNXIsB0gIoy6plf/5CFp7tzGxAsr4L5XTnboz0rGC5918QCw==";
+/// huggingface.co/ggml-org/parakeet-GGUF commit the Parakeet model is pinned to.
+const PARAKEET_REPO_REVISION: &str = "35156454d1a39de06863303dd209fd2bed6ee079";
+// Same dev key and payload as the rows above; re-sign if any field changes.
+const BUILTIN_WCPP_PARAKEET_V3_SIGNATURE: &str =
+    "F5+YJ5jUKBTVItEwWLSWS1p+C68OrftCP24JKSrkve9b+2Wjuu2RSiEdiEhmgJdrenE5VNXMBsI2wy+dHaCACw==";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -69,9 +77,10 @@ pub struct ModelCatalogItem {
     /// One honest sentence on how the model will perform on this machine.
     #[serde(default)]
     pub hardware_note: String,
-    /// "Small" or "Large Turbo", whatever the family.
+    /// "Small", "Large Turbo" or Parakeet, whatever the family.
     pub tier: ModelTier,
-    /// One of the two rows offered on this PC (the GGML family on GPU-path
+    /// One of the rows setup offers on this PC: Parakeet where the speech
+    /// workers run, plus Small and Large Turbo (the GGML family on GPU-path
     /// machines, faster-whisper elsewhere). False for an installed model of
     /// the other family, listed only so it can be used or removed.
     #[serde(default)]
@@ -561,25 +570,30 @@ impl ModelManager {
     /// "Large Turbo", from the machine's model family, plus any installed
     /// model of the other family (an upgrader's faster-whisper fallback, or
     /// a GGML model after the GPU went away) so it stays usable and
-    /// removable. `active_model` picks the copy for the row in use.
+    /// removable. `active_model` picks the copy for the row in use. Parakeet,
+    /// the recommended row, is on every PC that can run the speech workers;
+    /// `parakeet_on` is where it runs (see `model_fit`).
     pub fn list_catalog(
         &self,
         hardware: &HardwareProfile,
         active_model: &str,
+        parakeet_on: Option<AsrRung>,
     ) -> Vec<ModelCatalogItem> {
         let primary = [
             hardware.model_id(ModelTier::Small),
             hardware.model_id(ModelTier::LargeTurbo),
         ];
+        let workers_run = hardware.cpu == CpuSupport::Full;
         self.catalog
             .iter()
             .filter(|manifest| {
                 primary.contains(&manifest.model_id.as_str())
                     || self.installed.contains_key(&manifest.model_id)
+                    || (workers_run && manifest.model_id == PARAKEET_MODEL_ID)
             })
             .filter_map(|manifest| {
                 let active = manifest.model_id == active_model;
-                manifest_to_catalog_item(manifest, Some(hardware), active)
+                manifest_to_catalog_item(manifest, Some(hardware), active, parakeet_on)
             })
             .collect()
     }
@@ -665,7 +679,7 @@ impl ModelManager {
         self.catalog
             .iter()
             .find(|item| item.model_id == model_id)
-            .and_then(|manifest| manifest_to_catalog_item(manifest, None, false))
+            .and_then(|manifest| manifest_to_catalog_item(manifest, None, false, None))
     }
 
     /// Delete an installed model's files and unregister it. Only paths inside
@@ -1652,35 +1666,50 @@ fn verify_faster_whisper_snapshot(repo_dir: &Path) -> Result<PathBuf, String> {
 /// pitched as a good pick without a graphics card: on the CPU whisper pads
 /// every clip to a 30 s window, so short dictations pay turbo's full encoder
 /// cost (Ryzen 7 5800H: small.en ~2 s vs turbo 7-9 s per dictation).
-/// `active`: the row is the model dictation uses now.
+/// `active`: the row is the model dictation uses now. `parakeet_on`: where
+/// Parakeet runs, from its own GPU check (it has its own, separate from the
+/// Whisper models'); `None` while that is unknown (not installed, check not
+/// run yet or running).
 fn model_fit(
     model_id: &str,
     hardware: Option<&HardwareProfile>,
     active: bool,
+    parakeet_on: Option<AsrRung>,
 ) -> Option<(String, String)> {
     let tier = model_tier(model_id)?;
     let ggml = model_id.starts_with("wcpp-");
     let name = match tier {
         ModelTier::Small => "Small",
         ModelTier::LargeTurbo => "Large Turbo",
+        ModelTier::Parakeet => "Parakeet v3",
     };
     let Some(hardware) = hardware else {
         return Some((name.to_string(), String::new()));
     };
-    let recommended = hardware.recommended == tier;
+    let turbo_fits = hardware.turbo_fits;
     let (suffix, note) = match (hardware.gpu_path(), ggml, tier) {
+        // Its own GPU check decides, not the Whisper GPU path. Dictionary
+        // words are boosted inside its decoder (plan 021).
+        (_, _, ModelTier::Parakeet) => (
+            "",
+            match parakeet_on {
+                Some(AsrRung::Gpu) => "NVIDIA's fast, accurate model, on your graphics card. Uses your dictionary words. English plus 24 European languages.",
+                Some(AsrRung::Cpu) => "NVIDIA's fast, accurate model, on your processor. Uses your dictionary words. English plus 24 European languages.",
+                None => "NVIDIA's fast, accurate model. Uses your dictionary words. English plus 24 European languages. Runs on your graphics card if it passes a quick check, otherwise on your processor.",
+            },
+        ),
         // GPU-path machine, its own rows.
-        (true, true, ModelTier::Small) if recommended => ("", "Fast on your graphics card."),
+        (true, true, ModelTier::Small) if !turbo_fits => ("", "Fast on your graphics card."),
         (true, true, ModelTier::Small) => (
             "",
             "Fast on your graphics card, at a third of the download.",
         ),
-        (true, true, ModelTier::LargeTurbo) if recommended => {
-            ("", "Best accuracy, and fast on your graphics card.")
+        (true, true, ModelTier::LargeTurbo) if turbo_fits => {
+            ("", "High accuracy, and fast on your graphics card.")
         }
         (true, true, ModelTier::LargeTurbo) => (
             "",
-            "Best accuracy, but may be slow with this PC's graphics memory.",
+            "High accuracy, but may be slow with this PC's graphics memory.",
         ),
         // GPU-path machine, an installed faster-whisper model: the one in
         // use (an upgrader before the switch), or kept as the fallback.
@@ -1696,7 +1725,7 @@ fn model_fit(
         ),
         (false, false, ModelTier::LargeTurbo) => (
             "",
-            "Best accuracy, but expect 7+ seconds per dictation without a graphics card.",
+            "High accuracy, but expect 7+ seconds per dictation without a graphics card.",
         ),
         // CPU machine, an installed GGML model (the GPU went away).
         (false, true, _) => (
@@ -1711,9 +1740,11 @@ fn manifest_to_catalog_item(
     manifest: &SignedModelManifest,
     hardware: Option<&HardwareProfile>,
     active: bool,
+    parakeet_on: Option<AsrRung>,
 ) -> Option<ModelCatalogItem> {
     let tier = model_tier(&manifest.model_id)?;
-    let (display_name, hardware_note) = model_fit(&manifest.model_id, hardware, active)?;
+    let (display_name, hardware_note) =
+        model_fit(&manifest.model_id, hardware, active, parakeet_on)?;
     Some(ModelCatalogItem {
         model_id: manifest.model_id.clone(),
         display_name,
@@ -1915,6 +1946,21 @@ fn build_whispercpp_catalog() -> Vec<SignedModelManifest> {
         }
     }
 
+    // NVIDIA Parakeet TDT 0.6B v3 for the same speech workers (parakeet.h in
+    // the pinned whisper.cpp tree). q8_0: about half the f16 download.
+    manifests.push(SignedModelManifest {
+        model_id: PARAKEET_MODEL_ID.to_string(),
+        version: "parakeet-gguf-3515645".to_string(),
+        format: WCPP_FORMAT.to_string(),
+        size: 668_757_119,
+        sha256: "4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e".to_string(),
+        license: "CC-BY-4.0 (NVIDIA Parakeet TDT 0.6B v3; GGML conversion by ggml-org)".to_string(),
+        download_url: format!(
+            "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/{PARAKEET_REPO_REVISION}/ggml-parakeet-tdt-0.6b-v3-q8_0.bin"
+        ),
+        signature: BUILTIN_WCPP_PARAKEET_V3_SIGNATURE.to_string(),
+    });
+
     manifests
 }
 
@@ -2035,7 +2081,8 @@ mod tests {
                 "fw-small.en",
                 "fw-large-v3-turbo",
                 "wcpp-small.en",
-                "wcpp-large-v3-turbo"
+                "wcpp-large-v3-turbo",
+                "wcpp-parakeet-tdt-0.6b-v3"
             ],
             "fw-large-v3 is retired; both families stay in the catalog (plan 019)"
         );

@@ -1,9 +1,7 @@
 use crate::{
     audio::{
-        analyze_captured_segments,
-        input_volume::{self, MicGuardPlan},
-        AudioCaptureService, AudioError, AudioQualityBand, AudioQualityReport, CaptureEndPolicy,
-        CaptureOptions, VadConfig,
+        analyze_captured_segments, mic_keeper::MicKeeper, AudioCaptureService, AudioError,
+        AudioQualityBand, AudioQualityReport, CaptureEndPolicy, CaptureOptions, VadConfig,
     },
     benchmark::{
         self, BenchmarkRequest, BenchmarkRun, ModelRecommendation, RecommendationConstraints,
@@ -13,7 +11,6 @@ use crate::{
     },
     diagnostics::{
         DiagnosticsError, DiagnosticsExportResult, DiagnosticsManager, DiagnosticsStatus,
-        LatencyMetricRecord,
     },
     dictionary::{
         DictionaryError, DictionaryExport, DictionaryImportSummary, DictionaryManager,
@@ -24,23 +21,21 @@ use crate::{
         RetentionPolicy, SessionHistoryQuery, SessionHistoryRecord,
     },
     hotkey::{
-        HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager, HotkeyPhase, HotkeyRuntime,
-        HotkeySnapshot,
+        validate_push_to_talk, HookEvent, HotkeyAction, HotkeyConfig, HotkeyError, HotkeyManager,
+        HotkeyPhase, HotkeyRuntime, HotkeySnapshot,
     },
     inference::{
         cancel_faster_whisper_download, download_faster_whisper_model, ensure_faster_whisper_ready,
         gpu_select::hardware_profile_async,
         faster_whisper_cache_hint, faster_whisper_counterpart, faster_whisper_runtime_model_id,
-        is_faster_whisper_model, is_whisper_cpp_model, note_audio_pipeline_decode_hard_failure,
-        note_audio_pipeline_decode_success, polish_gate::gate_polish_candidate,
+        is_faster_whisper_model, is_parakeet_model, is_whisper_cpp_model,
         prefetch_faster_whisper_model, prewarm_asr_worker, release_idle_asr_workers,
-        set_gpu_acceleration, uses_whisper_pipeline, warmup_faster_whisper_model,
-        warmup_plan_for_model, AsrModel, InferenceError, InferenceWorker, RuntimeDecodePolicy,
-        StepDownKind, WarmupPlan,
+        set_gpu_acceleration, warmup_plan_for_model, AsrModel, InferenceWorker,
+        RuntimeDecodePolicy, WarmupPlan,
     },
     insertion::{
         InsertResult, InsertTextRequest, InsertionEngine, InsertionError, InsertionMethod,
-        RecentInsertion, UndoResult,
+        RecentInsertion, SubmitError, UndoResult,
     },
     model_manager::{
         InstalledModel, ModelCatalogItem, ModelDownloadRequest, ModelError, ModelEvent,
@@ -53,17 +48,15 @@ use crate::{
         AppProfileBehavior, AppProfileOverrides, AppTargetClass, CodeModeSettings, DecodeMode,
         DomainPackId, FormatProfile, GpuAcceleration, InsertPath, PolishProfile, SettingsError,
         SettingsStore,
-        VoiceWaveSettings, LOCKED_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY,
+        VoiceWaveSettings, LOCKED_TOGGLE_HOTKEY,
     },
     snippet::{
-        ProtectionError, ProtectionOutcome, SnippetError, SnippetExpansionPlan, SnippetManager,
-        VoiceSnippet, VoiceSnippetReconcileResult, VoiceSnippetSyncRecord,
+        SnippetError, SnippetManager, VoiceSnippet, VoiceSnippetReconcileResult,
+        VoiceSnippetSyncRecord,
     },
     stats::{StatsManager, StatsSummary},
-    transcript::{
-        finalize_literal_transcript, finalize_pro_transcript, sanitize_user_transcript,
-        ProTranscriptOptions,
-    },
+    telemetry::{self, DictationFailureKind, TelemetryEvent},
+    transcript::sanitize_user_transcript,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -78,9 +71,8 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::{oneshot, Mutex};
-use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,14 +111,6 @@ struct VoiceWaveStateEvent {
     control_mode: Option<DictationControlMode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TranscriptEvent {
-    text: String,
-    is_final: bool,
-    elapsed_ms: u64,
-}
-
 /// Generic payload for the pill's Dynamic Island notice surface
 /// (`voicewave://pill-notice`). Any runtime condition worth the user's
 /// attention — mic guard warnings, insertion failures, model problems —
@@ -163,7 +147,8 @@ pub struct PillNoticePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PillAction {
-    /// "copyTranscript" | "addDictionaryTerm" — selects the frontend handler.
+    /// "copyTranscript" | "addDictionaryTerm" | "retryDictation" — selects the
+    /// frontend handler.
     pub kind: String,
     /// Button label, e.g. "Copy" or "Add \"foo\"".
     pub label: String,
@@ -222,6 +207,81 @@ fn emit_pill_rescue(
             recovery: true,
         },
     );
+}
+
+/// The decode finished but left nothing to insert (post-process).
+const EMPTY_TRANSCRIPT_ERROR: &str = "Inference finished without final transcript.";
+
+/// What the pill says about a failed dictation (see
+/// `dictation_failure_notice`).
+struct FailureNotice {
+    title: &'static str,
+    detail: String,
+    retry: bool,
+}
+
+/// Failure notice with a Try again button (plan 020): the capture's audio is
+/// still in memory, so the user can rerun transcription on it.
+fn emit_pill_retry(app: &AppHandle, title: &str, detail: String) {
+    let _ = app.emit(
+        "voicewave://pill-notice",
+        PillNoticePayload {
+            id: now_utc_ms(),
+            severity: "error".to_string(),
+            title: title.to_string(),
+            detail: Some(detail),
+            // The pill holds retry notices up to 30 s (others 12 s) and
+            // pauses on hover: the audio may be a long dictation.
+            duration_ms: 30_000,
+            transcript: None,
+            action: Some(PillAction {
+                kind: "retryDictation".to_string(),
+                label: "Try again".to_string(),
+                value: None,
+            }),
+            recovery: true,
+        },
+    );
+}
+
+/// A retry is clicked from the pill, which may hold the foreground by the
+/// time text is ready; give focus back to the app the user dictated into,
+/// and let it settle before any keystroke. Returns whether keystrokes may
+/// go to the foreground window: false only for a retry that VoiceWave still
+/// fronts (the target window is gone or refused focus), which must not type
+/// into VoiceWave itself. Always true for live dictations.
+async fn return_focus_for_retry(retry_audio: Option<&RetainedAudio>) -> bool {
+    let Some(audio) = retry_audio else {
+        return true;
+    };
+    if let Some(target) = audio.target_window {
+        if crate::insertion::return_focus_from_voicewave(target) {
+            sleep(Duration::from_millis(80)).await;
+        }
+    }
+    !crate::insertion::voicewave_owns_foreground()
+}
+
+/// Pill copy when a spoken "press enter" was not carried out (plan 020).
+/// NotDelivered is covered by the clipboard pill, which already says to
+/// press Enter after pasting.
+fn emit_submit_notice(app: &AppHandle, err: &SubmitError) {
+    let (title, detail) = match err {
+        SubmitError::NotDelivered => return,
+        SubmitError::FocusMoved => (
+            "Didn't press Enter",
+            "The window you dictated into isn't in front anymore.",
+        ),
+        SubmitError::Elevated => (
+            "This app runs as administrator",
+            "VoiceWave can't press Enter in it.",
+        ),
+        SubmitError::Failed(reason) => {
+            tracing::warn!("spoken submit failed: {reason}");
+            ("Couldn't press Enter", "Press it yourself to send.")
+        }
+    };
+    emit_pill_notice(app, "info", title, Some(detail.to_string()), 4_500);
 }
 
 /// Emits an actionable notice carrying a typed [`PillAction`] (and no rescue
@@ -283,74 +343,10 @@ pub fn announce_store_resets(app: &AppHandle) {
     });
 }
 
-/// Copy for the once-per-session GPU step-down pill (plan 019). A Large
-/// Turbo dictation on the processor can take ~10 s, so say why, and point at
-/// Small, which is fast there. `Preparing` normally arrives here when a
-/// faster-whisper model decoded during the GPU check; without one the
-/// dictation waits for the check and its notice goes out up front.
-fn gpu_step_down_notice(kind: StepDownKind, model_id: &str) -> (&'static str, String) {
-    let turbo = model_id.contains("large-v3-turbo");
-    match kind {
-        StepDownKind::Preparing => (
-            "Getting your graphics card ready",
-            "One-time setup, up to a minute. Until then dictation runs on your processor."
-                .to_string(),
-        ),
-        StepDownKind::Unavailable | StepDownKind::Fault => (
-            "Ran on your processor this time",
-            if turbo {
-                "Your graphics card wasn't available, so this took longer. Small is much faster on the processor; switch in Models."
-            } else {
-                "Your graphics card wasn't available, so this one took a little longer."
-            }
-            .to_string(),
-        ),
-    }
-}
-
 /// Cooldown between repeats of the same recurring pill warning (mic guard,
 /// poor audio) so a persistent condition doesn't nag on every
 /// single dictation.
 const NOTICE_WARN_COOLDOWN: Duration = Duration::from_secs(600);
-
-/// How often the background "Polished version ready" pill is allowed to
-/// surface: once per this many validated polishes. LLM polish improves nearly
-/// every dictation (a comma, a capital), so announcing each one buries the
-/// pill's important messages (fallback/error) in noise. Instead we surface it
-/// occasionally as a quiet reminder that on-device polishing is working; the
-/// polished text is always available via history regardless.
-const POLISH_PILL_ANNOUNCE_EVERY: u64 = 50;
-
-/// Hard release-to-insert budget for the wait-validated profiles
-/// (Coding/Writing/Casual, plan 010): measured from key release — the same
-/// zero point as the existing `release_to_inserted_ms` metric. If a single
-/// polish attempt has not produced an accepted result by this deadline, the
-/// deterministic floor text inserts and the outcome is recorded as
-/// `fallbackTimeout`. No blocking retry, ever.
-const WAIT_VALIDATED_RELEASE_BUDGET_MS: u64 = 3_500;
-
-/// History `polishOutcome` wire values (plan 010 interface contract).
-const POLISH_OUTCOME_ACCEPTED: &str = "accepted";
-const POLISH_OUTCOME_FALLBACK_TIMEOUT: &str = "fallbackTimeout";
-const POLISH_OUTCOME_FALLBACK_REJECTED: &str = "fallbackRejected";
-const POLISH_OUTCOME_LITERAL: &str = "literal";
-const POLISH_OUTCOME_DISABLED: &str = "disabled";
-const POLISH_OUTCOME_SNIPPET_EXACT: &str = "snippetExact";
-
-fn restore_snippet_candidate(
-    plan: Option<&SnippetExpansionPlan>,
-    candidate: &str,
-) -> Result<String, ProtectionError> {
-    let restored = match plan {
-        Some(plan) => plan.restore(candidate)?,
-        None => candidate.to_string(),
-    };
-    debug_assert!(
-        !restored.contains('\u{e000}') && !restored.contains('\u{e001}'),
-        "protected snippet marker escaped the delivery boundary"
-    );
-    Ok(restored)
-}
 
 /// Claims a warn slot if its cooldown has elapsed; the caller only emits a
 /// notice when this returns true. Each recurring warning owns its own slot.
@@ -365,68 +361,6 @@ fn take_notice_cooldown(last_warned_at: &StdMutex<Option<Instant>>) -> bool {
             true
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LatencyBreakdownEvent {
-    session_id: u64,
-    capture_ms: u64,
-    release_to_transcribing_ms: u64,
-    effective_release_watchdog_ms: u64,
-    watchdog_recovered: bool,
-    segments_captured: u32,
-    release_stop_detected_at_utc_ms: u64,
-    model_init_ms: u64,
-    audio_condition_ms: u64,
-    decode_compute_ms: u64,
-    runtime_cache_hit: bool,
-    backend_requested: String,
-    backend_used: String,
-    backend_fallback: bool,
-    asr_engine: String,
-    asr_step_down_reason: Option<String>,
-    hold_to_first_draft_ms: u64,
-    incremental_decode_ms: u64,
-    release_finalize_ms: u64,
-    incremental_windows_decoded: u32,
-    finalize_tail_audio_ms: u64,
-    asr_integrity_percent: f32,
-    asr_raw_word_count: u32,
-    asr_final_word_count: u32,
-    decode_ms: u64,
-    post_ms: u64,
-    insert_ms: u64,
-    total_ms: u64,
-    release_to_inserted_ms: u64,
-    audio_duration_ms: u64,
-    model_id: String,
-    decode_mode: DecodeMode,
-    decode_policy_mode_selected: DecodeMode,
-    decode_policy_reason: String,
-    fw_low_coherence: bool,
-    fw_retry_used: bool,
-    fw_literal_retry_used: bool,
-    audio_pipeline_version: String,
-    fw_avg_logprob: Option<f32>,
-    fw_no_speech_prob: Option<f32>,
-    fw_compression_ratio: Option<f32>,
-    fw_shadow_candidate_version: Option<String>,
-    fw_shadow_quality_delta: Option<f32>,
-    fw_shadow_candidate_avg_logprob: Option<f32>,
-    fw_shadow_candidate_no_speech_prob: Option<f32>,
-    fw_shadow_candidate_retry_used: Option<bool>,
-    fw_shadow_candidate_low_coherence: Option<bool>,
-    fw_shadow_candidate_decode_compute_ms: Option<u64>,
-    fw_shadow_candidate_won: Option<bool>,
-    audio_pipeline_fallback_engaged: bool,
-    audio_pipeline_fallback_remaining: u32,
-    warm_start_hit: bool,
-    worker_reused: bool,
-    correction_candidates_count: u32,
-    insertion_method: String,
-    insertion_target_class: String,
-    mic_input_volume_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -484,7 +418,8 @@ pub enum ControllerError {
     AlreadyRunning,
     #[error("settings error: {0}")]
     Settings(#[from] SettingsError),
-    #[error("hotkey config error: {0}")]
+    // Bare message: the Settings shortcut recorder shows it to the user as-is.
+    #[error("{0}")]
     Hotkey(#[from] HotkeyError),
     #[error("audio error: {0}")]
     Audio(#[from] AudioError),
@@ -508,6 +443,10 @@ pub enum ControllerError {
     MissingModel(String),
     #[error("benchmark results unavailable")]
     MissingBenchmark,
+    /// The speech engine could not start (runtime not ready, warmup failed,
+    /// worker missing or blocked): a retry would hit the same wall.
+    #[error("{0}")]
+    EngineStart(String),
     #[error("{0}")]
     Runtime(String),
 }
@@ -605,7 +544,20 @@ const ENGINE_WAIT_NOTICE_GRACE_MS: u64 = 1_500;
 const FW_MIN_DECODE_AUDIO_MS_DEFAULT: u64 = 280;
 const FINAL_DECODE_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 const FINAL_DECODE_TIMEOUT_MS_MIN: u64 = 8_000;
-const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 240_000;
+// Long hands-free captures (up to HANDS_FREE_MAX_CAPTURE_MS) can decode for
+// minutes on a CPU; this is a ceiling for a hung worker, not a target.
+const FINAL_DECODE_TIMEOUT_MS_MAX: u64 = 900_000;
+/// Hands-free limits (plan 020). Hands-free ends on the second press or Esc;
+/// the silence timeout only catches a forgotten open mic (it is also the wait
+/// for first speech), and the cap bounds decode time and memory.
+const HANDS_FREE_MAX_CAPTURE_MS: u64 = 300_000;
+const HANDS_FREE_SILENCE_TIMEOUT_MS: u64 = 30_000;
+/// Pause before a spoken-submit Enter (plan 020). Windows Terminal reads the
+/// clipboard asynchronously after its paste chord, so an immediate Enter
+/// could overtake the pasted text; typed text is already ordered in the input
+/// queue.
+const SUBMIT_DELAY_AFTER_PASTE_MS: u64 = 250;
+const SUBMIT_DELAY_AFTER_TYPING_MS: u64 = 40;
 const BENCHMARK_RELIABILITY_WINDOW: usize = 40;
 const CORRECTION_SESSION_WINDOW_MS: u64 = 15_000;
 const CORRECTION_MIN_SHARED_RATIO: f32 = 0.72;
@@ -880,11 +832,23 @@ fn should_reject_low_confidence_transcript_as_no_speech(
 }
 
 fn build_terminology_hint_from_texts(terms: &[String], limit: usize) -> Option<String> {
-    if terms.is_empty() || limit == 0 {
-        return None;
+    let chosen = select_terminology_terms(terms, limit);
+    if chosen.is_empty() {
+        None
+    } else {
+        Some(chosen.join(", "))
     }
+}
+
+/// Up to `limit` dictionary terms, newest first (the list is in ascending
+/// priority), unique case-insensitively, 3..=40 bytes. Feeds both the Whisper
+/// prompt and Parakeet's boost terms.
+fn select_terminology_terms(terms: &[String], limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut chosen = Vec::new();
+    if limit == 0 {
+        return chosen;
+    }
     for term in terms.iter().rev() {
         let normalized = term.trim();
         if normalized.len() < 3 || normalized.len() > 40 {
@@ -899,11 +863,7 @@ fn build_terminology_hint_from_texts(terms: &[String], limit: usize) -> Option<S
             break;
         }
     }
-    if chosen.is_empty() {
-        None
-    } else {
-        Some(chosen.join(", "))
-    }
+    chosen
 }
 
 fn env_technical_terms() -> Vec<String> {
@@ -1255,22 +1215,8 @@ fn dictation_retry_instruction(control_mode: DictationControlMode) -> &'static s
             "Hold push-to-talk while speaking, then release when done."
         }
         DictationControlMode::HandsFree => {
-            "Press the hands-free shortcut, speak, then pause or press it again to finish."
+            "Press the hands-free shortcut, speak, then press it again to finish."
         }
-    }
-}
-
-fn capture_end_policy(
-    control_mode: DictationControlMode,
-    trailing_silence: Duration,
-    release_tail: Duration,
-) -> CaptureEndPolicy {
-    match control_mode {
-        DictationControlMode::HoldToTalk => CaptureEndPolicy::ExplicitStop { release_tail },
-        DictationControlMode::HandsFree => CaptureEndPolicy::EndOnSilence {
-            trailing_silence,
-            release_tail,
-        },
     }
 }
 
@@ -1279,6 +1225,13 @@ enum DictationFinishCause {
     ManualUi,
     HandsFreeToggle,
     PushToTalkRelease,
+}
+
+/// The dictation run behind a HUD update; see `update_run_state`.
+#[derive(Clone, Copy)]
+struct RunOwner<'a> {
+    session_id: u64,
+    cancel_token: &'a CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -1291,6 +1244,28 @@ struct DictationSession {
     pending_push_release: bool,
     release_requested_at: Option<Instant>,
     release_requested_at_utc_ms: Option<u64>,
+    /// Shared with the capture loop, which switches to hands-free limits the
+    /// moment this flips (at start, or when a double-tap locks the session).
+    hands_free: Arc<AtomicBool>,
+}
+
+/// Audio from a capture whose transcription failed, kept in memory (never on
+/// disk) so the user can retry it (plan 020).
+#[derive(Debug, Clone)]
+struct RetainedAudio {
+    samples: Arc<Vec<f32>>,
+    /// The window the user dictated into, so a retry clicked from the pill
+    /// can hand focus back to it.
+    target_window: Option<isize>,
+    /// The capture's quality report, reused by the retry (its segment count
+    /// and duration too) instead of re-assessing the same audio.
+    audio_quality: AudioQualityReport,
+}
+
+#[derive(Debug)]
+struct RetainedCapture {
+    session_id: u64,
+    audio: RetainedAudio,
 }
 
 #[derive(Debug, Clone)]
@@ -1302,6 +1277,8 @@ struct CorrectionSession {
 
 pub struct VoiceWaveController {
     audio: AudioCaptureService,
+    // Dictation's mic stream: kept warm between presses for pre-roll.
+    mic: MicKeeper,
     settings_store: SettingsStore,
     settings: Mutex<VoiceWaveSettings>,
     snapshot: Mutex<VoiceWaveSnapshot>,
@@ -1346,6 +1323,18 @@ pub struct VoiceWaveController {
     mic_profile_notice_sent: AtomicBool,
     // At most one GPU step-down pill per app session (plan 019).
     gpu_notice_sent: AtomicBool,
+    // The last capture's audio while its transcription has failed; cleared
+    // when a dictation succeeds and replaced by the next capture (plan 020).
+    retained_capture: Mutex<Option<RetainedCapture>>,
+    // The session whose spoken "press enter" is still pending, 0 for none
+    // (ids start at 1). While set, the Inserted HUD state keeps Esc owned, so
+    // Esc still cancels the Enter through History and the paste delay.
+    submit_pending_session: AtomicU64,
+    // Held by start admission (through the Listening state), all of
+    // cancel_dictation, and flow cleanup (through its Error state). A session
+    // that starts meanwhile never has its token, Esc or pill torn down by the
+    // older one. Always the outermost lock: taken while holding no other.
+    lifecycle_gate: Mutex<()>,
 }
 
 impl VoiceWaveController {
@@ -1439,8 +1428,16 @@ impl VoiceWaveController {
                 tracing::warn!("stats backfill failed: {err}");
             }
         }
+        // Spawned after every fallible step so a failed construction never
+        // leaves a thread that might hold the mic open.
+        let mic = MicKeeper::spawn(
+            audio.clone(),
+            settings.input_device.clone(),
+            settings.keep_mic_ready,
+        );
         Ok(Self {
             audio,
+            mic,
             settings_store,
             snapshot: Mutex::new(VoiceWaveSnapshot {
                 state: VoiceWaveHudState::Idle,
@@ -1478,6 +1475,9 @@ impl VoiceWaveController {
             poor_audio_notice_last_at: Arc::new(StdMutex::new(None)),
             mic_profile_notice_sent: AtomicBool::new(false),
             gpu_notice_sent: AtomicBool::new(false),
+            retained_capture: Mutex::new(None),
+            submit_pending_session: AtomicU64::new(0),
+            lifecycle_gate: Mutex::new(()),
         })
     }
 
@@ -1496,11 +1496,14 @@ impl VoiceWaveController {
         settings.vad_threshold = clamp_vad_threshold(settings.vad_threshold);
         settings.max_utterance_ms = clamp_max_utterance_ms(settings.max_utterance_ms);
         settings.release_tail_ms = clamp_release_tail_ms(settings.release_tail_ms);
-        normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
-        self.settings_store.save(&settings)?;
         {
+            // Hotkeys have one writer, update_hotkey_config, so a UI settings
+            // copy that predates a rebind can never revert it.
             let mut current = self.settings.lock().await;
+            settings.toggle_hotkey = current.toggle_hotkey.clone();
+            settings.push_to_talk_hotkey = current.push_to_talk_hotkey.clone();
+            self.settings_store.save(&settings)?;
             *current = settings.clone();
         }
         {
@@ -1508,13 +1511,9 @@ impl VoiceWaveController {
             snapshot.active_model = settings.active_model.clone();
         }
 
-        let mut hotkey_manager = self.hotkey_manager.lock().await;
-        hotkey_manager.update_config(HotkeyConfig {
-            toggle: settings.toggle_hotkey.clone(),
-            push_to_talk: settings.push_to_talk_hotkey.clone(),
-        })?;
-        drop(hotkey_manager);
         set_gpu_acceleration(settings.gpu_acceleration == GpuAcceleration::Auto);
+        self.mic
+            .configure(settings.input_device.clone(), settings.keep_mic_ready);
 
         if is_faster_whisper_model(&settings.active_model) {
             release_idle_asr_workers();
@@ -1555,8 +1554,13 @@ impl VoiceWaveController {
 
     /// The installed faster-whisper model a whisper.cpp model uses as its CPU
     /// rung (faster than whisper.cpp on the CPU for short clips): its
-    /// same-size counterpart, else any installed one, Small first.
+    /// same-size counterpart, else any installed one, Small first. None for
+    /// Parakeet: its CPU rung is Parakeet on the CPU worker, so every
+    /// dictation's text comes from the model the user picked.
     async fn installed_fw_fallback(&self, model_id: &str) -> Option<String> {
+        if is_parakeet_model(model_id) {
+            return None;
+        }
         let manager = self.model_manager.lock().await;
         faster_whisper_counterpart(model_id)
             .into_iter()
@@ -1578,14 +1582,41 @@ impl VoiceWaveController {
     /// + CUDA context init + CTranslate2 kernel compile, typically 2-5 s).
     /// Fire-and-forget — errors are logged, never propagated. Safe to call
     /// before any hotkey press. Never downloads: on first launch (default
-    /// model not on disk yet) the cache-only prefetch fails fast and the
-    /// onboarding download, with its progress UI, is the only fetch.
+    /// model not on disk yet) it does nothing and the onboarding download,
+    /// with its progress UI, is the only fetch.
+    ///
+    /// The model then stays resident: no idle timer unloads the speech worker
+    /// (only a model switch, GPU Off, or a fault does). A dictation that
+    /// arrives mid-load waits on the worker's slot lock instead of loading a
+    /// second copy.
     pub async fn prewarm_active_model(&self) {
         let active_model = {
             let settings = self.settings.lock().await;
             settings.active_model.clone()
         };
+        let installed = self
+            .model_manager
+            .lock()
+            .await
+            .get_installed(&active_model)
+            .is_some();
+        if !installed {
+            tracing::info!("startup prewarm skipped: {active_model} is not installed yet");
+            return;
+        }
+        // Timestamps in the log show how long the first dictation would have
+        // waited without this.
+        tracing::info!("startup prewarm started for {active_model}");
+        let started = Instant::now();
+        self.prewarm_active_model_inner(&active_model).await;
+        tracing::info!(
+            "startup prewarm finished for {active_model} in {} ms",
+            started.elapsed().as_millis()
+        );
+    }
 
+    async fn prewarm_active_model_inner(&self, active_model: &str) {
+        let active_model = active_model.to_string();
         match warmup_plan_for_model(&active_model) {
             WarmupPlan::FasterWhisper => {
                 if let Err(err) = ensure_faster_whisper_ready().await {
@@ -1812,21 +1843,54 @@ impl VoiceWaveController {
         mode: DictationMode,
         control_mode: DictationControlMode,
     ) -> Result<(), ControllerError> {
-        self.start_dictation_with_trigger(app, mode, DictationStartTrigger::Manual, control_mode)
-            .await
+        self.start_dictation_with_trigger(
+            app,
+            mode,
+            DictationStartTrigger::Manual,
+            control_mode,
+            None,
+        )
+        .await
     }
 
+    /// Rerun transcription on the audio kept from a failed dictation (plan
+    /// 020). It is an ordinary session that skips capture, so formatting,
+    /// polish, insertion, history and Esc-to-cancel all behave as usual.
+    pub async fn retry_last_dictation(self: &Arc<Self>, app: AppHandle) -> Result<(), ControllerError> {
+        let audio = self
+            .retained_capture
+            .lock()
+            .await
+            .as_ref()
+            .map(|retained| retained.audio.clone())
+            .ok_or_else(|| {
+                ControllerError::Runtime("There is no failed dictation to retry.".to_string())
+            })?;
+        self.start_dictation_with_trigger(
+            app,
+            DictationMode::Microphone,
+            DictationStartTrigger::Manual,
+            DictationControlMode::HoldToTalk,
+            Some(audio),
+        )
+        .await
+    }
+
+    /// `retry_audio` replaces capture with audio kept from a failed run.
     async fn start_dictation_with_trigger(
         self: &Arc<Self>,
         app: AppHandle,
         mode: DictationMode,
         trigger: DictationStartTrigger,
         control_mode: DictationControlMode,
+        retry_audio: Option<RetainedAudio>,
     ) -> Result<(), ControllerError> {
+        let retrying = retry_audio.is_some();
         tracing::info!(
-            "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?})",
+            "start_dictation requested (trigger={:?}, control_mode={:?}, mode={:?}, retry={retrying})",
             trigger, control_mode, mode
         );
+        let admission = self.lifecycle_gate.lock().await;
         // Snapshot the lifecycle state before touching the token: nothing in
         // this file holds `active_session` and `cancel_token` at the same
         // time, and this is not the place to start.
@@ -1862,12 +1926,16 @@ impl VoiceWaveController {
 
         // Instant audible feedback on the user's physical action: play the
         // open cue the moment the press is accepted, before mic-stream setup
-        // adds 50-200 ms. (Fixture runs stay silent.)
-        if mode == DictationMode::Microphone {
+        // adds 50-200 ms. (Fixture runs and retries, which open no mic, stay
+        // silent.)
+        if mode == DictationMode::Microphone && !retrying {
             play_cue_without_blocking(crate::cue::CueSound::Open);
         }
 
         let session_id = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let hands_free = Arc::new(AtomicBool::new(
+            control_mode == DictationControlMode::HandsFree,
+        ));
         {
             let mut active = self.active_session.lock().await;
             *active = Some(DictationSession {
@@ -1875,10 +1943,26 @@ impl VoiceWaveController {
                 trigger,
                 control_mode,
                 started_at: Instant::now(),
-                state: DictationLifecycleState::Listening,
+                // A retry has its audio already; it starts at transcription,
+                // where the hotkey and finish paths leave it alone.
+                state: if retrying {
+                    DictationLifecycleState::Transcribing
+                } else {
+                    DictationLifecycleState::Listening
+                },
                 pending_push_release: false,
                 release_requested_at: None,
                 release_requested_at_utc_ms: None,
+                hands_free: Arc::clone(&hands_free),
+            });
+        }
+        // Re-bind the kept audio to the retry session (an Arc clone) before
+        // anything can fail, so a retry that fails anywhere, preflight
+        // included, still keeps the recording and can offer Try again.
+        if let Some(audio) = &retry_audio {
+            *self.retained_capture.lock().await = Some(RetainedCapture {
+                session_id,
+                audio: audio.clone(),
             });
         }
         self.set_hotkey_dictation_active(true).await;
@@ -1894,7 +1978,14 @@ impl VoiceWaveController {
         // successfully opening the microphone. Publishing Listening here
         // guarantees the pill appears alongside the cue even when device
         // setup is slow; a later setup failure transitions it to Error.
-        if mode == DictationMode::Microphone {
+        if retrying {
+            self.update_state(
+                &app,
+                VoiceWaveHudState::Transcribing,
+                Some("Transcribing your last recording again...".to_string()),
+            )
+            .await;
+        } else if mode == DictationMode::Microphone {
             self.update_state(
                 &app,
                 VoiceWaveHudState::Listening,
@@ -1902,6 +1993,8 @@ impl VoiceWaveController {
             )
             .await;
         }
+
+        drop(admission);
 
         // The start command now returns once the session is accepted. Keeping
         // the long capture/decode flow in its own task lets the event-driven
@@ -1918,14 +2011,25 @@ impl VoiceWaveController {
                     control_mode,
                     cancel_token,
                     stop_flag,
+                    hands_free,
+                    retry_audio,
                 )
                 .await;
+            // Held through the Error state below, so a new session can't
+            // start between freeing the slot and this run's last HUD update
+            // (which would release its Esc and paint over its pill).
+            let gate = controller.lifecycle_gate.lock().await;
             let still_owns_session = {
                 let mut active = controller.active_session.lock().await;
                 if active
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
+                    // Esc goes back before the session slot frees up: a
+                    // replacement installs itself under this lock and then
+                    // takes Esc, so it can never be clobbered here.
+                    controller.submit_pending_session.store(0, Ordering::SeqCst);
+                    controller.set_hotkey_dictation_active(false).await;
                     *active = None;
                     true
                 } else {
@@ -1935,23 +2039,45 @@ impl VoiceWaveController {
             // A cancelled session may be replaced immediately. Never let the
             // old task clear the replacement session's token or stop flag.
             if still_owns_session {
-                controller.set_hotkey_dictation_active(false).await;
                 let mut token_slot = controller.cancel_token.lock().await;
                 *token_slot = None;
                 drop(token_slot);
                 let mut stop_slot = controller.stop_flag.lock().await;
                 *stop_slot = None;
             }
+            // Plan 020: captured audio stays in memory only while this
+            // session's transcription has failed. Success (or nothing heard,
+            // or a cancel) clears it, and so does any later dictation.
+            let audio_kept = if still_owns_session {
+                let mut retained = controller.retained_capture.lock().await;
+                let kept_for_this_session = retained
+                    .as_ref()
+                    .is_some_and(|capture| capture.session_id == session_id);
+                if run_result.is_ok() || !kept_for_this_session {
+                    *retained = None;
+                }
+                run_result.is_err() && kept_for_this_session
+            } else {
+                false
+            };
             if let Err(err) = run_result {
                 if !still_owns_session {
+                    drop(gate);
                     tracing::warn!(
                         "stale dictation session {session_id} failed after replacement: {err}"
                     );
                     return;
                 }
+                telemetry::record(TelemetryEvent::DictationFailed {
+                    kind: Self::failure_kind(&err),
+                });
                 // The pill's error color-flash carries no text; the notice is
                 // the only place the user actually learns what went wrong.
-                let (notice_title, notice_detail) = controller.dictation_failure_notice(&err).await;
+                let FailureNotice {
+                    title: notice_title,
+                    detail: notice_detail,
+                    retry,
+                } = controller.dictation_failure_notice(&err, audio_kept).await;
                 controller
                     .set_session_state(session_id, DictationLifecycleState::Error, None, None)
                     .await;
@@ -1962,7 +2088,12 @@ impl VoiceWaveController {
                         Some(format!("{notice_title}: {notice_detail}")),
                     )
                     .await;
-                emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                drop(gate);
+                if retry {
+                    emit_pill_retry(&app, notice_title, notice_detail);
+                } else {
+                    emit_pill_notice(&app, "error", notice_title, Some(notice_detail), 6_000);
+                }
                 // No model and nothing downloading: the fix lives in the main
                 // window (onboarding or the model gate), and the compact pill
                 // takes no clicks, so bring the window to the user.
@@ -1978,16 +2109,30 @@ impl VoiceWaveController {
         Ok(())
     }
 
-    /// Pill copy for a failed dictation. Setup problems (no model, model
-    /// still downloading, microphone unavailable, speech engine down) say what
-    /// to do next; anything unexpected keeps the raw error.
-    async fn dictation_failure_notice(&self, err: &ControllerError) -> (&'static str, String) {
+    /// Pill copy for a failed dictation, and whether it offers Try again,
+    /// decided together so the button never contradicts the text. Setup
+    /// problems (no model, microphone unavailable, speech engine down) say
+    /// what to do next and offer no retry. A failed decode whose audio is
+    /// kept (`audio_kept`) offers one, and so does a model that is still
+    /// downloading. Anything else unexpected keeps the raw error.
+    async fn dictation_failure_notice(
+        &self,
+        err: &ControllerError,
+        audio_kept: bool,
+    ) -> FailureNotice {
+        let mut retry = false;
         let (title, detail) = match err {
             ControllerError::MissingModel(_) => {
                 if self.model_download_cancels.lock().await.is_empty() {
                     (
                         "Finish setting up VoiceWave",
                         "Choose a speech model in the VoiceWave window to start dictating.",
+                    )
+                } else if audio_kept {
+                    retry = true;
+                    (
+                        "Speech model is still downloading",
+                        "Your recording is kept. Try again when the download finishes.",
                     )
                 } else {
                     (
@@ -2013,20 +2158,77 @@ impl VoiceWaveController {
                 "Couldn't open the microphone",
                 "Check that Windows lets desktop apps use the microphone (Settings > Privacy > Microphone) and that no other app is holding it.",
             ),
-            ControllerError::Runtime(message)
-                if message.starts_with("Faster-Whisper runtime is not ready") =>
-            {
+            // Not ready, warmup failed, or the worker never came up: a retry
+            // would hit the same wall.
+            ControllerError::EngineStart(_) => (
+                "Speech engine didn't start",
+                "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
+            ),
+            // Decode failed, timed out, or came back empty.
+            ControllerError::Runtime(message) if audio_kept => {
+                retry = true;
                 (
-                    "Speech engine didn't start",
-                    "Restart VoiceWave. If it keeps happening, reinstall the latest version.",
+                    if message.contains("timed out") {
+                        "Transcription took too long"
+                    } else {
+                        "Couldn't transcribe that"
+                    },
+                    "Your recording is kept until your next dictation.",
                 )
             }
-            _ => return ("Dictation failed", err.to_string()),
+            _ => {
+                return FailureNotice {
+                    title: "Dictation failed",
+                    detail: err.to_string(),
+                    retry: false,
+                }
+            }
         };
-        (title, detail.to_string())
+        FailureNotice {
+            title,
+            detail: detail.to_string(),
+            retry,
+        }
+    }
+
+    /// Telemetry class of a failed dictation: the arms of
+    /// `dictation_failure_notice` (plus the stream errors it shows raw);
+    /// keep the two in step. Nothing heard is not an error: capture
+    /// (`capture_from_mic`) and the no-speech gate (`format_transcript`)
+    /// record `NoSpeech` themselves and end the flow with `Ok`.
+    fn failure_kind(err: &ControllerError) -> DictationFailureKind {
+        match err {
+            ControllerError::MissingModel(_) => DictationFailureKind::Setup,
+            ControllerError::Audio(
+                AudioError::MissingInputDevice | AudioError::DeviceNotFound(_),
+            ) => DictationFailureKind::MicMissing,
+            ControllerError::Audio(
+                AudioError::Devices(_)
+                | AudioError::DefaultInputConfig(_)
+                | AudioError::BuildStream(_)
+                | AudioError::PlayStream(_)
+                | AudioError::RuntimeStream(_)
+                | AudioError::UnsupportedSampleFormat(_),
+            ) => DictationFailureKind::MicOpen,
+            ControllerError::EngineStart(_) => DictationFailureKind::EngineStart,
+            // The outer decode deadline and the faster-whisper worker say
+            // "timed out"; a whisper.cpp worker that misses its own deadline
+            // says "missed its ... deadline".
+            ControllerError::Runtime(message)
+                if message.contains("timed out") || message.contains("missed its") =>
+            {
+                DictationFailureKind::Timeout
+            }
+            ControllerError::Runtime(message) if message == EMPTY_TRANSCRIPT_ERROR => {
+                DictationFailureKind::EmptyResult
+            }
+            ControllerError::Runtime(_) => DictationFailureKind::Transcription,
+            _ => DictationFailureKind::Other,
+        }
     }
 
     pub async fn cancel_dictation(&self, app: AppHandle) {
+        let _gate = self.lifecycle_gate.lock().await;
         let cancelled_session = {
             let mut active = self.active_session.lock().await;
             match active.as_mut() {
@@ -2048,7 +2250,9 @@ impl VoiceWaveController {
         // live token, a set stop flag, and Escape still owned by the hook with
         // no cancellable session attached - and cancel is the only path that
         // can clear that. All three are idempotent, so running them on a
-        // no-op cancel costs nothing.
+        // no-op cancel costs nothing. The lifecycle gate keeps a new session
+        // from starting until this returns, so none of it hits a replacement.
+        self.submit_pending_session.store(0, Ordering::SeqCst);
         if let Some(token) = self.cancel_token.lock().await.clone() {
             token.cancel();
         }
@@ -2150,6 +2354,10 @@ impl VoiceWaveController {
                 } else {
                     "Restart VoiceWave. If this continues, export diagnostics from Settings."
                 };
+                self.hotkey_manager
+                    .lock()
+                    .await
+                    .set_registration_error(Some(detail.to_string()));
                 emit_pill_notice(
                     &app,
                     "error",
@@ -2164,38 +2372,60 @@ impl VoiceWaveController {
 
         let controller = self.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some(signal) = event_rx.recv().await {
-                if let Err(err) = controller
-                    .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
-                    .await
-                {
-                    tracing::warn!("hotkey action failed: {err}");
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    HookEvent::Signal(signal) => {
+                        if let Err(err) = controller
+                            .trigger_hotkey_action(app.clone(), signal.action, signal.phase)
+                            .await
+                        {
+                            tracing::warn!("hotkey action failed: {err}");
+                        }
+                    }
+                    // Keys for the Settings shortcut recorder.
+                    HookEvent::Capture(key) => {
+                        let _ = app.emit("voicewave://hotkey-capture", key);
+                    }
                 }
             }
             tracing::warn!("global hotkey event channel closed");
         });
     }
 
+    /// Rebinds hold-to-talk live: validate, persist, then swap the running
+    /// hook's combo. The hands-free toggle stays fixed whatever is sent.
     pub async fn update_hotkey_config(
         &self,
-        _config: HotkeyConfig,
+        config: HotkeyConfig,
     ) -> Result<HotkeySnapshot, ControllerError> {
         let config = HotkeyConfig {
             toggle: LOCKED_TOGGLE_HOTKEY.to_string(),
-            push_to_talk: LOCKED_PUSH_TO_TALK_HOTKEY.to_string(),
-        };
-        let snapshot = {
-            let mut manager = self.hotkey_manager.lock().await;
-            manager.update_config(config.clone())?
+            push_to_talk: validate_push_to_talk(&config.push_to_talk)?,
         };
 
-        let mut settings = self.settings.lock().await.clone();
-        settings.toggle_hotkey = config.toggle;
-        settings.push_to_talk_hotkey = config.push_to_talk;
-        self.settings_store.save(&settings)?;
-        *self.settings.lock().await = settings;
+        {
+            let mut settings = self.settings.lock().await;
+            let mut next = settings.clone();
+            next.toggle_hotkey = config.toggle.clone();
+            next.push_to_talk_hotkey = config.push_to_talk.clone();
+            self.settings_store.save(&next)?;
+            *settings = next;
+        }
 
+        let snapshot = self.hotkey_manager.lock().await.update_config(config)?;
+        if let Some(runtime) = self.hotkey_runtime.lock().await.as_ref() {
+            runtime.update_config(&snapshot.config)?;
+        }
+        tracing::info!("hold-to-talk shortcut set to {}", snapshot.config.push_to_talk);
         Ok(snapshot)
+    }
+
+    /// Settings is recording a new shortcut: keep the global hotkey from
+    /// starting a dictation meanwhile.
+    pub async fn set_hotkey_capture(&self, active: bool) {
+        if let Some(runtime) = self.hotkey_runtime.lock().await.as_ref() {
+            runtime.set_capture(active);
+        }
     }
 
     pub async fn permission_snapshot(&self) -> PermissionSnapshot {
@@ -2453,7 +2683,7 @@ impl VoiceWaveController {
         payload: InsertTextRequest,
     ) -> Result<InsertResult, ControllerError> {
         let (result, _record_id) = self
-            .insert_text_with_polish_meta(app, payload, None)
+            .insert_text_with_polish_meta(app, payload, None, None)
             .await?;
         Ok(result)
     }
@@ -2462,11 +2692,12 @@ impl VoiceWaveController {
     /// plan-010 polish metadata when the caller is the dictation flow.
     /// Returns the history record id (None when retention is Off) so async
     /// polish results can update the same record later.
-    pub(crate) async fn insert_text_with_polish_meta(
+    async fn insert_text_with_polish_meta(
         &self,
         app: AppHandle,
         mut payload: InsertTextRequest,
         polish_meta: Option<&PolishHistoryMeta>,
+        owner: Option<RunOwner<'_>>,
     ) -> Result<(InsertResult, Option<String>), ControllerError> {
         if !payload.prefer_clipboard {
             let settings = self.settings.lock().await.clone();
@@ -2485,7 +2716,15 @@ impl VoiceWaveController {
         // failure branch below still waits, because its message depends on
         // whether the History record was written.
         if result.success {
-            self.update_state(&app, VoiceWaveHudState::Inserted, result.message.clone())
+            // Only text that reached the app shows as inserted. A
+            // clipboard-only result (elevated app, paste refused) says what
+            // happened instead (plan 020).
+            let hud_state = if result.method == InsertionMethod::ClipboardOnly {
+                VoiceWaveHudState::Idle
+            } else {
+                VoiceWaveHudState::Inserted
+            };
+            self.update_run_state(&app, owner, hud_state, result.message.clone())
                 .await;
             let _ = app.emit("voicewave://insertion", result.clone());
         }
@@ -2521,7 +2760,7 @@ impl VoiceWaveController {
                 Some(reason) => format!("{headline} ({reason})"),
                 None => headline.to_string(),
             };
-            self.update_state(&app, VoiceWaveHudState::Error, Some(message))
+            self.update_run_state(&app, owner, VoiceWaveHudState::Error, Some(message))
                 .await;
             let _ = app.emit("voicewave://insertion", result.clone());
         }
@@ -2580,6 +2819,7 @@ impl VoiceWaveController {
                             DictationMode::Microphone,
                             trigger,
                             trigger.default_control_mode(),
+                            None,
                         )
                         .await
                     }
@@ -2593,6 +2833,7 @@ impl VoiceWaveController {
                             DictationMode::Microphone,
                             DictationStartTrigger::PushToTalk,
                             DictationControlMode::HoldToTalk,
+                            None,
                         )
                         .await
                     }
@@ -2601,7 +2842,7 @@ impl VoiceWaveController {
                             &app,
                             VoiceWaveHudState::Listening,
                             Some(
-                                "Hands-free listening. Pause when you're done, or press the shortcut again."
+                                "Hands-free listening. Press the shortcut again when you're done."
                                     .to_string(),
                             ),
                         )
@@ -2658,11 +2899,15 @@ impl VoiceWaveController {
 
     pub async fn list_model_catalog(&self) -> Vec<ModelCatalogItem> {
         let hardware = hardware_profile_async().await;
-        let active_model = self.settings.lock().await.active_model.clone();
+        let (active_model, gpu_acceleration) = {
+            let settings = self.settings.lock().await;
+            (settings.active_model.clone(), settings.gpu_acceleration)
+        };
+        let parakeet_on = self.parakeet_running_on(&hardware, gpu_acceleration).await;
         self.model_manager
             .lock()
             .await
-            .list_catalog(&hardware, &active_model)
+            .list_catalog(&hardware, &active_model, parakeet_on)
     }
 
     pub async fn list_installed_models(&self) -> Vec<InstalledModel> {
@@ -3280,6 +3525,10 @@ impl VoiceWaveController {
 
         let mut settings = self.settings.lock().await.clone();
         settings.active_model = model_id.clone();
+        // Choosing Parakeet anywhere answers the one-time offer to switch.
+        if is_parakeet_model(&model_id) {
+            settings.parakeet_offer_answered = true;
+        }
         self.settings_store.save(&settings)?;
         *self.settings.lock().await = settings.clone();
         self.snapshot.lock().await.active_model = model_id.clone();
@@ -3757,1558 +4006,6 @@ impl VoiceWaveController {
         }
     }
 
-    async fn run_dictation_flow(
-        &self,
-        app: AppHandle,
-        mode: DictationMode,
-        session_id: u64,
-        control_mode: DictationControlMode,
-        cancel_token: CancellationToken,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Result<(), ControllerError> {
-        let flow_started = Instant::now();
-        if mode == DictationMode::Fixture {
-            // Sound cue is now played from the pill renderer on state commit
-            // so the sound lines up with the visible pill onset.
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Listening,
-                Some("Listening for speech...".to_string()),
-            )
-            .await;
-        }
-        self.set_session_state(session_id, DictationLifecycleState::Listening, None, None)
-            .await;
-
-        let settings = self.settings.lock().await.clone();
-        let max_capture_ms = clamp_max_utterance_ms(settings.max_utterance_ms);
-        let mut release_tail_ms = effective_release_tail_ms(
-            clamp_release_tail_ms(settings.release_tail_ms),
-            max_capture_ms,
-        );
-        let silence_timeout_ms = ((max_capture_ms as f32) * 0.22).round() as u64;
-        let silence_timeout_ms = silence_timeout_ms.clamp(700, 2_000);
-        let use_faster_whisper = is_faster_whisper_model(&settings.active_model);
-        let use_asr_worker = is_whisper_cpp_model(&settings.active_model);
-        // faster-whisper and the whisper.cpp speech worker share capture,
-        // conditioning, quality gates and finalization (plan 019).
-        let whisper_pipeline = uses_whisper_pipeline(&settings.active_model);
-        // Fail on the press, not after the user has spoken a whole sentence: a
-        // model only counts once its download finished and was registered (a
-        // half-downloaded model must never reach a worker).
-        if mode == DictationMode::Microphone
-            && whisper_pipeline
-            && self
-                .model_manager
-                .lock()
-                .await
-                .get_installed(&settings.active_model)
-                .is_none()
-        {
-            return Err(ControllerError::MissingModel(settings.active_model.clone()));
-        }
-        let fw_ready_task = if mode == DictationMode::Microphone && use_faster_whisper {
-            let warmup_model_id = settings.active_model.clone();
-            Some(tokio::spawn(async move {
-                let ready = ensure_faster_whisper_ready().await;
-                if ready.is_ok() {
-                    // GPU clock ramp + kernel warmup runs while the user is
-                    // still speaking, so the real decode at release starts on
-                    // a hot GPU instead of paying the idle penalty inline.
-                    // Skipped automatically when the GPU was active recently.
-                    let _ = warmup_faster_whisper_model(&warmup_model_id).await;
-                }
-                ready
-            }))
-        } else {
-            None
-        };
-        if mode == DictationMode::Microphone && use_asr_worker {
-            // Spawn/load the speech worker while the user speaks (startup
-            // prewarm missed, worker died, or a GPU failure dropped it). A
-            // no-op when it is already loaded.
-            self.spawn_asr_worker_prewarm(&settings.active_model).await;
-        }
-
-        // OS mic-volume guard: external apps (browser auto-gain, call apps,
-        // vendor utilities) silently lower the system capture volume and both
-        // whisper models degrade at once. Fire-and-forget so the COM query
-        // never adds latency to listening start; result lands in the pill as
-        // a Dynamic Island notice and in diagnostics for later triage.
-        let mic_input_volume_slot: Arc<StdMutex<Option<u8>>> = Arc::new(StdMutex::new(None));
-        if mode == DictationMode::Microphone {
-            let guard_mode = settings.mic_volume_guard;
-            let guard_app = app.clone();
-            let volume_slot = Arc::clone(&mic_input_volume_slot);
-            let last_warned_at = Arc::clone(&self.mic_guard_last_warned_at);
-            tauri::async_runtime::spawn(async move {
-                let reading = match tokio::task::spawn_blocking(
-                    input_volume::read_default_input_volume,
-                )
-                .await
-                {
-                    Ok(Ok(reading)) => reading,
-                    _ => return,
-                };
-                if let Ok(mut slot) = volume_slot.lock() {
-                    *slot = Some((reading.scalar * 100.0).round().clamp(0.0, 100.0) as u8);
-                }
-                match input_volume::plan_mic_guard(guard_mode, reading) {
-                    MicGuardPlan::Silent => {}
-                    MicGuardPlan::WarnMuted => {
-                        if take_notice_cooldown(&last_warned_at) {
-                            emit_pill_notice(
-                                &guard_app,
-                                "error",
-                                "Microphone is muted in Windows",
-                                Some("Unmute it in Sound settings to dictate.".to_string()),
-                                6_000,
-                            );
-                        }
-                    }
-                    MicGuardPlan::WarnLow { volume_percent } => {
-                        if take_notice_cooldown(&last_warned_at) {
-                            emit_pill_notice(
-                                &guard_app,
-                                "warning",
-                                format!("Mic input volume is at {volume_percent}%"),
-                                Some(
-                                    "Another app likely lowered it. Raise it to 100% in Sound settings for best accuracy."
-                                        .to_string(),
-                                ),
-                                6_500,
-                            );
-                        }
-                    }
-                    MicGuardPlan::Restore { from_percent } => {
-                        let restored =
-                            tokio::task::spawn_blocking(input_volume::restore_default_input_volume)
-                                .await;
-                        match restored {
-                            Ok(Ok(())) => {
-                                if let Ok(mut slot) = volume_slot.lock() {
-                                    *slot = Some(100);
-                                }
-                                emit_pill_notice(
-                                    &guard_app,
-                                    "info",
-                                    format!("Mic volume restored to 100% (was {from_percent}%)"),
-                                    None,
-                                    4_500,
-                                );
-                            }
-                            _ => {
-                                if take_notice_cooldown(&last_warned_at) {
-                                    emit_pill_notice(
-                                        &guard_app,
-                                        "warning",
-                                        format!("Mic input volume is at {from_percent}%"),
-                                        Some(
-                                            "Auto-restore failed — raise it manually in Sound settings."
-                                                .to_string(),
-                                        ),
-                                        6_500,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        let capture_started = Instant::now();
-        let segments = match mode {
-            DictationMode::Fixture => phase1::build_fixture_segments(settings.vad_threshold),
-            DictationMode::Microphone => {
-                let audio = self.audio.clone();
-                let input_device = settings.input_device.clone();
-                let mut threshold = clamp_vad_threshold(settings.vad_threshold);
-                if input_device
-                    .as_deref()
-                    .is_some_and(is_likely_low_quality_input_name)
-                {
-                    // Bluetooth/headset mics often lose weak consonants; lower VAD and keep a longer release tail.
-                    threshold = clamp_vad_threshold(threshold * 0.82);
-                    release_tail_ms = release_tail_ms.saturating_add(90).min(MAX_RELEASE_TAIL_MS);
-                }
-                let cancel_for_capture = cancel_token.clone();
-                let stop_for_capture = stop_flag.clone();
-                let capture_options = CaptureOptions {
-                    vad_config: VadConfig {
-                        threshold,
-                        ..VadConfig::default()
-                    },
-                    max_capture_duration: Duration::from_millis(max_capture_ms),
-                    initial_speech_timeout: Duration::from_millis(silence_timeout_ms),
-                    end_policy: capture_end_policy(
-                        control_mode,
-                        Duration::from_millis(silence_timeout_ms),
-                        Duration::from_millis(release_tail_ms),
-                    ),
-                    preserve_full_capture: whisper_pipeline,
-                    // Adaptive VAD warmup: for the first 2 seconds, use a
-                    // lower threshold (60% of normal) so quiet speakers and
-                    // mics at distance don't get missed before the system
-                    // can detect their voice. After warmup, the full
-                    // threshold applies to prevent ambient noise triggers.
-                    vad_warmup_threshold: Some(clamp_vad_threshold(threshold * 0.6)),
-                    vad_warmup_duration: Duration::from_millis(2_000),
-                };
-                let app_for_capture = app.clone();
-                let mut last_level_emit = Instant::now();
-                let (ready_tx, ready_rx) = oneshot::channel::<()>();
-                // Clone for the capture closure so the original `input_device`
-                // remains available for the no-speech error label further down.
-                let input_device_for_capture = input_device.clone();
-                let captured_task = tokio::task::spawn_blocking(move || {
-                    let mut ready_tx = Some(ready_tx);
-                    audio.capture_segments_from_microphone_with_signals_and_observer(
-                        input_device_for_capture.as_deref(),
-                        capture_options,
-                        || cancel_for_capture.is_cancelled(),
-                        || stop_for_capture.load(Ordering::Relaxed),
-                        move || {
-                            if let Some(tx) = ready_tx.take() {
-                                let _ = tx.send(());
-                            }
-                        },
-                        move |normalized_chunk, _voiced_chunk| {
-                            // 33 ms cadence (~30 fps) so the pill waveform tracks
-                            // syllable-level dynamics; 70 ms read as sluggish.
-                            if last_level_emit.elapsed() >= Duration::from_millis(33) {
-                                let mut peak = 0.0_f32;
-                                for sample in normalized_chunk {
-                                    peak = peak.max(sample.abs());
-                                }
-                                emit_mic_level(
-                                    &app_for_capture,
-                                    MicLevelEvent {
-                                        level: peak.clamp(0.0, 1.0),
-                                        error: None,
-                                    },
-                                );
-                                last_level_emit = Instant::now();
-                            }
-                        },
-                    )
-                });
-                if ready_rx.await.is_ok() {
-                    // Sound cue is driven from the pill renderer for precise
-                    // sync with the visible listening onset.
-                    self.update_state(
-                        &app,
-                        VoiceWaveHudState::Listening,
-                        Some("Listening for speech...".to_string()),
-                    )
-                    .await;
-                }
-                let captured = captured_task.await.map_err(|err| {
-                    ControllerError::Runtime(format!("audio task join failure: {err}"))
-                })?;
-
-                match captured {
-                    Ok(rows) => rows,
-                    Err(AudioError::Cancelled) => {
-                        tracing::info!("capture cancelled (session={session_id})");
-                        self.set_session_state(
-                            session_id,
-                            DictationLifecycleState::Idle,
-                            None,
-                            None,
-                        )
-                        .await;
-                        self.update_state(
-                            &app,
-                            VoiceWaveHudState::Idle,
-                            Some("Dictation cancelled.".to_string()),
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                    Err(AudioError::NoSpeechDetected) => {
-                        tracing::info!("capture ended with no speech (session={session_id})");
-                        self.set_session_state(
-                            session_id,
-                            DictationLifecycleState::Idle,
-                            None,
-                            None,
-                        )
-                        .await;
-                        let device_label = input_device.as_deref().unwrap_or("system default");
-                        let warmup_peak_msg = if threshold > 0.0 {
-                            format!(
-                                " (warmup threshold {:.4}, full threshold {:.4})",
-                                clamp_vad_threshold(threshold * 0.6),
-                                threshold
-                            )
-                        } else {
-                            String::new()
-                        };
-                        self.update_state(
-                            &app,
-                            VoiceWaveHudState::Idle,
-                            Some(format!(
-                                "No speech on '{}'{}. {} Try lowering VAD threshold in Settings if this persists.",
-                                device_label,
-                                warmup_peak_msg,
-                                dictation_retry_instruction(control_mode)
-                            )),
-                        )
-                        .await;
-                        emit_pill_notice(
-                            &app,
-                            "info",
-                            "Didn't catch that",
-                            Some(dictation_retry_instruction(control_mode).to_string()),
-                            3_800,
-                        );
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        tracing::error!("capture failed (session={session_id}): {err}");
-                        return Err(ControllerError::Audio(err));
-                    }
-                }
-            }
-        };
-        let capture_ms = capture_started.elapsed().as_millis() as u64;
-
-        if cancel_token.is_cancelled() {
-            self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                .await;
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Idle,
-                Some("Dictation cancelled.".to_string()),
-            )
-            .await;
-            return Ok(());
-        }
-        if segments.is_empty() {
-            self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                .await;
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Idle,
-                Some(format!(
-                    "No speech captured yet. {}",
-                    dictation_retry_instruction(control_mode)
-                )),
-            )
-            .await;
-            emit_pill_notice(
-                &app,
-                "info",
-                "Didn't catch that",
-                Some(dictation_retry_instruction(control_mode).to_string()),
-                3_800,
-            );
-            return Ok(());
-        }
-
-        let audio_quality = analyze_captured_segments(
-            &segments,
-            self.audio.target_sample_rate,
-            clamp_vad_threshold(settings.vad_threshold),
-        );
-        let _ = app.emit("voicewave://audio-quality", audio_quality.clone());
-
-        if mode == DictationMode::Microphone {
-            if audio_quality.quality == AudioQualityBand::Poor
-                && take_notice_cooldown(&self.poor_audio_notice_last_at)
-            {
-                emit_pill_notice(
-                    &app,
-                    "warning",
-                    "Audio quality looks poor",
-                    Some(
-                        "Move closer to the mic, or run the 10s audio check in Settings."
-                            .to_string(),
-                    ),
-                    6_000,
-                );
-            }
-            if settings
-                .input_device
-                .as_deref()
-                .is_some_and(is_likely_low_quality_input_name)
-                && !self.mic_profile_notice_sent.swap(true, Ordering::Relaxed)
-            {
-                emit_pill_notice(
-                    &app,
-                    "warning",
-                    "Headset hands-free profile detected",
-                    Some(
-                        "Bluetooth call profiles reduce accuracy — the laptop mic array usually transcribes better."
-                            .to_string(),
-                    ),
-                    6_500,
-                );
-            }
-        }
-
-        let total_captured_samples = segments.iter().map(|segment| segment.len()).sum::<usize>();
-        let captured_audio_ms =
-            ((total_captured_samples as f64 / self.audio.target_sample_rate as f64) * 1000.0)
-                .round() as u64;
-        let policy_selected_mode = match mode {
-            DictationMode::Fixture => settings.decode_mode,
-            DictationMode::Microphone => self
-                .decode_policy
-                .lock()
-                .await
-                .select_mode(captured_audio_ms),
-        };
-        let mut effective_decode_mode = policy_selected_mode;
-        let mut decode_policy_reasons = vec![match mode {
-            DictationMode::Fixture => "fixture-settings".to_string(),
-            DictationMode::Microphone => {
-                format!("runtime-policy:{}", decode_mode_key(policy_selected_mode))
-            }
-        }];
-        if whisper_pipeline && mode == DictationMode::Microphone {
-            let mut decode_floor = match audio_quality.quality {
-                AudioQualityBand::Good => DecodeMode::Fast,
-                AudioQualityBand::Fair => DecodeMode::Balanced,
-                AudioQualityBand::Poor => DecodeMode::Quality,
-            };
-            if settings
-                .input_device
-                .as_deref()
-                .is_some_and(is_likely_low_quality_input_name)
-            {
-                decode_floor = floor_decode_mode(decode_floor, DecodeMode::Balanced);
-            }
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, decode_floor);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons
-                    .push(format!("fw-audio-floor:{}", decode_mode_key(decode_floor)));
-            }
-            // The fast lanes that previously downgraded Balanced -> Fast here
-            // (clean-audio floor and short-utterance) are removed: beam=1
-            // greedy output regularly passed the confidence retry gate while
-            // being wrong, so short dictations shipped degraded text. Beam=5
-            // is ~0.3 s on GPU and the latency policy still handles genuinely
-            // slow machines.
-        }
-        if mode == DictationMode::Microphone {
-            // The user's decode-mode setting is a floor for live dictation, so
-            // "balanced"/"quality" in settings can never be silently downgraded
-            // by the runtime policy. "fast" imposes no floor and lets the
-            // policy manage the speed/quality trade-off.
-            let pre_floor = effective_decode_mode;
-            effective_decode_mode = floor_decode_mode(effective_decode_mode, settings.decode_mode);
-            if effective_decode_mode != pre_floor {
-                decode_policy_reasons.push(format!(
-                    "settings-floor:{}",
-                    decode_mode_key(settings.decode_mode)
-                ));
-            }
-        }
-        let decode_policy_reason = decode_policy_reasons.join("|");
-        let mut fw_runtime_ready = false;
-        if let Some(mut task) = fw_ready_task {
-            // Capture is done, but the engine may still be loading the model:
-            // dictating seconds after launch waits on the startup prefetch, and
-            // a crashed worker reloads in the background. That wait is real
-            // (no decode can start before the model is in memory) and used to
-            // be silent, so say what is happening. Releases that land on a
-            // warm engine never see this.
-            let grace = Duration::from_millis(ENGINE_WAIT_NOTICE_GRACE_MS);
-            let joined = if task.is_finished() {
-                task.await
-            } else {
-                match timeout(grace, &mut task).await {
-                    Ok(joined) => joined,
-                    Err(_) => {
-                        emit_pill_notice(
-                            &app,
-                            "info",
-                            "Loading the speech model",
-                            Some(
-                                "Your words are captured. Transcription starts as soon as it's ready."
-                                    .to_string(),
-                            ),
-                            5_000,
-                        );
-                        task.await
-                    }
-                }
-            };
-            match joined {
-                Ok(Ok(())) => {
-                    fw_runtime_ready = true;
-                }
-                Ok(Err(err)) => {
-                    return Err(ControllerError::Runtime(format!(
-                        "Faster-Whisper runtime warmup failed: {err}"
-                    )));
-                }
-                Err(err) => {
-                    return Err(ControllerError::Runtime(format!(
-                        "Faster-Whisper warmup join failure: {err}"
-                    )));
-                }
-            }
-        }
-        let final_worker = self
-            .build_inference_worker(
-                &settings.active_model,
-                mode,
-                effective_decode_mode,
-                fw_runtime_ready,
-            )
-            .await?;
-        let cap_hit = mode == DictationMode::Microphone
-            && !stop_flag.load(Ordering::Relaxed)
-            && captured_audio_ms.saturating_add(150) >= max_capture_ms;
-        let transcribing_message = if cap_hit {
-            format!(
-                "Transcribing locally (max utterance {}s reached)...",
-                max_capture_ms / 1000
-            )
-        } else {
-            "Transcribing locally...".to_string()
-        };
-
-        let transcribing_started = Instant::now();
-        let release_to_transcribing_ms = self
-            .session_release_elapsed_ms(session_id, transcribing_started)
-            .await
-            .unwrap_or(0);
-        let effective_release_watchdog_ms = effective_release_watchdog_threshold_ms(
-            audio_quality.quality,
-            captured_audio_ms,
-            release_tail_ms,
-        );
-        let watchdog_recovered =
-            release_watchdog_recovered(release_to_transcribing_ms, effective_release_watchdog_ms);
-        if watchdog_recovered {
-            self.watchdog_recovery_count.fetch_add(1, Ordering::Relaxed);
-        }
-        let watchdog_note = if watchdog_recovered {
-            " (release watchdog recovered delayed transition)"
-        } else {
-            ""
-        };
-        self.set_session_state(
-            session_id,
-            DictationLifecycleState::Transcribing,
-            None,
-            None,
-        )
-        .await;
-        self.update_state(
-            &app,
-            VoiceWaveHudState::Transcribing,
-            Some(format!("{transcribing_message}{watchdog_note}")),
-        )
-        .await;
-
-        let mut merged_samples = Vec::new();
-        let inter_segment_gap = (self.audio.target_sample_rate as usize / 20).max(1); // 50 ms gap
-        for (idx, segment) in segments.iter().enumerate() {
-            if idx > 0 {
-                merged_samples.extend(vec![0.0_f32; inter_segment_gap]);
-            }
-            merged_samples.extend_from_slice(segment);
-        }
-
-        let decode_started = Instant::now();
-        let source_samples = merged_samples;
-        if mode == DictationMode::Microphone && whisper_pipeline {
-            let finalize_audio_ms =
-                sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-            if finalize_audio_ms < fw_min_decode_audio_ms() {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Idle,
-                    Some(format!(
-                        "Capture was too short to transcribe reliably. {}",
-                        dictation_retry_instruction(control_mode)
-                    )),
-                )
-                .await;
-                return Ok(());
-            }
-        }
-        // The whole capture is decoded at release.
-        let finalize_tail_audio_ms =
-            sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-        let finalize_started = Instant::now();
-        let finalize_samples_ref: &[f32] = &source_samples;
-        let default_finalize_timeout =
-            final_decode_timeout(finalize_samples_ref.len(), self.audio.target_sample_rate);
-        // During the one-time GPU check, a whisper.cpp model with no
-        // faster-whisper fallback waits for the check before decoding.
-        let waits_for_gpu_check = final_worker.waits_for_gpu_check().await;
-        // The speech worker may fail on the GPU and retry the same audio on
-        // the CPU rung; the outer timeout covers that wait and both attempts.
-        let finalize_timeout = final_worker
-            .asr_worker_timeout(
-                sample_count_to_ms(finalize_samples_ref.len(), self.audio.target_sample_rate),
-                default_finalize_timeout,
-                waits_for_gpu_check,
-            )
-            .unwrap_or(default_finalize_timeout);
-        // That wait can take most of a minute, so say why now rather than
-        // after the result. It uses the session's one GPU notice.
-        let gpu_wait_notice = waits_for_gpu_check
-            && mode == DictationMode::Microphone
-            && !self.gpu_notice_sent.swap(true, Ordering::Relaxed);
-        if gpu_wait_notice {
-            emit_pill_notice(
-                &app,
-                "info",
-                "Getting your graphics card ready",
-                Some("One-time setup, up to a minute. Your text appears when it's done.".to_string()),
-                15_000,
-            );
-        }
-        // Long decodes leave the user staring at a spinner with no promise it
-        // is alive; past ~2.5s the pill says so explicitly (unless the GPU
-        // notice above already explains the wait).
-        let decode_watch_done = Arc::new(AtomicBool::new(false));
-        if mode == DictationMode::Microphone && !gpu_wait_notice {
-            let done = Arc::clone(&decode_watch_done);
-            let watch_app = app.clone();
-            let watch_cancel = cancel_token.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(2_500)).await;
-                if !done.load(Ordering::Relaxed) && !watch_cancel.is_cancelled() {
-                    emit_pill_notice(
-                        &watch_app,
-                        "info",
-                        "Still transcribing…",
-                        Some("Long dictations take a little more time.".to_string()),
-                        2_600,
-                    );
-                }
-            });
-        }
-        let finalize_result = timeout(
-            finalize_timeout,
-            final_worker.transcribe_segment(
-                finalize_samples_ref,
-                &cancel_token,
-                |_text, _is_final, _elapsed_ms| {},
-            ),
-        )
-        .await;
-        decode_watch_done.store(true, Ordering::Relaxed);
-        let finalize_output = match finalize_result {
-            Ok(Ok(text)) => text,
-            Ok(Err(InferenceError::Cancelled)) => {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Idle,
-                    Some("Dictation cancelled.".to_string()),
-                )
-                .await;
-                return Ok(());
-            }
-            Ok(Err(err)) => {
-                // The worker refuses to load a model that is not on disk yet
-                // (worker.py raises "... is not downloaded yet"). That is a
-                // setup state, not a decode failure: feeding it to the policy
-                // or the audio-pipeline fallback counters would degrade later
-                // dictations once the download finishes.
-                // The pill notice comes from `dictation_failure_notice`.
-                if err.to_string().contains("is not downloaded yet") {
-                    return Err(ControllerError::MissingModel(
-                        final_worker.active_model().to_string(),
-                    ));
-                }
-                if mode == DictationMode::Microphone {
-                    self.decode_policy
-                        .lock()
-                        .await
-                        .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if whisper_pipeline {
-                        note_audio_pipeline_decode_hard_failure();
-                    }
-                }
-                return Err(ControllerError::Runtime(format!(
-                    "Inference failed for model '{}': {err}",
-                    final_worker.active_model()
-                )));
-            }
-            Err(_) => {
-                cancel_token.cancel();
-                if mode == DictationMode::Microphone {
-                    self.decode_policy
-                        .lock()
-                        .await
-                        .record_failure(finalize_started.elapsed().as_millis() as u64);
-                    if whisper_pipeline {
-                        note_audio_pipeline_decode_hard_failure();
-                    }
-                }
-                return Err(ControllerError::Runtime(format!(
-                    "Inference timed out after {} ms for model '{}'.",
-                    finalize_timeout.as_millis(),
-                    final_worker.active_model()
-                )));
-            }
-        };
-        let release_finalize_ms = finalize_started.elapsed().as_millis() as u64;
-        let decode_ms = decode_started.elapsed().as_millis() as u64;
-        let decode_telemetry = finalize_output.telemetry;
-        if mode == DictationMode::Microphone && whisper_pipeline {
-            note_audio_pipeline_decode_success(&decode_telemetry.audio_pipeline_version);
-        }
-        if mode == DictationMode::Microphone {
-            if let Some(kind) = decode_telemetry.asr_step_down_kind.filter(|_| {
-                !self.gpu_notice_sent.swap(true, Ordering::Relaxed)
-            }) {
-                let (title, detail) = gpu_step_down_notice(kind, final_worker.active_model());
-                emit_pill_notice(&app, "warning", title, Some(detail), 6_500);
-            } else if !decode_telemetry.runtime_cache_hit && decode_telemetry.model_init_ms >= 2_500
-            {
-                emit_pill_notice(
-                    &app,
-                    "info",
-                    "Engine was cold",
-                    Some(
-                        "First dictation after a restart takes longer — the next ones are fast."
-                            .to_string(),
-                    ),
-                    4_500,
-                );
-            }
-        }
-        let raw_decode_transcript = finalize_output.transcript.unwrap_or_default();
-        let finalize_text = sanitize_user_transcript(&raw_decode_transcript);
-        let merged_transcript = finalize_text.clone();
-        let baseline_transcript = sanitize_user_transcript(&merged_transcript);
-        // Plan 010: the persisted polish profile is the single delivery
-        // authority for this dictation. Resolve it once against the settings
-        // snapshot taken at flow start so a mid-flight profile switch cannot
-        // produce a hybrid.
-        let polish_profile = settings.effective_polish_profile();
-        let profile_policy = resolve_profile(polish_profile, &settings);
-        // Dictionary terms feed every branch below (Literal stabilization,
-        // the pro deterministic stack, and the polish gate) — fetch once.
-        let custom_terms = self
-            .dictionary_manager
-            .lock()
-            .await
-            .get_terms(None)
-            .into_iter()
-            .map(|row| row.term)
-            .collect::<Vec<_>>();
-        let active_snippets = self.snippet_manager.lock().await.list_snippets(None);
-        let protection = match SnippetExpansionPlan::protect(&baseline_transcript, &active_snippets)
-        {
-            Ok(outcome) => outcome,
-            Err(ProtectionError::TooManyMatches) => {
-                emit_pill_notice(
-                    &app,
-                    "warning",
-                    "Too many snippet triggers",
-                    Some("No snippets were expanded in this dictation.".to_string()),
-                    3_500,
-                );
-                ProtectionOutcome::NoMatch
-            }
-            Err(error) => {
-                tracing::warn!("snippet protection skipped: {error}");
-                ProtectionOutcome::NoMatch
-            }
-        };
-        let (exact_snippet_expansion, inline_snippet_plan) = match protection {
-            ProtectionOutcome::NoMatch => (None, None),
-            ProtectionOutcome::ExactOnly { expansion } => (Some(expansion), None),
-            ProtectionOutcome::Inline(plan) => (None, Some(Arc::new(plan))),
-        };
-        let had_snippet = exact_snippet_expansion.is_some() || inline_snippet_plan.is_some();
-        let deterministic_input = inline_snippet_plan
-            .as_ref()
-            .map(|plan| plan.protected_text())
-            .unwrap_or(&merged_transcript);
-        let literal_input = inline_snippet_plan
-            .as_ref()
-            .map(|plan| plan.protected_text())
-            .unwrap_or(&baseline_transcript);
-        let entitlement = self.billing_manager.lock().await.snapshot();
-        let deterministic_transcript = if let Some(expansion) = &exact_snippet_expansion {
-            expansion.clone()
-        } else if profile_policy.insert_path == InsertPath::LiteralImmediate {
-            // Literal branches BEFORE finalize_pro_transcript, from the
-            // sanitized ASR baseline: by the end of the deterministic stack
-            // the original word sequence (fillers, repeats) is already gone.
-            // Only spoken structural commands, dictionary stabilization, and
-            // punctuation/capitalization apply — never filler removal, domain
-            // corrections, format profiles, or code mode.
-            finalize_literal_transcript(literal_input, settings.spoken_edit_commands, &custom_terms)
-        } else if entitlement.is_pro {
-            let app_profile_behavior = Self::active_profile_behavior(&settings);
-            finalize_pro_transcript(
-                deterministic_input,
-                &ProTranscriptOptions {
-                    format_profile: settings.format_profile,
-                    domain_packs: &settings.active_domain_packs,
-                    code_mode: &settings.code_mode,
-                    preserve_protected_content: inline_snippet_plan.is_some(),
-                    post_processing_enabled: settings.pro_post_processing_enabled,
-                    spoken_edit_commands: settings.spoken_edit_commands,
-                    app_profile_behavior: &app_profile_behavior,
-                    custom_terms: &custom_terms,
-                },
-            )
-        } else {
-            literal_input.to_string()
-        };
-        let final_transcript = if let Some(plan) = inline_snippet_plan.as_ref() {
-            if plan.validate_candidate(&deterministic_transcript).is_ok() {
-                deterministic_transcript
-            } else {
-                tracing::warn!("deterministic formatting changed a snippet slot; using protected baseline");
-                plan.protected_text().to_string()
-            }
-        } else {
-            deterministic_transcript
-        };
-        let (asr_integrity_percent, asr_raw_word_count, asr_final_word_count) =
-            asr_integrity_metrics(&finalize_text, &baseline_transcript);
-
-        if final_transcript.trim().is_empty() {
-            if cancel_token.is_cancelled() {
-                self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                    .await;
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Idle,
-                    Some("Dictation cancelled.".to_string()),
-                )
-                .await;
-                return Ok(());
-            }
-            if mode == DictationMode::Microphone {
-                self.decode_policy.lock().await.record_failure(decode_ms);
-                if whisper_pipeline {
-                    note_audio_pipeline_decode_hard_failure();
-                }
-            }
-            return Err(ControllerError::Runtime(
-                "Inference finished without final transcript.".to_string(),
-            ));
-        }
-        if mode == DictationMode::Microphone
-            && should_reject_low_confidence_transcript_as_no_speech(
-                whisper_pipeline,
-                captured_audio_ms,
-                &baseline_transcript,
-                decode_telemetry.fw_no_speech_prob,
-            )
-        {
-            self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
-                .await;
-            self.update_state(
-                &app,
-                VoiceWaveHudState::Idle,
-                Some(format!(
-                    "No speech detected. {}",
-                    dictation_retry_instruction(control_mode)
-                )),
-            )
-            .await;
-            return Ok(());
-        }
-
-        // ---- Plan 010 delivery policy -----------------------------------
-        // Standard keeps today's contract byte-for-byte (deterministic text
-        // inserts immediately; polish runs async as a Copy-offer after
-        // insertion). Coding/Writing/Casual opted in to "the profile IS the
-        // text": ONE blocking LLM attempt through the polish gate, bounded by
-        // a hard release-to-insert budget; on accept the polished text
-        // inserts, on reject/timeout/worker-error the deterministic floor
-        // inserts. Literal never calls the model.
-        let mut inserted_text = if let Some(expansion) = &exact_snippet_expansion {
-            expansion.clone()
-        } else {
-            restore_snippet_candidate(inline_snippet_plan.as_deref(), &final_transcript)
-                .unwrap_or_else(|error| {
-                    tracing::warn!("snippet restoration failed before insertion: {error}");
-                    baseline_transcript.clone()
-                })
-        };
-        let mut polish_meta = PolishHistoryMeta {
-            selected_profile: Some(polish_profile.as_str().to_string()),
-            ..PolishHistoryMeta::default()
-        };
-        let mut polish_wait_ms: u64 = 0;
-        // A wait-path attempt that misses the budget keeps running in the
-        // background; its (gated) result may still enrich History later —
-        // never the target app.
-        let mut late_polish_handle: Option<JoinHandle<Option<String>>> = None;
-        if exact_snippet_expansion.is_some() {
-            polish_meta.polish_outcome = Some(POLISH_OUTCOME_SNIPPET_EXACT.to_string());
-        } else {
-            match profile_policy.insert_path {
-                InsertPath::LiteralImmediate => {
-                    polish_meta.polish_outcome = Some(POLISH_OUTCOME_LITERAL.to_string());
-                }
-                InsertPath::Immediate => {
-                    // Standard: outcome intentionally stays None — the async
-                    // polish pass is an offer, not an insertion outcome.
-                }
-                InsertPath::WaitValidated => {
-                    // No retry pass exists yet (worker support pending); record
-                    // that explicitly so History never has to guess.
-                    polish_meta.polish_retried = Some(false);
-                    if !settings.llm_polish_enabled {
-                        polish_meta.polish_outcome = Some(POLISH_OUTCOME_DISABLED.to_string());
-                    } else {
-                        // Budget zero point == key release, the same point the
-                        // existing release_to_inserted_ms metric measures from.
-                        let elapsed_since_release_ms = release_to_transcribing_ms
-                            .saturating_add(transcribing_started.elapsed().as_millis() as u64);
-                        let remaining_budget_ms = WAIT_VALIDATED_RELEASE_BUDGET_MS
-                            .saturating_sub(elapsed_since_release_ms);
-                        if remaining_budget_ms == 0 {
-                            // Decode alone consumed the budget (long dictation):
-                            // insert the floor immediately, no attempt.
-                            polish_meta.polish_outcome =
-                                Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
-                        } else {
-                            let raw_for_polish = final_transcript.clone();
-                            let prompt_id = profile_policy.prompt_id.to_string();
-                            let wait_started = Instant::now();
-                            let mut polish_handle = tokio::spawn(async move {
-                                crate::inference::llm_polish::polish_text_for_profile(
-                                    raw_for_polish,
-                                    prompt_id,
-                                )
-                                .await
-                                .ok()
-                                .flatten()
-                            });
-                            match timeout(
-                                Duration::from_millis(remaining_budget_ms),
-                                &mut polish_handle,
-                            )
-                            .await
-                            {
-                                Ok(Ok(Some(candidate))) => {
-                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                    match gate_polish_candidate(
-                                        &final_transcript,
-                                        &candidate,
-                                        &custom_terms,
-                                        polish_profile,
-                                    ) {
-                                        Ok(stabilized) => match restore_snippet_candidate(
-                                            inline_snippet_plan.as_deref(),
-                                            &stabilized,
-                                        ) {
-                                            Ok(restored) => {
-                                                polish_meta.polish_outcome =
-                                                    Some(POLISH_OUTCOME_ACCEPTED.to_string());
-                                                polish_meta.polished_text = Some(restored.clone());
-                                                inserted_text = restored;
-                                            }
-                                            Err(error) => {
-                                                tracing::info!(
-                                                    "{} polish changed a protected snippet slot ({error}); inserting deterministic floor",
-                                                    polish_profile.as_str()
-                                                );
-                                                polish_meta.polish_outcome = Some(
-                                                    POLISH_OUTCOME_FALLBACK_REJECTED.to_string(),
-                                                );
-                                            }
-                                        },
-                                        Err(reasons) => {
-                                            tracing::info!(
-                                                "{} polish rejected ({reasons:?}); inserting deterministic floor",
-                                                polish_profile.as_str()
-                                            );
-                                            polish_meta.polish_outcome =
-                                                Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
-                                        }
-                                    }
-                                }
-                                Ok(Ok(None)) | Ok(Err(_)) => {
-                                    // Worker error / missing model / empty output.
-                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                    polish_meta.polish_outcome =
-                                        Some(POLISH_OUTCOME_FALLBACK_REJECTED.to_string());
-                                }
-                                Err(_elapsed) => {
-                                    polish_wait_ms = wait_started.elapsed().as_millis() as u64;
-                                    polish_meta.polish_latency_ms = Some(polish_wait_ms);
-                                    polish_meta.polish_outcome =
-                                        Some(POLISH_OUTCOME_FALLBACK_TIMEOUT.to_string());
-                                    late_polish_handle = Some(polish_handle);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        polish_meta.inserted_text = Some(inserted_text.clone());
-
-        let post_started = Instant::now();
-        let _ = app.emit(
-            "voicewave://transcript",
-            TranscriptEvent {
-                text: inserted_text.clone(),
-                is_final: true,
-                elapsed_ms: 0,
-            },
-        );
-
-        {
-            let mut snapshot = self.snapshot.lock().await;
-            snapshot.last_partial = None;
-            snapshot.last_final = Some(inserted_text.clone());
-            snapshot.active_model = settings.active_model.clone();
-        }
-        let post_before_insert_ms = post_started.elapsed().as_millis() as u64;
-
-        let insert_payload = InsertTextRequest {
-            text: inserted_text.clone(),
-            target_app: None,
-            prefer_clipboard: settings.prefer_clipboard_fallback
-                || (had_snippet && inserted_text.contains('\n')),
-            force_clipboard_only: false,
-        };
-        let insert_started = Instant::now();
-        let (
-            insertion_success,
-            insertion_method,
-            insertion_target_class,
-            insertion_history_recorded,
-            insertion_record_id,
-        ) = match self
-            .insert_text_with_polish_meta(app.clone(), insert_payload, Some(&polish_meta))
-            .await
-        {
-            Ok((result, record_id)) => (
-                result.success,
-                insertion_method_key(&result.method).to_string(),
-                classify_insertion_target(result.target_app.as_deref()).to_string(),
-                // insert_text already wrote the history record (with method
-                // and success), or logged why it could not; the record is in
-                // memory either way, so the transcript-side write below must
-                // not duplicate it.
-                true,
-                record_id,
-            ),
-            Err(err) => {
-                self.update_state(
-                    &app,
-                    VoiceWaveHudState::Error,
-                    Some(format!("Insertion failed: {err}")),
-                )
-                .await;
-                self.set_session_state(session_id, DictationLifecycleState::Error, None, None)
-                    .await;
-                (
-                    false,
-                    "error".to_string(),
-                    "unknown".to_string(),
-                    false,
-                    None,
-                )
-            }
-        };
-        let insert_ms = insert_started.elapsed().as_millis() as u64;
-        let inserted_at_utc_ms = now_utc_ms();
-        let previous_correction_session = { self.correction_session.lock().await.clone() };
-        let correction_candidates = if insertion_success {
-            if let Some(previous) = previous_correction_session {
-                if !had_snippet
-                    && !previous.had_snippet
-                    && inserted_at_utc_ms.saturating_sub(previous.inserted_at_utc_ms)
-                        <= CORRECTION_SESSION_WINDOW_MS
-                {
-                    derive_correction_candidates(&previous.inserted_text, &inserted_text)
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-        {
-            let mut correction_session = self.correction_session.lock().await;
-            if insertion_success {
-                *correction_session = Some(CorrectionSession {
-                    inserted_text: inserted_text.clone(),
-                    inserted_at_utc_ms,
-                    had_snippet,
-                });
-            } else {
-                *correction_session = None;
-            }
-        }
-
-        // Off-by-default on-device LLM polish (plan 005, Phase 3) — Standard
-        // profile only (wait-validated profiles already made their single
-        // attempt inline, and Literal never calls the model). Only when the
-        // experimental flag is ON and the deterministic text actually landed.
-        // This runs in a background task spawned AFTER insertion, so it adds
-        // ZERO release-to-text latency and never touches the ASR worker/gate. It
-        // OFFERS the polished text via the pill's Copy action; it never
-        // overwrites the inserted text, and a rewrite is surfaced only if the
-        // fidelity validator passes. With the flag off (default) nothing spawns
-        // and behavior is byte-identical to before.
-        if insertion_success
-            && settings.llm_polish_enabled
-            && profile_policy.insert_path == InsertPath::Immediate
-            && exact_snippet_expansion.is_none()
-        {
-            let app_handle = app.clone();
-            let raw = final_transcript.clone();
-            let polish_count = Arc::clone(&self.polish_success_count);
-            let custom_terms_for_polish = custom_terms.clone();
-            let session_counter = Arc::clone(&self.session_counter);
-            let history_manager = Arc::clone(&self.history_manager);
-            let record_id_for_polish = insertion_record_id.clone();
-            let snippet_plan_for_polish = inline_snippet_plan.clone();
-            tauri::async_runtime::spawn(async move {
-                let polish_started = Instant::now();
-                if let Ok(Some(polished)) = crate::inference::llm_polish::polish_text_for_profile(
-                    raw.clone(),
-                    PolishProfile::Standard.as_str().to_string(),
-                )
-                .await
-                {
-                    // Re-apply the dictionary-term stabilizer to the LLM output,
-                    // then gate strictly on the fidelity validator.
-                    let Ok(stabilized) = gate_polish_candidate(
-                        &raw,
-                        &polished,
-                        &custom_terms_for_polish,
-                        PolishProfile::Standard,
-                    ) else {
-                        return;
-                    };
-                    if stabilized.trim() == raw.trim() {
-                        return;
-                    }
-                    let Ok(restored) =
-                        restore_snippet_candidate(snippet_plan_for_polish.as_deref(), &stabilized)
-                    else {
-                        return;
-                    };
-                    let polish_latency_ms = polish_started.elapsed().as_millis() as u64;
-                    // Enrich this dictation's History record (keyed by its
-                    // stable record id, so this is never stale) with the
-                    // validated candidate.
-                    if let Some(record_id) = record_id_for_polish {
-                        let update = PolishHistoryMeta {
-                            polished_text: Some(restored.clone()),
-                            polish_latency_ms: Some(polish_latency_ms),
-                            ..PolishHistoryMeta::default()
-                        };
-                        if history_manager
-                            .lock()
-                            .await
-                            .update_polish_meta(&record_id, &update)
-                            .is_ok()
-                        {
-                            let _ = app_handle.emit_to(
-                                MAIN_WINDOW_LABEL,
-                                "voicewave://history-updated",
-                                (),
-                            );
-                        }
-                    }
-                    // Session-aware offer: if a newer dictation started while
-                    // this polish ran, the offer is obsolete — drop it
-                    // silently (no stale pill offers).
-                    if session_counter.load(Ordering::Relaxed) != session_id {
-                        return;
-                    }
-                    // Polish succeeds on nearly every dictation, so we do NOT
-                    // pop the pill each time — that would bury the pill's
-                    // important fallback/error messages in noise. Announce
-                    // only once every POLISH_PILL_ANNOUNCE_EVERY validated
-                    // polishes as a quiet "on-device polishing is working"
-                    // signal. `fetch_add` returns the pre-increment value, so
-                    // the first success (0) announces immediately, then every
-                    // 50th thereafter.
-                    let nth = polish_count.fetch_add(1, Ordering::Relaxed);
-                    if nth % POLISH_PILL_ANNOUNCE_EVERY == 0 {
-                        emit_pill_rescue(
-                            &app_handle,
-                            "info",
-                            "Polished version ready",
-                            None,
-                            restored,
-                            Some("copyTranscript"),
-                        );
-                    }
-                }
-            });
-        }
-
-        // Wait-path attempt that missed the release budget: let it finish in
-        // the background and, if the gate accepts it, record the candidate on
-        // this dictation's History record (`polishedText` only — the outcome
-        // stays `fallbackTimeout` and the target app is never touched).
-        if let (Some(handle), Some(record_id)) = (late_polish_handle, insertion_record_id.clone()) {
-            let history_manager = Arc::clone(&self.history_manager);
-            let app_for_late = app.clone();
-            let raw = final_transcript.clone();
-            let custom_terms_late = custom_terms.clone();
-            let snippet_plan_late = inline_snippet_plan.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Ok(Some(candidate)) = handle.await {
-                    if let Ok(stabilized) =
-                        gate_polish_candidate(&raw, &candidate, &custom_terms_late, polish_profile)
-                    {
-                        let Ok(restored) =
-                            restore_snippet_candidate(snippet_plan_late.as_deref(), &stabilized)
-                        else {
-                            return;
-                        };
-                        let update = PolishHistoryMeta {
-                            polished_text: Some(restored),
-                            ..PolishHistoryMeta::default()
-                        };
-                        if history_manager
-                            .lock()
-                            .await
-                            .update_polish_meta(&record_id, &update)
-                            .is_ok()
-                        {
-                            let _ = app_for_late.emit_to(
-                                MAIN_WINDOW_LABEL,
-                                "voicewave://history-updated",
-                                (),
-                            );
-                        }
-                    }
-                }
-            });
-        }
-
-        // Rescue pill (Wispr Flow fallback pattern): when the text did not
-        // land in the target app, the pill expands with the transcript so the
-        // words are visibly safe and one keystroke/click away.
-        if mode == DictationMode::Microphone {
-            if !insertion_success {
-                emit_pill_rescue(
-                    &app,
-                    "warning",
-                    "Couldn't insert — your text is safe",
-                    Some("Click Copy, then paste it where you need it.".to_string()),
-                    inserted_text.clone(),
-                    Some("copyTranscript"),
-                );
-            } else if insertion_method == "clipboardOnly" {
-                emit_pill_rescue(
-                    &app,
-                    "info",
-                    "Copied to clipboard",
-                    Some("Press Ctrl+V to paste it here.".to_string()),
-                    inserted_text.clone(),
-                    None,
-                );
-            } else if asr_final_word_count >= 30 {
-                // Success stays quiet for everyday dictations (Wispr-style
-                // restraint); only big ones earn a word-count confirmation.
-                emit_pill_notice(
-                    &app,
-                    "info",
-                    format!("Inserted · {asr_final_word_count} words"),
-                    None,
-                    2_600,
-                );
-            }
-
-            // Opt-in one-tap "Add to dictionary?" suggestion. Restraint gate:
-            // off by default (setting), and only when there is exactly one
-            // high-confidence correction candidate — the dictionary review
-            // popup already ingests these independently, so this never
-            // double-surfaces on the default calm UX.
-            if settings.pill_action_suggestions
-                && insertion_success
-                && correction_candidates.len() == 1
-            {
-                let term = correction_candidates[0].clone();
-                emit_pill_action_notice(
-                    &app,
-                    "info",
-                    "Add to dictionary?",
-                    None,
-                    PillAction {
-                        kind: "addDictionaryTerm".to_string(),
-                        label: format!("Add \"{term}\""),
-                        value: Some(term),
-                    },
-                    6_000,
-                );
-            }
-        }
-
-        self.set_session_state(session_id, DictationLifecycleState::Inserted, None, None)
-            .await;
-
-        let post_after_insert_ms = post_started.elapsed().as_millis() as u64;
-        let post_after_only_ms = post_after_insert_ms
-            .saturating_sub(post_before_insert_ms)
-            .saturating_sub(insert_ms);
-        let post_ms = post_before_insert_ms.saturating_add(post_after_only_ms);
-        let total_ms = flow_started.elapsed().as_millis() as u64;
-        let release_to_final_ms = release_to_transcribing_ms
-            .saturating_add(decode_ms)
-            .saturating_add(post_ms);
-        // The wait-validated polish pause (plan 010) counts toward the
-        // user-perceived release-to-insert number, but deliberately NOT
-        // toward release_to_final_ms: the decode policy learns from the
-        // deterministic pipeline's speed and must not be punished for an
-        // opt-in LLM wait.
-        let release_to_inserted_ms = release_to_final_ms
-            .saturating_add(polish_wait_ms)
-            .saturating_add(insert_ms);
-        if mode == DictationMode::Microphone {
-            self.decode_policy
-                .lock()
-                .await
-                .record_success(release_to_final_ms);
-        }
-        let audio_duration_ms =
-            sample_count_to_ms(source_samples.len(), self.audio.target_sample_rate);
-        let segments_captured = segments.len() as u32;
-        let release_stop_detected_at_utc_ms = self
-            .session_release_stop_detected_at_utc_ms(session_id)
-            .await
-            .unwrap_or(0);
-        let _ = app.emit(
-            "voicewave://latency",
-            LatencyBreakdownEvent {
-                session_id,
-                capture_ms,
-                release_to_transcribing_ms,
-                effective_release_watchdog_ms,
-                watchdog_recovered,
-                segments_captured,
-                release_stop_detected_at_utc_ms,
-                model_init_ms: decode_telemetry.model_init_ms,
-                audio_condition_ms: decode_telemetry.audio_condition_ms,
-                decode_compute_ms: decode_telemetry.decode_compute_ms,
-                runtime_cache_hit: decode_telemetry.runtime_cache_hit,
-                backend_requested: decode_telemetry.backend_requested.clone(),
-                backend_used: decode_telemetry.backend_used.clone(),
-                backend_fallback: decode_telemetry.backend_fallback,
-                asr_engine: decode_telemetry.asr_engine.clone(),
-                asr_step_down_reason: decode_telemetry.asr_step_down_reason.clone(),
-                hold_to_first_draft_ms: 0,
-                incremental_decode_ms: 0,
-                release_finalize_ms,
-                incremental_windows_decoded: 0,
-                finalize_tail_audio_ms,
-                asr_integrity_percent,
-                asr_raw_word_count,
-                asr_final_word_count,
-                decode_ms,
-                post_ms,
-                insert_ms,
-                total_ms,
-                release_to_inserted_ms,
-                audio_duration_ms,
-                model_id: final_worker.active_model().to_string(),
-                decode_mode: final_worker.decode_mode(),
-                decode_policy_mode_selected: policy_selected_mode,
-                decode_policy_reason: decode_policy_reason.clone(),
-                fw_low_coherence: decode_telemetry.fw_low_coherence,
-                fw_retry_used: decode_telemetry.fw_retry_used,
-                fw_literal_retry_used: decode_telemetry.fw_literal_retry_used,
-                audio_pipeline_version: decode_telemetry.audio_pipeline_version.clone(),
-                fw_avg_logprob: decode_telemetry.fw_avg_logprob,
-                fw_no_speech_prob: decode_telemetry.fw_no_speech_prob,
-                fw_compression_ratio: decode_telemetry.fw_compression_ratio,
-                fw_shadow_candidate_version: decode_telemetry.fw_shadow_candidate_version.clone(),
-                fw_shadow_quality_delta: decode_telemetry.fw_shadow_quality_delta,
-                fw_shadow_candidate_avg_logprob: decode_telemetry.fw_shadow_candidate_avg_logprob,
-                fw_shadow_candidate_no_speech_prob: decode_telemetry
-                    .fw_shadow_candidate_no_speech_prob,
-                fw_shadow_candidate_retry_used: decode_telemetry.fw_shadow_candidate_retry_used,
-                fw_shadow_candidate_low_coherence: decode_telemetry
-                    .fw_shadow_candidate_low_coherence,
-                fw_shadow_candidate_decode_compute_ms: decode_telemetry
-                    .fw_shadow_candidate_decode_compute_ms,
-                fw_shadow_candidate_won: decode_telemetry.fw_shadow_candidate_won,
-                audio_pipeline_fallback_engaged: decode_telemetry.audio_pipeline_fallback_engaged,
-                audio_pipeline_fallback_remaining: decode_telemetry
-                    .audio_pipeline_fallback_remaining,
-                warm_start_hit: decode_telemetry.runtime_cache_hit,
-                worker_reused: decode_telemetry.runtime_cache_hit,
-                correction_candidates_count: correction_candidates.len() as u32,
-                insertion_method: insertion_method.clone(),
-                insertion_target_class: insertion_target_class.clone(),
-                mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
-            },
-        );
-        // Always-on aggregate stats (counts and durations only, never text)
-        // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
-        // diagnostics gates the detailed per-utterance records below. Only
-        // successful insertions feed these numbers so a decode that never
-        // landed does not inflate "words dictated / time saved".
-        if insertion_success {
-            if let Err(err) = self.stats_manager.lock().await.record_dictation(
-                now_utc_ms(),
-                asr_final_word_count,
-                asr_raw_word_count,
-                audio_duration_ms,
-                Some(insertion_target_class.as_str()),
-                decode_telemetry.fw_avg_logprob,
-                decode_telemetry.fw_no_speech_prob,
-            ) {
-                tracing::warn!("stats record failed: {err}");
-            }
-        }
-        if settings.diagnostics_opt_in {
-            let _ = self
-                .diagnostics_manager
-                .lock()
-                .await
-                .record_latency(LatencyMetricRecord {
-                    session_id,
-                    timestamp_utc_ms: now_utc_ms(),
-                    capture_ms,
-                    release_to_transcribing_ms,
-                    effective_release_watchdog_ms,
-                    watchdog_recovered,
-                    segments_captured,
-                    release_stop_detected_at_utc_ms,
-                    model_init_ms: decode_telemetry.model_init_ms,
-                    audio_condition_ms: decode_telemetry.audio_condition_ms,
-                    decode_compute_ms: decode_telemetry.decode_compute_ms,
-                    runtime_cache_hit: decode_telemetry.runtime_cache_hit,
-                    backend_requested: decode_telemetry.backend_requested,
-                    backend_used: decode_telemetry.backend_used,
-                    backend_fallback: decode_telemetry.backend_fallback,
-                    asr_engine: Some(decode_telemetry.asr_engine)
-                        .filter(|engine| !engine.is_empty()),
-                    asr_step_down_reason: decode_telemetry.asr_step_down_reason,
-                    hold_to_first_draft_ms: 0,
-                    incremental_decode_ms: 0,
-                    release_finalize_ms,
-                    incremental_windows_decoded: 0,
-                    finalize_tail_audio_ms,
-                    asr_integrity_percent,
-                    asr_raw_word_count,
-                    asr_final_word_count,
-                    decode_ms,
-                    post_ms,
-                    insert_ms,
-                    total_ms,
-                    release_to_inserted_ms,
-                    audio_duration_ms,
-                    model_id: final_worker.active_model().to_string(),
-                    decode_mode: final_worker.decode_mode(),
-                    decode_policy_mode_selected: Some(policy_selected_mode),
-                    decode_policy_reason: Some(decode_policy_reason),
-                    fw_low_coherence: decode_telemetry.fw_low_coherence,
-                    fw_retry_used: decode_telemetry.fw_retry_used,
-                    fw_literal_retry_used: decode_telemetry.fw_literal_retry_used,
-                    audio_pipeline_version: decode_telemetry.audio_pipeline_version,
-                    fw_avg_logprob: decode_telemetry.fw_avg_logprob,
-                    fw_no_speech_prob: decode_telemetry.fw_no_speech_prob,
-                    fw_compression_ratio: decode_telemetry.fw_compression_ratio,
-                    fw_shadow_candidate_version: decode_telemetry.fw_shadow_candidate_version,
-                    fw_shadow_quality_delta: decode_telemetry.fw_shadow_quality_delta,
-                    fw_shadow_candidate_avg_logprob: decode_telemetry
-                        .fw_shadow_candidate_avg_logprob,
-                    fw_shadow_candidate_no_speech_prob: decode_telemetry
-                        .fw_shadow_candidate_no_speech_prob,
-                    fw_shadow_candidate_retry_used: decode_telemetry.fw_shadow_candidate_retry_used,
-                    fw_shadow_candidate_low_coherence: decode_telemetry
-                        .fw_shadow_candidate_low_coherence,
-                    fw_shadow_candidate_decode_compute_ms: decode_telemetry
-                        .fw_shadow_candidate_decode_compute_ms,
-                    fw_shadow_candidate_won: decode_telemetry.fw_shadow_candidate_won,
-                    audio_pipeline_fallback_engaged: decode_telemetry
-                        .audio_pipeline_fallback_engaged,
-                    audio_pipeline_fallback_remaining: decode_telemetry
-                        .audio_pipeline_fallback_remaining,
-                    warm_start_hit: decode_telemetry.runtime_cache_hit,
-                    worker_reused: decode_telemetry.runtime_cache_hit,
-                    correction_candidates_count: correction_candidates.len() as u32,
-                    insertion_method: Some(insertion_method),
-                    insertion_target_class: Some(insertion_target_class),
-                    success: insertion_success,
-                    mic_input_volume_percent: mic_input_volume_slot
-                        .lock()
-                        .ok()
-                        .and_then(|slot| *slot),
-                });
-        }
-
-        // Keep non-critical persistence off the hot path so release->final latency stays low.
-        let history_manager = Arc::clone(&self.history_manager);
-        let dictionary_manager = Arc::clone(&self.dictionary_manager);
-        let transcript_for_history = inserted_text.clone();
-        let transcript_for_dictionary_preview = inserted_text;
-        let correction_candidates_for_dictionary = correction_candidates;
-        let app_for_history = app.clone();
-        // Rescue records still carry the profile fields, minus insertedText
-        // (nothing landed in the target app).
-        let rescue_polish_meta = PolishHistoryMeta {
-            inserted_text: None,
-            ..polish_meta.clone()
-        };
-        tauri::async_runtime::spawn(async move {
-            // Rescue write only: when insert_text errored before persisting,
-            // keep the transcript anyway so a failed insertion never loses the
-            // user's words. On the happy path insert_text already recorded and
-            // emitted, and recording here again would double every dictation.
-            if !insertion_history_recorded {
-                match history_manager.lock().await.record_transcript_with_polish(
-                    &transcript_for_history,
-                    Some(&rescue_polish_meta),
-                ) {
-                    Ok(_record_id) => {
-                        if let Err(err) = app_for_history.emit_to(
-                            MAIN_WINDOW_LABEL,
-                            "voicewave://history-updated",
-                            (),
-                        ) {
-                            tracing::warn!("history-updated emit failed: {err}");
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("history record failed: {err}");
-                    }
-                }
-            }
-            match dictionary_manager.lock().await.queue_correction_candidates(
-                &correction_candidates_for_dictionary,
-                &transcript_for_dictionary_preview,
-            ) {
-                Ok(added) if added > 0 => {
-                    if let Err(err) = app_for_history.emit_to(
-                        PILL_WINDOW_LABEL,
-                        "voicewave://dictionary-queue-changed",
-                        added,
-                    ) {
-                        tracing::warn!("dictionary-queue-changed emit failed: {err}");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => tracing::warn!("dictionary ingest failed: {err}"),
-            }
-        });
-
-        Ok(())
-    }
-
     async fn is_dictation_active(&self) -> bool {
         matches!(
             self.snapshot.lock().await.state,
@@ -5347,6 +4044,7 @@ impl VoiceWaveController {
             PushPressDecision::LockHandsFree => {
                 session.pending_push_release = false;
                 session.control_mode = DictationControlMode::HandsFree;
+                session.hands_free.store(true, Ordering::Relaxed);
             }
             // The only decision arm that used to be silent, and the one that
             // looks identical to a dead hotkey from the user's side.
@@ -5456,6 +4154,38 @@ impl VoiceWaveController {
         })
     }
 
+    /// A dictation run's HUD update (`None`: not a dictation, published
+    /// as-is). Checked under the lifecycle gate, so no cancel or newer
+    /// session lands between the check and the publish. A replaced run never
+    /// publishes: it would paint over the newer session's pill and release
+    /// its Esc. A cancelled run may still land on Idle, Inserted or Error,
+    /// but never moves the HUD back to Listening or Transcribing.
+    async fn update_run_state(
+        &self,
+        app: &AppHandle,
+        owner: Option<RunOwner<'_>>,
+        state: VoiceWaveHudState,
+        message: Option<String>,
+    ) {
+        let Some(owner) = owner else {
+            return self.update_state(app, state, message).await;
+        };
+        let _gate = self.lifecycle_gate.lock().await;
+        let current = self
+            .active_session
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|session| session.session_id == owner.session_id);
+        let terminal = matches!(
+            state,
+            VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
+        );
+        if current && (terminal || !owner.cancel_token.is_cancelled()) {
+            self.update_state(app, state, message).await;
+        }
+    }
+
     async fn update_state(
         &self,
         app: &AppHandle,
@@ -5481,10 +4211,14 @@ impl VoiceWaveController {
         };
 
         let _ = previous_state;
-        if matches!(
-            state,
-            VoiceWaveHudState::Idle | VoiceWaveHudState::Inserted | VoiceWaveHudState::Error
-        ) {
+        let release_esc = match state {
+            VoiceWaveHudState::Idle | VoiceWaveHudState::Error => true,
+            // A pending spoken Enter keeps Esc until insert_transcript
+            // presses it or the user cancels.
+            VoiceWaveHudState::Inserted => self.submit_pending_session.load(Ordering::SeqCst) == 0,
+            _ => false,
+        };
+        if release_esc {
             self.set_hotkey_dictation_active(false).await;
         }
         // Hotkey cues intentionally do NOT play here: state transitions lag
@@ -5525,19 +4259,26 @@ impl VoiceWaveController {
         match mode {
             DictationMode::Fixture => Ok(InferenceWorker::new_fixture(model_id.to_string())),
             DictationMode::Microphone => {
-                let hint = {
+                let (hint, boost_terms) = {
                     let manager = self.dictionary_manager.lock().await;
                     // Build in ascending priority because hint builder reads terms in reverse:
                     // environment terms < approved dictionary terms. Pending suggestions
                     // are untrusted and must never bias decoding before approval.
                     let mut terms = env_technical_terms();
                     terms.extend(manager.get_terms(None).into_iter().map(|row| row.term));
-                    build_terminology_hint_from_texts(&terms, 10)
+                    // Parakeet has no prompt; the same terms steer its decoder
+                    // instead (plan 021), up to the worker's cap of 200.
+                    let boost_terms = if is_parakeet_model(model_id) {
+                        select_terminology_terms(&terms, 200)
+                    } else {
+                        Vec::new()
+                    };
+                    (build_terminology_hint_from_texts(&terms, 10), boost_terms)
                 };
                 if is_faster_whisper_model(model_id) {
                     if !assume_fw_ready {
                         ensure_faster_whisper_ready().await.map_err(|err| {
-                            ControllerError::Runtime(format!(
+                            ControllerError::EngineStart(format!(
                                 "Faster-Whisper runtime is not ready: {err}. Reinstall the latest beta build or configure the bundled runtime."
                             ))
                         })?;
@@ -5562,6 +4303,7 @@ impl VoiceWaveController {
                         },
                         decode_mode,
                         hint,
+                        boost_terms,
                         self.installed_fw_fallback(model_id).await,
                     ))
                 }
@@ -5616,13 +4358,14 @@ fn percentile_index(len: usize, percentile: f32) -> usize {
     idx.min(len - 1)
 }
 
+mod dictation;
 mod gpu_engine;
 pub use gpu_engine::SpeechEngineStatus;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        asr_integrity_metrics, build_terminology_hint_from_texts, capture_end_policy,
+        asr_integrity_metrics, build_terminology_hint_from_texts,
         clamp_vad_threshold, classify_insertion_target, decode_mode_key, decode_mode_rank,
         derive_correction_candidates, effective_release_watchdog_threshold_ms,
         faster_whisper_download_percent, floor_decode_mode, hands_free_toggle_decision,
@@ -5634,7 +4377,7 @@ mod tests {
         PillNoticePayload, PushPressDecision, PushReleaseDecision, MAX_VAD_THRESHOLD,
         MIN_VAD_THRESHOLD, RECOMMENDED_VAD_THRESHOLD,
     };
-    use crate::audio::{AudioQualityBand, CaptureEndPolicy};
+    use crate::audio::AudioQualityBand;
     use crate::insertion::InsertionMethod;
     use crate::settings::DecodeMode;
     use std::time::Duration;
@@ -5862,32 +4605,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DictationControlMode::HoldToTalk).unwrap(),
             "\"holdToTalk\""
-        );
-    }
-
-    #[test]
-    fn hands_free_capture_auto_finishes_without_dropping_manual_release_tail() {
-        let trailing_silence = Duration::from_millis(1_500);
-        let release_tail = Duration::from_millis(300);
-
-        assert_eq!(
-            capture_end_policy(
-                DictationControlMode::HoldToTalk,
-                trailing_silence,
-                release_tail,
-            ),
-            CaptureEndPolicy::ExplicitStop { release_tail }
-        );
-        assert_eq!(
-            capture_end_policy(
-                DictationControlMode::HandsFree,
-                trailing_silence,
-                release_tail,
-            ),
-            CaptureEndPolicy::EndOnSilence {
-                trailing_silence,
-                release_tail,
-            }
         );
     }
 

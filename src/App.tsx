@@ -31,15 +31,25 @@ import {
   subscribeCloudAuth
 } from "./lib/cloudSync";
 import { firebaseEnabled } from "./lib/firebase";
+import { DEFAULT_PUSH_TO_TALK_HOTKEY, formatHotkey } from "./lib/hotkeys";
 import { applyTheme } from "./lib/theme";
-import { copyTextToClipboard, getSupportContext, openIssueReport, openLogsFolder } from "./lib/tauri";
+import {
+  copyTextToClipboard,
+  getDiagnosticsReport,
+  getSupportContext,
+  openIssueReport,
+  openLogsFolder
+} from "./lib/tauri";
 import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
+import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
+import { HotkeyRecorder } from "./components/HotkeyRecorder";
 import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/Onboarding";
 import { StatsSection } from "./components/StatsSection";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
+import { useAutostart } from "./hooks/useAutostart";
 import { useVoiceWave } from "./hooks/useVoiceWave";
 import { THEMES } from "./prototype/constants";
 import { Dashboard } from "./prototype/components/Dashboard";
@@ -54,6 +64,7 @@ import type {
   MicVolumeGuardMode,
   ModelCatalogItem,
   ModelStatus,
+  ModelTier,
   PolishOutcome,
   PolishProfile,
   RetentionPolicy,
@@ -72,6 +83,13 @@ type AuthMode = "signin" | "signup";
 type SettingsSection = "general" | "audio" | "dictation" | "polish" | "diagnostics" | "advanced" | "updates";
 type DictionarySyncStatus = "device-local" | "syncing" | "synced" | "pending";
 type SnippetSyncStatus = DictionarySyncStatus | "limit-exceeded";
+
+/** Model gate tab titles (display names carry a family suffix instead). */
+const MODEL_TIER_LABEL: Record<ModelTier, string> = {
+  parakeet: "Parakeet",
+  small: "Small",
+  largeTurbo: "Large Turbo"
+};
 
 function snippetErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) {
@@ -464,6 +482,26 @@ function OverlayModal({ title, subtitle, onClose, children, maxWidthClassName = 
   );
 }
 
+/** Settings → Diagnostics and Help: the diagnostics report as plain text,
+ * fetched fresh each time the preview opens. */
+function DiagnosticsPreview({ report, onOpen }: { report: string | null; onOpen: () => void }) {
+  return (
+    <details
+      className="mt-2 text-xs text-faint"
+      onToggle={(event) => {
+        if (event.currentTarget.open) {
+          onOpen();
+        }
+      }}
+    >
+      <summary className="cursor-pointer select-none font-medium text-accent-text">Preview diagnostics</summary>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-edge bg-inset px-3 py-2 font-mono text-[11px] leading-relaxed text-quiet">
+        {report ?? "Loading…"}
+      </pre>
+    </details>
+  );
+}
+
 /** Models page: where dictation runs, the one-time graphics card check, an
  * accepted upgrade in flight, and a nudge to Small when dictation is slow on
  * the processor. A graphics-card model stuck there (the backend's
@@ -617,6 +655,10 @@ function App() {
   // "couldn't open" message.
   const [supportContext, setSupportContext] = useState<SupportContext | null>(null);
   const [supportError, setSupportError] = useState<string | null>(null);
+  // The diagnostics report (preview + "Copy diagnostics"), and the brief
+  // "Copied" state after a copy.
+  const [diagnosticsReport, setDiagnosticsReport] = useState<string | null>(null);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const {
     activeState,
     approveDictionaryQueueEntry,
@@ -631,6 +673,7 @@ function App() {
     exportHistoryPreset,
     exportDiagnosticsBundle,
     historyPolicy,
+    hotkeys,
     inputDevices,
     installModel,
     installAndActivateModel,
@@ -649,6 +692,7 @@ function App() {
     pauseModelInstall,
     pruneHistory,
     refreshPhase3Data,
+    refreshHotkeys,
     refreshInputDevices,
     resumeModelInstall,
     rejectDictionaryQueueEntry,
@@ -671,8 +715,10 @@ function App() {
     setPreferClipboardFallback,
     setSpokenEditCommands,
     setGpuAcceleration,
+    setHotkeyCapture,
+    setPushToTalkHotkey,
     speechEngine,
-    answerUpgradeOffer,
+    answerParakeetOffer,
     removeInstalledModel,
     completeOnboarding,
     restartOnboarding,
@@ -680,6 +726,7 @@ function App() {
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
+    setKeepMicReady,
     setTheme,
     setProPostProcessingEnabled,
     setSessionStarred,
@@ -703,6 +750,7 @@ function App() {
     tauriAvailable,
     updateRetentionPolicy
   } = useVoiceWave();
+  const { enabled: autostartEnabled, setEnabled: setAutostartEnabled } = useAutostart();
 
   const status = useMemo<DictationState>(() => activeState, [activeState]);
   const isRecording = status === "listening" || status === "transcribing";
@@ -751,10 +799,17 @@ function App() {
   const hasInstalledModel = installedModels.length > 0;
   // AI polish (llama.cpp) is built for AVX2 processors.
   const polishUnsupported = speechEngine !== null && speechEngine.cpuSupport !== "full";
-  // This PC's two rows, "Small" and "Large Turbo" (whisper.cpp on GPU-path
-  // machines, faster-whisper elsewhere). Onboarding, the gate and the Models
-  // page all read the same backend catalog.
-  const setupCatalog = useMemo(() => modelCatalog.filter((row) => row.primary), [modelCatalog]);
+  // The rows setup offers on this PC, recommended first: Parakeet where the
+  // speech workers run, then "Small" and "Large Turbo" (whisper.cpp on
+  // GPU-path machines, faster-whisper elsewhere). Onboarding, the gate and the
+  // Models page all read the same backend catalog.
+  const setupCatalog = useMemo(
+    () =>
+      modelCatalog
+        .filter((row) => row.primary)
+        .sort((left, right) => Number(right.recommended) - Number(left.recommended)),
+    [modelCatalog]
+  );
   const cpuUnsupported = speechEngine?.cpuSupport === "unsupported";
   const showOnboarding = tauriAvailable && !settings.onboardingCompleted;
   // The plain model gate stays as the fallback for users who skipped
@@ -769,11 +824,27 @@ function App() {
     !showOnboarding &&
     !showModelSetupGate &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
-  // One-time GPU upgrade notice for existing faster-whisper users (plan 019);
-  // never stacked on the other first-run dialogs.
-  const upgradeOffer = speechEngine?.upgradeOffer ?? null;
-  const showUpgradeNotice =
-    tauriAvailable && !showOnboarding && !showModelSetupGate && !showAnalyticsConsent && upgradeOffer !== null;
+  // Home view: the one-time offer to switch to Parakeet for existing users
+  // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
+  // during first-run flows, and not while another model downloads or a GPU
+  // upgrade accepted before 0.7.5 is still pending. A Parakeet download in
+  // progress keeps the card up so it can show progress and Retry.
+  const parakeetRow = modelCatalog.find((row) => row.tier === "parakeet") ?? null;
+  const otherModelDownloading = Object.values(modelStatuses).some(
+    (row) => row.modelId !== parakeetRow?.modelId && (row.state === "downloading" || row.state === "paused")
+  );
+  const parakeetOffer =
+    tauriAvailable &&
+    !showOnboarding &&
+    !showModelSetupGate &&
+    parakeetRow !== null &&
+    !settings.parakeetOfferAnswered &&
+    settings.activeModel !== parakeetRow.modelId &&
+    !installedModelSet.has(parakeetRow.modelId) &&
+    !otherModelDownloading &&
+    !speechEngine?.pendingUpgrade
+      ? parakeetRow
+      : null;
   // Home view: a graphics-card model stuck on the processor, with the
   // processor model to install (non-modal, dismissible per session).
   const cpuModelOffer =
@@ -1228,6 +1299,13 @@ function App() {
     };
   }, [activeOverlay]);
 
+  const shortcutRowVisible = activeOverlay === "settings" && settingsSection === "dictation";
+  useEffect(() => {
+    if (shortcutRowVisible) {
+      void refreshHotkeys();
+    }
+  }, [refreshHotkeys, shortcutRowVisible]);
+
   const reportRowVisible =
     activeOverlay === "help" || (activeOverlay === "settings" && settingsSection === "diagnostics");
   useEffect(() => {
@@ -1239,13 +1317,39 @@ function App() {
       .catch(() => undefined);
   }, [reportRowVisible, supportContext, tauriAvailable]);
 
-  // Report a problem: Rust builds the GitHub issue URL (version, OS, engine)
-  // and opens the browser; nothing is sent until the user submits on GitHub.
+  // Report a problem: Rust builds the GitHub issue URL with the diagnostics
+  // report in it and opens the browser. Opening the form sends the report to
+  // GitHub; submitting it publishes the issue.
   const reportProblem = () => {
     setSupportError(null);
     void openIssueReport(speechEngineSummary).catch(() =>
       setSupportError("Couldn't open your browser. Report the problem on VoiceWave's GitHub Issues page instead.")
     );
+  };
+
+  // Always fetched fresh: the report includes the latest log warnings.
+  const loadDiagnosticsReport = async () => {
+    const report = await getDiagnosticsReport();
+    setDiagnosticsReport(report);
+    return report;
+  };
+
+  const previewDiagnostics = () => {
+    void loadDiagnosticsReport().catch(() => setDiagnosticsReport("Couldn't load the diagnostics."));
+  };
+
+  const copyDiagnostics = () => {
+    setSupportError(null);
+    void (async () => {
+      try {
+        await copyTextToClipboard(await loadDiagnosticsReport());
+      } catch {
+        setSupportError("Couldn't copy the diagnostics.");
+        return;
+      }
+      setDiagnosticsCopied(true);
+      window.setTimeout(() => setDiagnosticsCopied(false), 1500);
+    })();
   };
 
   const showLogsFolder = () => {
@@ -1553,6 +1657,15 @@ function App() {
                   onDismiss={() => setCpuNoticeDismissed(true)}
                 />
               )}
+              {parakeetOffer && (
+                <ParakeetOffer
+                  model={parakeetOffer}
+                  status={modelStatuses[parakeetOffer.modelId]}
+                  onSwitch={() => void answerParakeetOffer(true)}
+                  onCancel={() => void cancelModelInstall(parakeetOffer.modelId)}
+                  onDecline={() => void answerParakeetOffer(false)}
+                />
+              )}
               <Dashboard
                 theme={theme}
                 status={status}
@@ -1562,7 +1675,7 @@ function App() {
                 partialTranscript={snapshot.lastPartial}
                 finalTranscript={snapshot.lastFinal}
                 recentSentences={recentSentences}
-                pushToTalkHotkey={settings.pushToTalkHotkey}
+                pushToTalkHotkey={formatHotkey(settings.pushToTalkHotkey)}
                 controlMode={snapshot.controlMode}
                 userName={demoProfile?.name}
                 historyOff={historyPolicy === "off"}
@@ -2610,6 +2723,27 @@ function App() {
                       ))}
                     </div>
                   </div>
+
+                  {autostartEnabled !== null && (
+                    <div className="vw-set-row">
+                      <div>
+                        <p className="vw-set-title">Start with Windows</p>
+                        <p className="vw-set-desc">
+                          Open VoiceWave in the tray when you sign in, with the speech model already loaded, so
+                          your first dictation is as fast as any other.
+                        </p>
+                      </div>
+                      <span className="vw-switch">
+                        <input
+                          type="checkbox"
+                          aria-label="Start VoiceWave with Windows"
+                          checked={autostartEnabled}
+                          onChange={(event) => void setAutostartEnabled(event.target.checked)}
+                        />
+                        <span className="vw-switch-track" aria-hidden="true" />
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2642,6 +2776,26 @@ function App() {
                   {inputDevices.length === 0 && (
                     <p className="pb-3 text-xs text-status-danger-text">No input devices detected.</p>
                   )}
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Keep mic ready</p>
+                      <p className="vw-set-desc">
+                        {settings.keepMicReady
+                          ? "Your first word is caught even after a break. Windows shows the microphone-in-use icon while this is on. Audio stays in memory and is thrown away unless you press the hotkey."
+                          : "After each dictation the mic stays on for 2 minutes, then turns off, so a quick follow-up keeps its first word. Turn this on to keep it ready whenever VoiceWave is running."}
+                      </p>
+                    </div>
+                    <span className="vw-switch">
+                      <input
+                        type="checkbox"
+                        aria-label="Keep mic ready"
+                        checked={settings.keepMicReady ?? false}
+                        onChange={(event) => void setKeepMicReady(event.target.checked)}
+                      />
+                      <span className="vw-switch-track" aria-hidden="true" />
+                    </span>
+                  </div>
 
                   <div className="vw-set-row">
                     <div>
@@ -2693,6 +2847,14 @@ function App() {
 
               {settingsSection === "dictation" && (
                 <div>
+                  <HotkeyRecorder
+                    value={settings.pushToTalkHotkey}
+                    defaultValue={DEFAULT_PUSH_TO_TALK_HOTKEY}
+                    registrationError={hotkeys.registrationError}
+                    onSave={setPushToTalkHotkey}
+                    onCaptureChange={setHotkeyCapture}
+                  />
+
                   <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">Permissions</p>
@@ -2949,7 +3111,7 @@ function App() {
                       <p className="vw-set-title">Anonymous usage count (on by default)</p>
                       <p className="vw-set-desc">
                         Helps us count real installs and spot where setup goes wrong. Never audio, transcripts,
-                        or settings. Turn off anytime.
+                        or your other settings. Turn off anytime.
                       </p>
                       <UsageCountDetails />
                     </div>
@@ -3009,11 +3171,30 @@ function App() {
                   )}
 
                   <div className="vw-set-row">
+                    <div className="min-w-0 flex-1">
+                      <p className="vw-set-title">Diagnostics report</p>
+                      <p className="vw-set-desc">
+                        App and Windows versions, speech engine, microphone name and recent warnings, as plain text
+                        to paste anywhere. Never audio or anything you dictated.
+                      </p>
+                      <DiagnosticsPreview report={diagnosticsReport} onOpen={previewDiagnostics} />
+                    </div>
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm shrink-0 self-start"
+                      onClick={copyDiagnostics}
+                      disabled={!tauriAvailable}
+                    >
+                      {diagnosticsCopied ? "Copied" : "Copy diagnostics"}
+                    </button>
+                  </div>
+
+                  <div className="vw-set-row">
                     <div>
                       <p className="vw-set-title">Report a problem</p>
                       <p className="vw-set-desc">
-                        Opens a pre-filled GitHub issue. Attach the bundle above and the latest log file; logs
-                        never contain what you dictated.
+                        Opens a pre-filled GitHub issue that already includes the diagnostics report. Attaching the
+                        bundle above or the latest log file is optional; logs never contain what you dictated.
                       </p>
                       {supportError && <p className="mt-1 text-xs text-status-danger-text">{supportError}</p>}
                     </div>
@@ -3485,8 +3666,9 @@ function App() {
             <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <p className="text-sm font-semibold text-ink-strong">Report a problem</p>
               <p className="mt-1 text-sm text-faint">
-                Opens a pre-filled GitHub issue with your app version, Windows version and speech engine. Nothing
-                is sent until you submit it on GitHub.
+                Opens a pre-filled GitHub issue with the diagnostics report: app and Windows versions, speech
+                engine, microphone name and recent warnings. Opening the form sends these to GitHub to fill
+                it in; submitting it publishes the issue.
               </p>
               {supportContext && (
                 <p className="mt-2 text-xs text-hint">
@@ -3511,11 +3693,19 @@ function App() {
                 >
                   Open logs folder
                 </button>
+                <button
+                  type="button"
+                  className="vw-btn-secondary vw-btn-sm"
+                  onClick={copyDiagnostics}
+                  disabled={!tauriAvailable}
+                >
+                  {diagnosticsCopied ? "Copied" : "Copy diagnostics"}
+                </button>
               </div>
               {supportError && <p className="mt-2 text-xs text-status-danger-text">{supportError}</p>}
+              <DiagnosticsPreview report={diagnosticsReport} onOpen={previewDiagnostics} />
               <p className="mt-3 text-xs text-faint">
-                Attach a diagnostics export (Settings → Diagnostics) and the latest log file if you can. Logs never
-                contain what you dictated.
+                Attaching the latest log file is optional. Logs never contain what you dictated.
               </p>
             </section>
           </div>
@@ -3534,10 +3724,12 @@ function App() {
           inputDevices={inputDevices}
           inputDevice={settings.inputDevice}
           setInputDevice={setInputDevice}
-          hotkeyLabel={settings.pushToTalkHotkey}
+          hotkeyLabel={formatHotkey(settings.pushToTalkHotkey)}
           snapshot={snapshot}
           usageOptIn={settings.anonymousUsageOptIn}
           onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}
+          autostart={autostartEnabled}
+          onAutostartChange={(enabled) => void setAutostartEnabled(enabled)}
           onComplete={() => void completeOnboarding()}
         />
       )}
@@ -3568,43 +3760,6 @@ function App() {
               </button>
               <button type="button" className="vw-btn-secondary" onClick={() => void resolveAnalyticsConsent(false)}>
                 Turn off
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
-
-      {showUpgradeNotice && upgradeOffer && (
-        <div className="vw-model-gate-backdrop">
-          <section
-            className="vw-model-gate-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Faster dictation with your graphics card"
-          >
-            <header>
-              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
-                {upgradeOffer.tier === "largeTurbo"
-                  ? "Your graphics card can make dictation up to 10× faster"
-                  : "Your graphics card can make dictation faster"}
-              </h3>
-              <p className="mt-1 text-sm text-faint">
-                One-time download ({formatBytes(upgradeOffer.sizeBytes)}) of the{" "}
-                {upgradeOffer.tier === "largeTurbo" ? "Large Turbo" : "Small"} model built for your{" "}
-                {speechEngine?.gpuName ?? "graphics card"}.
-              </p>
-            </header>
-            <p className="mt-4 text-sm leading-relaxed text-label">
-              Dictation keeps working as it does now while it downloads. VoiceWave runs a quick check on your
-              graphics card, then switches over. If anything goes wrong you stay on your current model, which also
-              stays installed as a backup.
-            </p>
-            <div className="mt-5 flex flex-wrap items-center gap-2">
-              <button type="button" className="vw-btn-primary" onClick={() => void answerUpgradeOffer(true)}>
-                Download ({formatBytes(upgradeOffer.sizeBytes)})
-              </button>
-              <button type="button" className="vw-btn-secondary" onClick={() => void answerUpgradeOffer(false)}>
-                Not now
               </button>
             </div>
           </section>
@@ -3644,9 +3799,7 @@ function App() {
                   disabled={downloadingSetupModelId !== null}
                 >
                   {row.recommended && <span className="vw-model-gate-badge">Recommended</span>}
-                  <span className="vw-model-gate-tab-title">
-                    {row.tier === "small" ? "Small" : "Large Turbo"}
-                  </span>
+                  <span className="vw-model-gate-tab-title">{MODEL_TIER_LABEL[row.tier]}</span>
                   <span className="vw-model-gate-tab-copy">{row.hardwareNote}</span>
                 </button>
               ))}
@@ -3668,7 +3821,7 @@ function App() {
                 />
               ) : (
                 <button type="button" className="vw-btn-primary" onClick={() => void handleSetupModelInstall()}>
-                  {selectedSetupCatalogRow?.tier === "largeTurbo" ? "Download Large Model" : "Download Small Model"}
+                  {selectedSetupCatalogRow ? `Download ${MODEL_TIER_LABEL[selectedSetupCatalogRow.tier]}` : "Download"}
                 </button>
               )}
             </div>
