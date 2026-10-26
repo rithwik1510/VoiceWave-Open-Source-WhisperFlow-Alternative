@@ -78,9 +78,7 @@ instead. It is a one-time download of about 1 GB and needs a CPU with AVX2.
 3. **First launch** checks your microphone and downloads one speech model, chosen for your PC:
    about 488 MB (Small) up to 1.6 GB (Large Turbo). After that, dictation works offline.
 
-> [!NOTE]
-> `winget install VoiceWave.LocalCore` also works, but the winget listing currently trails the
-> latest release. Use the installer above to get the newest version.
+Or install with `winget install VoiceWave.LocalCore`.
 
 ### Requirements
 
@@ -107,17 +105,24 @@ Wispr Flow details from [wisprflow.ai/pricing](https://wisprflow.ai/pricing), Ap
 
 On by default for new installs since 0.6.1 (existing users were asked once). It helps show whether
 people get through setup and whether dictation works for them. Turn it off during setup or in
-**Settings → Diagnostics**. It is sent through [TelemetryDeck](https://telemetrydeck.com) with a
-random installation ID, the app version and the download channel, and counts only:
+**Settings → Diagnostics**. It is sent through [TelemetryDeck](https://telemetrydeck.com).
+
+Every event carries a random installation ID, the app version, the download channel, and since 0.7.5
+a few coarse facts about the setup: Windows 10 or 11, the GPU vendor (NVIDIA, AMD, Intel or none),
+which speech model family is active, and whether it is running on the GPU or the CPU.
+
+It counts only:
 
 - your first successful dictation, and whether it ran on the GPU or the CPU;
-- one "active today" marker per day;
+- one "active today" marker per day, and one "launched today" marker (started with Windows or by hand);
 - which setup step you reached, and whether setup finished or was skipped;
+- a dictation failing, as a category such as "no speech heard" or "microphone missing";
 - a speech or AI polish model download failing;
-- the GPU engine falling back to the CPU, with a reason category.
+- the GPU engine falling back to the CPU, with a reason category;
+- a speech worker crashing or timing out, or the app hitting an internal error, by area.
 
-It never sends audio, transcript text, dictionary or snippet content, account details, file names
-or settings.
+It never sends audio, transcript text, dictionary or snippet content, error messages, file paths,
+device names, account details or settings.
 
 ## What's new in 0.7.0
 
