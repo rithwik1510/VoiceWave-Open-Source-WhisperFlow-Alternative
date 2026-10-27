@@ -16,9 +16,10 @@ when they can't.
 
 - **Speech model downloads survive a dropped connection.** If the network
   stalls or drops (for example when the PC sleeps), the download waits a
-  moment and picks up from where it stopped, up to three times in a row. It
-  also works behind antivirus or company networks that check secure
-  connections with their own certificate.
+  moment and picks up from where it stopped, for up to about two minutes
+  without progress, which covers a laptop waking from sleep. It also works
+  with antivirus or company networks that check secure connections with
+  their own certificate.
 - **A failed download says why.** Instead of a generic error, you see what
   went wrong (no connection, blocked secure connection, disk full, file held
   by another program) and what to do next.

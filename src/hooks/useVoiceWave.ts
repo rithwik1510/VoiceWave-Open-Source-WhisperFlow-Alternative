@@ -1721,7 +1721,7 @@ export function useVoiceWave() {
             type: "Model.downloadFailed",
             model: kind,
             failureStage: lastStatus?.failureStage ?? undefined,
-            progressBucket: downloadProgressBucket(lastStatus?.progress ?? 0)
+            progressBucket: downloadProgressBucket(lastStatus?.progress ?? 0, lastStatus?.failureStage)
           }).catch(() => undefined);
         }
         // Belt and braces: even if the backend never emitted a terminal status
@@ -2438,7 +2438,7 @@ export function useVoiceWave() {
             type: "Model.downloadFailed",
             model: failedKind,
             failureStage: payload.failureStage ?? undefined,
-            progressBucket: downloadProgressBucket(payload.progress)
+            progressBucket: downloadProgressBucket(payload.progress, payload.failureStage)
           }).catch(() => undefined);
         }
       }));

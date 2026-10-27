@@ -112,8 +112,10 @@ fn is_timeout(err: &io::Error) -> bool {
 
 /// The shared download agent, built on first use: rustls trusting both the
 /// bundled Mozilla roots and the Windows certificate store (antivirus HTTPS
-/// scanning and corporate TLS inspection install their own root there), plus
-/// `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` from the environment.
+/// scanning and corporate TLS inspection install their own root there).
+/// Proxy variables from the environment are deliberately ignored: ureq skips
+/// `NO_PROXY` and has no SOCKS support here, so a dev's `ALL_PROXY` would turn
+/// a working direct download into a confusing "couldn't reach" failure.
 pub(super) fn http_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -122,8 +124,7 @@ pub(super) fn http_agent() -> &'static ureq::Agent {
             // A stall longer than this (sleep, Wi-Fi drop) ends the attempt;
             // `DownloadPlan::run` then resumes from the bytes on disk.
             .timeout_read(Duration::from_secs(30))
-            .user_agent(concat!("voicewave/", env!("CARGO_PKG_VERSION")))
-            .try_proxy_from_env(true);
+            .user_agent(concat!("voicewave/", env!("CARGO_PKG_VERSION")));
         match tls_config() {
             Some(config) => builder.tls_config(config),
             None => builder,

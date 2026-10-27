@@ -360,8 +360,13 @@ export function speechModelKind(modelId: string): SpeechModelKind | null {
   return null;
 }
 
-export function downloadProgressBucket(progress: number): DownloadProgressBucket {
-  if (progress >= 100) {
+export function downloadProgressBucket(
+  progress: number,
+  failureStage?: DownloadFailureStage | null
+): DownloadProgressBucket {
+  // A checksum failure discards the file (progress reads 0), but the whole
+  // file had arrived.
+  if (progress >= 100 || failureStage === "checksum") {
     return "100";
   }
   if (progress >= 75) {

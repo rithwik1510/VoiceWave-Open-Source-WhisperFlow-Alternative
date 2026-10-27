@@ -275,11 +275,15 @@ pub enum DownloadOutcome {
 /// Progress events are throttled: HTTP reads return a few KB at a time.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 /// Waits before each automatic resume after a transient failure; its length
-/// is the retry budget (refilled whenever an attempt makes progress).
-const RETRY_BACKOFF: [Duration; 3] = [
+/// is the retry budget (refilled whenever an attempt makes progress). The
+/// long tail (about two minutes in all) covers a laptop waking from sleep,
+/// where Wi-Fi can take 20 s or more to come back.
+const RETRY_BACKOFF: [Duration; 5] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
     Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
 ];
 
 impl DownloadPlan {
