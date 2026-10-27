@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ## [Unreleased]
 
+## [0.7.6] – 2026-10-27
+
+Speech model downloads now survive a bad connection, and say what went wrong
+when they can't.
+
 ### Fixed
 
 - **Speech model downloads survive a dropped connection.** If the network
