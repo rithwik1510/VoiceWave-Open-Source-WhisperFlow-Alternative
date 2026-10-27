@@ -275,7 +275,8 @@ pub enum DownloadOutcome {
 /// Progress events are throttled: HTTP reads return a few KB at a time.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 /// Waits before each automatic resume after a transient failure; its length
-/// is the retry budget (refilled whenever an attempt makes progress). The
+/// is the retry budget (refilled whenever an attempt gets further than any
+/// before it). The
 /// long tail (about two minutes in all) covers a laptop waking from sleep,
 /// where Wi-Fi can take 20 s or more to come back.
 const RETRY_BACKOFF: [Duration; 5] = [
@@ -293,8 +294,9 @@ impl DownloadPlan {
     ///
     /// Resume is always on. A transient network failure (see
     /// `ModelError::is_transient`) is retried after a short wait, resuming
-    /// from the bytes on disk; the budget refills whenever an attempt makes
-    /// progress, so only a connection that stays down gives up. If a resumed
+    /// from the bytes on disk; the budget refills whenever an attempt gets
+    /// further than any before it, so only a connection that stays down (or
+    /// never gets past where it was) gives up. If a resumed
     /// download fails the hash, the kept bytes were bad (or the server's file
     /// changed), so the partial is discarded and the download restarts from
     /// zero once; a download that still mismatches is quarantined and
@@ -360,13 +362,19 @@ impl DownloadPlan {
     {
         let mut failed_in_a_row = 0_usize;
         let mut restarted_from_zero = false;
+        // Furthest byte any attempt has reached. Only passing it refills the
+        // retry budget: a server that ignores Range restarts each attempt from
+        // zero, and comparing against the previous attempt alone would let
+        // alternating short and long attempts retry forever.
+        let mut furthest = self.checkpoint.downloaded_bytes;
         loop {
             let resumed_from = self.checkpoint.downloaded_bytes;
             let actual = match self.fetch(should_cancel, should_pause, on_progress) {
                 Ok(Some(actual)) => actual,
                 Ok(None) => return Ok(DownloadOutcome::Stopped),
                 Err(err) if err.is_transient() => {
-                    if self.checkpoint.downloaded_bytes > resumed_from {
+                    if self.checkpoint.downloaded_bytes > furthest {
+                        furthest = self.checkpoint.downloaded_bytes;
                         failed_in_a_row = 0;
                     }
                     let Some(&delay) = RETRY_BACKOFF.get(failed_in_a_row) else {
@@ -413,6 +421,7 @@ impl DownloadPlan {
                     "{model_id}: resumed download failed the checksum; restarting from zero"
                 );
                 fs::remove_file(&partial_path).map_err(ModelError::Write)?;
+                furthest = 0;
                 self.checkpoint.last_error = Some(
                     "Saved download data was corrupt; restarting from the beginning.".to_string(),
                 );
@@ -493,12 +502,14 @@ impl DownloadPlan {
 
         let mut hasher = Sha256::new();
         if self.checkpoint.downloaded_bytes > 0 {
-            let kept = fs::File::open(&partial_path).map_err(ModelError::Read)?;
+            // Failing to read our own partial file is a file-access problem
+            // (usually antivirus holding it), reported like a write failure.
+            let kept = fs::File::open(&partial_path).map_err(ModelError::Write)?;
             io::copy(
                 &mut kept.take(self.checkpoint.downloaded_bytes),
                 &mut hasher,
             )
-            .map_err(ModelError::Read)?;
+            .map_err(ModelError::Write)?;
         }
 
         let mut source: Box<dyn Read> =

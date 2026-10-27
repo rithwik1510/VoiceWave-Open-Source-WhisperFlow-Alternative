@@ -61,8 +61,11 @@ impl DownloadFailureStage {
                 "Couldn't reach Hugging Face. Check your internet connection, then try again."
                     .to_string()
             }
-            Self::Tls => "Your security software or network blocked the secure connection to \
-                Hugging Face. Allow VoiceWave in your antivirus or firewall, then try again."
+            // Also what an expired or not-yet-valid certificate looks like, so
+            // a wrong PC clock is named too.
+            Self::Tls => "The secure connection to Hugging Face was refused. Check that your \
+                PC's date and time are right, and allow VoiceWave in your antivirus or \
+                firewall, then try again."
                 .to_string(),
             Self::Http4xx => format!(
                 "Hugging Face refused the download{code}. Try again later; if it keeps \
