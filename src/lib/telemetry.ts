@@ -2,6 +2,7 @@ import TelemetryDeck from "@telemetrydeck/sdk";
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
 import type {
   DictationFailureKind,
+  DownloadFailureStage,
   PanicArea,
   TelemetryEvent,
   WorkerExit,
@@ -21,9 +22,9 @@ export const ANALYTICS_CONSENT_VERSION = 1;
 export const ANONYMOUS_USAGE_DETAILS =
   "A random install ID, a random ID that changes every launch, the app version, a first-use marker and a " +
   "once-a-day active marker, a once-a-day app-launch marker and whether the app started with Windows, setup " +
-  "progress, whether your first dictation ran on the graphics card or the processor, model download failures, " +
-  "graphics-card-to-processor fallbacks, the type of a failed dictation (for example no microphone or a " +
-  "timeout), the type of a speech helper crash, and which part of the app hit an internal error. Each comes " +
+  "progress, whether your first dictation ran on the graphics card or the processor, model download failures " +
+  "(with a failure category and how far the download got), graphics-card-to-processor fallbacks, the type of " +
+  "a failed dictation (for example no microphone or a timeout), the type of a speech helper crash, and which part of the app hit an internal error. Each comes " +
   "with whether speech runs on the graphics card or the processor, the speech model family, the graphics card " +
   "maker, and Windows 10 or 11. Never audio, transcripts, error messages, dictionary or snippet content, " +
   "account identity, device names, filenames, or your other settings.";
@@ -62,7 +63,13 @@ export type FunnelEvent =
   | { type: "Onboarding.stepReached"; step: "welcome" | "mic" | "speak" | "done" }
   | { type: "Onboarding.completed"; outcome: "finished" | "skipped" }
   | { type: "Dictation.firstSuccess"; engine: "gpu" | "cpu" }
-  | { type: "Model.downloadFailed"; model: SpeechModelKind | "polish" }
+  | {
+      type: "Model.downloadFailed";
+      model: SpeechModelKind | "polish";
+      /** Known for whisper.cpp/Parakeet downloads only. */
+      failureStage?: DownloadFailureStage;
+      progressBucket?: DownloadProgressBucket;
+    }
   | {
       type: "Speech.gpuStepDown";
       reason: "preparing" | "cooldown" | "driver-disabled" | "unavailable" | "fault";
@@ -75,6 +82,9 @@ export type FunnelEvent =
 /** Speech engine family. Not GPU vs CPU: Parakeet and whisper.cpp run on
  * either, and the `VoiceWave.Speech.path` context already says which. */
 export type SpeechModelKind = "parakeet" | "whisper-cpp" | "faster-whisper";
+
+/** How far a failed download got, coarse enough to carry no file sizes. */
+export type DownloadProgressBucket = "0" | "1-24" | "25-49" | "50-74" | "75-99" | "100";
 
 let activeClient: { installationId: string; client: SignalClient } | null = null;
 /** Set by `useVoiceWave` via `setTelemetryProviders`. Until then nothing is
@@ -247,10 +257,18 @@ function describeFunnelEvent(event: FunnelEvent): {
     case "Dictation.firstSuccess":
       return { params: { "VoiceWave.Dictation.engine": event.engine }, once: "install", slot: event.type };
     case "Model.downloadFailed":
+      // One per stage per day, so a DNS failure and a later disk-full both
+      // arrive; events without a stage keep their old slot.
       return {
-        params: { "VoiceWave.Model.kind": event.model },
+        params: {
+          "VoiceWave.Model.kind": event.model,
+          ...(event.failureStage && { "VoiceWave.Model.failureStage": event.failureStage }),
+          ...(event.progressBucket && { "VoiceWave.Model.progressBucket": event.progressBucket })
+        },
         once: "utc-day",
-        slot: `${event.type}.${event.model}`
+        slot: event.failureStage
+          ? `${event.type}.${event.model}.${event.failureStage}`
+          : `${event.type}.${event.model}`
       };
     case "Speech.gpuStepDown":
       return {
@@ -340,6 +358,27 @@ export function speechModelKind(modelId: string): SpeechModelKind | null {
     return "faster-whisper";
   }
   return null;
+}
+
+export function downloadProgressBucket(
+  progress: number,
+  failureStage?: DownloadFailureStage | null
+): DownloadProgressBucket {
+  // A checksum failure discards the file (progress reads 0), but the whole
+  // file had arrived.
+  if (progress >= 100 || failureStage === "checksum") {
+    return "100";
+  }
+  if (progress >= 75) {
+    return "75-99";
+  }
+  if (progress >= 50) {
+    return "50-74";
+  }
+  if (progress >= 25) {
+    return "25-49";
+  }
+  return progress >= 1 ? "1-24" : "0";
 }
 
 /** The `VoiceWave.Speech.modelFamily` context value for an active model id. */

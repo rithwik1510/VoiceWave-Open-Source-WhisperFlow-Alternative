@@ -117,7 +117,8 @@ It counts only:
 - one "active today" marker per day, and one "launched today" marker (started with Windows or by hand);
 - which setup step you reached, and whether setup finished or was skipped;
 - a dictation failing, as a category such as "no speech heard" or "microphone missing";
-- a speech or AI polish model download failing;
+- a speech or AI polish model download failing, with a failure category (such as "connection
+  dropped" or "disk full") and how far it got, in quarter steps;
 - the GPU engine falling back to the CPU, with a reason category;
 - a speech worker crashing or timing out, or the app hitting an internal error, by area.
 

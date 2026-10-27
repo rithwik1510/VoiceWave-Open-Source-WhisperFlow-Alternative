@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [Unreleased]
+
+## [0.7.6] – 2026-10-27
+
+Speech model downloads now survive a bad connection, and say what went wrong
+when they can't.
+
+### Fixed
+
+- **Speech model downloads survive a dropped connection.** If the network
+  stalls or drops (for example when the PC sleeps), the download waits a
+  moment and picks up from where it stopped, for up to about two minutes
+  without progress, which covers a laptop waking from sleep. It also works
+  with antivirus or company networks that check secure connections with
+  their own certificate.
+- **A failed download says why.** Instead of a generic error, you see what
+  went wrong (no connection, blocked secure connection, disk full, file held
+  by another program) and what to do next.
+
 ## [0.7.5] – 2026-10-23
 
 Parakeet becomes the default speech model, with your dictionary words built
