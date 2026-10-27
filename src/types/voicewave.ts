@@ -520,6 +520,21 @@ export type ModelStatusState =
   | "failed"
   | "cancelled";
 
+/** Mirrors `DownloadFailureStage` in src-tauri/src/model_manager/net.rs. */
+export type DownloadFailureStage =
+  | "dns"
+  | "connect"
+  | "tls"
+  | "http4xx"
+  | "http5xx"
+  | "timeout"
+  | "streamEnded"
+  | "checksum"
+  | "diskFull"
+  | "write"
+  | "rename"
+  | "other";
+
 export interface ModelStatus {
   modelId: string;
   state: ModelStatusState;
@@ -531,6 +546,8 @@ export interface ModelStatus {
   downloadedBytes?: number | null;
   totalBytes?: number | null;
   resumable: boolean;
+  /** Set only on a failed whisper.cpp/Parakeet download. */
+  failureStage?: DownloadFailureStage | null;
 }
 
 export interface ModelEvent {
@@ -540,6 +557,7 @@ export interface ModelEvent {
   message?: string | null;
   downloadedBytes?: number | null;
   totalBytes?: number | null;
+  failureStage?: DownloadFailureStage | null;
 }
 
 export interface ModelDownloadRequest {

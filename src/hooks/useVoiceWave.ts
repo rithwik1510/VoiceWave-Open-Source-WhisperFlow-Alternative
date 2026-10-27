@@ -92,6 +92,7 @@ import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "
 import {
   ANALYTICS_CONSENT_VERSION,
   classifyGpuStepDown,
+  downloadProgressBucket,
   funnelEventFromTelemetry,
   setTelemetryProviders,
   speechModelFamily,
@@ -1710,11 +1711,18 @@ export function useVoiceWave() {
         const message = modelErr instanceof Error ? modelErr.message : "Model install failed";
         setError(message);
         // The backend usually emitted "failed" already (counted by the model
-        // listener; the per-day dedupe absorbs the repeat). A rejected command
-        // after a cancel is not a failure.
+        // listener; the per-day dedupe absorbs the repeat, since the stage
+        // comes from that same status). A rejected command after a cancel is
+        // not a failure.
         const kind = speechModelKind(modelId);
-        if (kind && modelStatusesRef.current[modelId]?.state !== "cancelled") {
-          void trackFunnelEvent({ type: "Model.downloadFailed", model: kind }).catch(() => undefined);
+        const lastStatus = modelStatusesRef.current[modelId];
+        if (kind && lastStatus?.state !== "cancelled") {
+          void trackFunnelEvent({
+            type: "Model.downloadFailed",
+            model: kind,
+            failureStage: lastStatus?.failureStage ?? undefined,
+            progressBucket: downloadProgressBucket(lastStatus?.progress ?? 0)
+          }).catch(() => undefined);
         }
         // Belt and braces: even if the backend never emitted a terminal status
         // (or the IPC call itself rejected), the row must leave "downloading"
@@ -2420,12 +2428,18 @@ export function useVoiceWave() {
             totalBytes: payload.totalBytes ?? null,
             // ModelEvent carries no `resumable`; faster-whisper downloads never
             // are (no pause/resume in the python runtime).
-            resumable: payload.state !== "installed" && !isFasterWhisperModelId(payload.modelId)
+            resumable: payload.state !== "installed" && !isFasterWhisperModelId(payload.modelId),
+            failureStage: payload.failureStage ?? null
           }
         }));
         const failedKind = payload.state === "failed" ? speechModelKind(payload.modelId) : null;
         if (failedKind) {
-          void trackFunnelEvent({ type: "Model.downloadFailed", model: failedKind }).catch(() => undefined);
+          void trackFunnelEvent({
+            type: "Model.downloadFailed",
+            model: failedKind,
+            failureStage: payload.failureStage ?? undefined,
+            progressBucket: downloadProgressBucket(payload.progress)
+          }).catch(() => undefined);
         }
       }));
 
