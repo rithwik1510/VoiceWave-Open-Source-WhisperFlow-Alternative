@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod net;
+pub use net::DownloadFailureStage;
+
 const FASTER_WHISPER_FORMAT: &str = "faster-whisper";
 const FASTER_WHISPER_VERSION: &str = "faster-whisper-v1";
 const WCPP_FORMAT: &str = "ggml";
@@ -125,6 +128,9 @@ pub struct ModelStatus {
     pub downloaded_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
     pub resumable: bool,
+    /// Set only on a failed whisper.cpp/Parakeet download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<DownloadFailureStage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +148,8 @@ pub struct ModelEvent {
     pub message: Option<String>,
     pub downloaded_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<DownloadFailureStage>,
 }
 
 impl ModelEvent {
@@ -153,6 +161,7 @@ impl ModelEvent {
             message: status.message.clone(),
             downloaded_bytes: status.downloaded_bytes,
             total_bytes: status.total_bytes,
+            failure_stage: status.failure_stage,
         }
     }
 }
@@ -161,10 +170,20 @@ impl ModelEvent {
 pub enum ModelError {
     #[error("unknown model id: {0}")]
     UnknownModel(String),
-    #[error("failed to read model metadata: {0}")]
+    #[error("failed to read model data: {0}")]
     Read(std::io::Error),
-    #[error("failed to write model metadata: {0}")]
+    #[error("failed to write model data: {0}")]
     Write(std::io::Error),
+    /// A failed HTTP request or response body; see `net::classify_*`.
+    #[error("model download failed ({stage}): {detail}")]
+    Network {
+        stage: DownloadFailureStage,
+        http_status: Option<u16>,
+        retryable: bool,
+        detail: String,
+    },
+    #[error("couldn't move the verified model into place: {0}")]
+    Rename(std::io::Error),
     #[error("failed to parse model metadata: {0}")]
     Parse(serde_json::Error),
     #[error("cannot resolve app data directory")]
@@ -217,6 +236,8 @@ struct DownloadCheckpoint {
     total_bytes: u64,
     state: ModelStatusState,
     last_error: Option<String>,
+    #[serde(default)]
+    failure_stage: Option<DownloadFailureStage>,
     updated_at_utc_ms: u64,
 }
 
@@ -253,16 +274,27 @@ pub enum DownloadOutcome {
 
 /// Progress events are throttled: HTTP reads return a few KB at a time.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+/// Waits before each automatic resume after a transient failure; its length
+/// is the retry budget (refilled whenever an attempt makes progress).
+const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
 
 impl DownloadPlan {
     /// Downloads the rest of the artifact into the partial file and checks it
     /// against the pinned SHA-256. Touches no installed model and no manager
     /// state, so it runs without the `model_manager` lock.
     ///
-    /// Resume is always on. If a resumed download fails the hash, the kept
-    /// bytes were bad (or the server's file changed), so the partial is
-    /// discarded and the download restarts from zero once; a fresh download
-    /// that still mismatches is quarantined and reported.
+    /// Resume is always on. A transient network failure (see
+    /// `ModelError::is_transient`) is retried after a short wait, resuming
+    /// from the bytes on disk; the budget refills whenever an attempt makes
+    /// progress, so only a connection that stays down gives up. If a resumed
+    /// download fails the hash, the kept bytes were bad (or the server's file
+    /// changed), so the partial is discarded and the download restarts from
+    /// zero once; a download that still mismatches is quarantined and
+    /// reported.
     pub fn run<F, C, P>(
         &mut self,
         mut should_cancel: C,
@@ -274,12 +306,94 @@ impl DownloadPlan {
         C: FnMut() -> bool,
         P: FnMut() -> bool,
     {
+        let model_id = self.manifest.model_id.clone();
+        let started = Instant::now();
+        let start_offset = self.checkpoint.downloaded_bytes;
+        let total = self.checkpoint.total_bytes;
+        if start_offset > 0 {
+            tracing::info!("{model_id}: resuming download at {start_offset} of {total} bytes");
+        } else {
+            tracing::info!("{model_id}: starting download of {total} bytes");
+        }
+
+        let mut retries = 0_u32;
+        let result = self.run_attempts(
+            &mut retries,
+            &mut should_cancel,
+            &mut should_pause,
+            &mut on_progress,
+        );
+        let done = self.checkpoint.downloaded_bytes;
+        match &result {
+            Ok(DownloadOutcome::Verified { .. }) => tracing::info!(
+                "{model_id}: downloaded and verified {total} bytes in {:.1} s (resumed at {start_offset}, {retries} retries)",
+                started.elapsed().as_secs_f32()
+            ),
+            Ok(DownloadOutcome::Stopped) => tracing::info!(
+                "{model_id}: download {:?} at {done} of {total} bytes",
+                self.checkpoint.state
+            ),
+            Err(err) => tracing::warn!(
+                "{model_id}: download failed (stage {}) at {done} of {total} bytes on attempt {}: {err}",
+                err.failure_stage(),
+                retries + 1
+            ),
+        }
+        result
+    }
+
+    fn run_attempts<F, C, P>(
+        &mut self,
+        retries: &mut u32,
+        should_cancel: &mut C,
+        should_pause: &mut P,
+        on_progress: &mut F,
+    ) -> Result<DownloadOutcome, ModelError>
+    where
+        F: FnMut(ModelStatus),
+        C: FnMut() -> bool,
+        P: FnMut() -> bool,
+    {
+        let mut failed_in_a_row = 0_usize;
+        let mut restarted_from_zero = false;
         loop {
             let resumed_from = self.checkpoint.downloaded_bytes;
-            let Some(actual) =
-                self.fetch(&mut should_cancel, &mut should_pause, &mut on_progress)?
-            else {
-                return Ok(DownloadOutcome::Stopped);
+            let actual = match self.fetch(should_cancel, should_pause, on_progress) {
+                Ok(Some(actual)) => actual,
+                Ok(None) => return Ok(DownloadOutcome::Stopped),
+                Err(err) if err.is_transient() => {
+                    if self.checkpoint.downloaded_bytes > resumed_from {
+                        failed_in_a_row = 0;
+                    }
+                    let Some(&delay) = RETRY_BACKOFF.get(failed_in_a_row) else {
+                        return Err(err);
+                    };
+                    failed_in_a_row += 1;
+                    *retries += 1;
+                    tracing::warn!(
+                        "{}: download interrupted (stage {}) at {} of {} bytes on attempt {}; retry {failed_in_a_row} of {} in {} s: {err}",
+                        self.manifest.model_id,
+                        err.failure_stage(),
+                        self.checkpoint.downloaded_bytes,
+                        self.checkpoint.total_bytes,
+                        *retries,
+                        RETRY_BACKOFF.len(),
+                        delay.as_secs()
+                    );
+                    self.checkpoint.state = ModelStatusState::Downloading;
+                    self.checkpoint.last_error = Some(format!(
+                        "Connection problem, retrying ({failed_in_a_row} of {})…",
+                        RETRY_BACKOFF.len()
+                    ));
+                    self.checkpoint.updated_at_utc_ms = now_utc_ms();
+                    on_progress(status_from_checkpoint(&self.checkpoint, false));
+                    if self.wait_before_retry(delay, should_cancel, should_pause) {
+                        on_progress(status_from_checkpoint(&self.checkpoint, false));
+                        return Ok(DownloadOutcome::Stopped);
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
             };
             if actual == self.manifest.sha256 {
                 return Ok(DownloadOutcome::Verified { sha256: actual });
@@ -289,7 +403,11 @@ impl DownloadPlan {
             let partial_path = PathBuf::from(&self.checkpoint.partial_path);
             self.checkpoint.downloaded_bytes = 0;
             self.checkpoint.updated_at_utc_ms = now_utc_ms();
-            if resumed_from > 0 {
+            if resumed_from > 0 && !restarted_from_zero {
+                restarted_from_zero = true;
+                tracing::warn!(
+                    "{model_id}: resumed download failed the checksum; restarting from zero"
+                );
                 fs::remove_file(&partial_path).map_err(ModelError::Write)?;
                 self.checkpoint.last_error = Some(
                     "Saved download data was corrupt; restarting from the beginning.".to_string(),
@@ -305,17 +423,37 @@ impl DownloadPlan {
                 "checksum-mismatch",
             )?
             .map(|path| path.to_string_lossy().to_string());
-            self.checkpoint.state = ModelStatusState::Failed;
-            self.checkpoint.last_error = Some(format!(
-                "Checksum mismatch (expected {}, got {}). Artifact quarantined.",
-                self.manifest.sha256, actual
-            ));
             return Err(ModelError::ChecksumMismatch {
                 model_id,
                 expected: self.manifest.sha256.clone(),
                 actual,
                 quarantine_path,
             });
+        }
+    }
+
+    /// Waits out a retry backoff in short slices so cancel and pause still
+    /// land promptly. True when one did (recorded in the checkpoint).
+    fn wait_before_retry<C, P>(
+        &mut self,
+        delay: Duration,
+        should_cancel: &mut C,
+        should_pause: &mut P,
+    ) -> bool
+    where
+        C: FnMut() -> bool,
+        P: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + delay;
+        loop {
+            if self.stop_requested(should_cancel, should_pause) {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(200)));
         }
     }
 
@@ -376,11 +514,11 @@ impl DownloadPlan {
                 return Ok(None);
             }
 
-            let read = source.read(&mut buffer).map_err(ModelError::Read)?;
+            let read = source.read(&mut buffer).map_err(|err| match self.source {
+                DownloadSource::Http(_) => net::classify_body_error(err),
+                DownloadSource::File(_) => ModelError::Read(err),
+            })?;
             if read == 0 {
-                self.checkpoint.state = ModelStatusState::Failed;
-                self.checkpoint.last_error =
-                    Some("Source stream ended before expected size.".to_string());
                 return Err(ModelError::CorruptSource {
                     model_id: self.manifest.model_id.clone(),
                     expected: self.checkpoint.total_bytes,
@@ -393,11 +531,6 @@ impl DownloadPlan {
             let next_total = self.checkpoint.downloaded_bytes + read as u64;
             if let Some(limit) = self.max_storage_bytes {
                 if next_total > limit {
-                    self.checkpoint.state = ModelStatusState::Failed;
-                    self.checkpoint.last_error = Some(format!(
-                        "Low disk detected. Needed {next_total} bytes but limit is {limit}."
-                    ));
-                    on_progress(status_from_checkpoint(&self.checkpoint, false));
                     return Err(ModelError::LowDisk {
                         model_id: self.manifest.model_id.clone(),
                         limit,
@@ -406,12 +539,7 @@ impl DownloadPlan {
             }
 
             if let Err(write_err) = partial_file.write_all(&buffer[..read]) {
-                if write_err.kind() == io::ErrorKind::StorageFull
-                    || write_err.raw_os_error() == Some(112)
-                {
-                    self.checkpoint.state = ModelStatusState::Failed;
-                    self.checkpoint.last_error =
-                        Some("Low disk while writing model artifact.".to_string());
+                if net::is_disk_full(&write_err) {
                     return Err(ModelError::LowDisk {
                         model_id: self.manifest.model_id.clone(),
                         limit: next_total,
@@ -424,6 +552,7 @@ impl DownloadPlan {
             self.checkpoint.downloaded_bytes = next_total;
             self.checkpoint.state = ModelStatusState::Downloading;
             self.checkpoint.last_error = None;
+            self.checkpoint.failure_stage = None;
             self.checkpoint.updated_at_utc_ms = now_utc_ms();
             if last_emit.is_none_or(|at| at.elapsed() >= PROGRESS_EMIT_INTERVAL) {
                 on_progress(status_from_checkpoint(&self.checkpoint, false));
@@ -481,17 +610,11 @@ impl DownloadPlan {
                 Ok(Box::new(file))
             }
             DownloadSource::Http(url) => {
-                let agent = ureq::AgentBuilder::new()
-                    .timeout_connect(Duration::from_secs(15))
-                    .timeout_read(Duration::from_secs(30))
-                    .build();
-                let mut request = agent.get(url).set("User-Agent", "voicewave/0.1");
+                let mut request = net::http_agent().get(url);
                 if offset > 0 {
                     request = request.set("Range", &format!("bytes={offset}-"));
                 }
-                let response = request.call().map_err(|err| {
-                    ModelError::Read(io::Error::new(io::ErrorKind::Other, err.to_string()))
-                })?;
+                let response = request.call().map_err(net::classify_request_error)?;
                 if offset > 0 && response.status() != 206 {
                     // A 200 carries the whole file from byte 0.
                     partial_file.set_len(0).map_err(ModelError::Write)?;
@@ -744,6 +867,7 @@ impl ModelManager {
                 downloaded_bytes: None,
                 total_bytes: None,
                 resumable: false,
+                failure_stage: None,
             });
         }
 
@@ -769,6 +893,7 @@ impl ModelManager {
                 .find(|item| item.model_id == model_id)
                 .map(|item| item.size),
             resumable: false,
+            failure_stage: None,
         })
     }
 
@@ -901,10 +1026,11 @@ impl ModelManager {
                 return Ok(status_from_checkpoint(&plan.checkpoint, false));
             }
             Err(err) => {
-                if plan.checkpoint.state != ModelStatusState::Failed {
-                    plan.checkpoint.state = ModelStatusState::Failed;
-                    plan.checkpoint.last_error = Some(err.to_string());
-                }
+                // `run` already logged the raw error; the status gets the
+                // plain message for its stage.
+                plan.checkpoint.state = ModelStatusState::Failed;
+                plan.checkpoint.last_error = Some(err.user_message());
+                plan.checkpoint.failure_stage = Some(err.failure_stage());
                 plan.checkpoint.updated_at_utc_ms = now_utc_ms();
                 self.downloads.insert(model_id, plan.checkpoint);
                 self.persist_downloads()?;
@@ -916,14 +1042,15 @@ impl ModelManager {
         if let Err(err) = fs::rename(&plan.checkpoint.partial_path, &final_path) {
             // The verified partial stays put; a retry re-hashes it and tries
             // the move again without downloading anything.
+            let err = ModelError::Rename(err);
+            tracing::warn!("{model_id}: {err}");
             plan.checkpoint.state = ModelStatusState::Failed;
-            plan.checkpoint.last_error = Some(format!(
-                "Couldn't move the verified model into place: {err}"
-            ));
+            plan.checkpoint.last_error = Some(err.user_message());
+            plan.checkpoint.failure_stage = Some(err.failure_stage());
             plan.checkpoint.updated_at_utc_ms = now_utc_ms();
             self.downloads.insert(model_id, plan.checkpoint);
             self.persist_downloads()?;
-            return Err(ModelError::Write(err));
+            return Err(err);
         }
 
         let installed = InstalledModel {
@@ -956,6 +1083,7 @@ impl ModelManager {
             downloaded_bytes: Some(plan.manifest.size),
             total_bytes: Some(plan.manifest.size),
             resumable: false,
+            failure_stage: None,
         })
     }
 
@@ -1017,6 +1145,7 @@ impl ModelManager {
                     total_bytes: manifest.size,
                     state: ModelStatusState::Idle,
                     last_error: None,
+                    failure_stage: None,
                     updated_at_utc_ms: now_utc_ms(),
                 });
 
@@ -1039,6 +1168,7 @@ impl ModelManager {
         // The partial file's length is the resume point: it is what actually
         // reached disk, whatever the last persisted checkpoint said.
         checkpoint.last_error = None;
+        checkpoint.failure_stage = None;
         if partial_path.exists() {
             let file_size = fs::metadata(&partial_path).map_err(ModelError::Read)?.len();
             if file_size > manifest.size {
@@ -1503,6 +1633,9 @@ fn status_from_checkpoint(checkpoint: &DownloadCheckpoint, active: bool) -> Mode
         downloaded_bytes: Some(checkpoint.downloaded_bytes),
         total_bytes: Some(checkpoint.total_bytes),
         resumable,
+        failure_stage: checkpoint
+            .failure_stage
+            .filter(|_| checkpoint.state == ModelStatusState::Failed),
     }
 }
 

@@ -44,6 +44,12 @@ unicode-normalization = "0.1.24"
 url = "2.5.4"
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 ureq = "2.12.0"
+# Model downloads: ureq's own rustls build trusts only the bundled roots, so
+# the agent gets a config that adds the Windows certificate store. Features
+# match ureq's (ring, no aws-lc) so nothing new is compiled.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 
 [dev-dependencies]
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }

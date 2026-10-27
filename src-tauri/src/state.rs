@@ -517,6 +517,7 @@ fn faster_whisper_cancelled_status(
         downloaded_bytes: Some(downloaded),
         total_bytes: Some(expected_total_bytes.max(1)),
         resumable: false,
+        failure_stage: None,
     }
 }
 
@@ -2969,6 +2970,7 @@ impl VoiceWaveController {
                         downloaded_bytes: Some(downloaded),
                         total_bytes: Some(expected_total_bytes.max(1)),
                         resumable: false,
+                        failure_stage: None,
                     });
                 }
                 let token = CancellationToken::new();
@@ -2987,6 +2989,7 @@ impl VoiceWaveController {
                 downloaded_bytes: Some(0),
                 total_bytes: Some(expected_total_bytes.max(1)),
                 resumable: false,
+                failure_stage: None,
             };
             self.model_statuses
                 .lock()
@@ -3019,6 +3022,7 @@ impl VoiceWaveController {
                         downloaded_bytes: Some(0),
                         total_bytes: Some(expected_total_bytes.max(1)),
                         resumable: false,
+                        failure_stage: None,
                     }
                 };
                 self.model_statuses
@@ -3090,6 +3094,7 @@ impl VoiceWaveController {
                         downloaded_bytes: Some(downloaded),
                         total_bytes: Some(expected_total_bytes.max(1)),
                         resumable: false,
+                        failure_stage: None,
                     };
                     let _ =
                         app_progress.emit("voicewave://model", ModelEvent::from_status(&status));
@@ -3135,6 +3140,7 @@ impl VoiceWaveController {
                             downloaded_bytes: Some(downloaded),
                             total_bytes: Some(expected_total_bytes.max(1)),
                             resumable: false,
+                            failure_stage: None,
                         }
                     };
                     self.model_statuses
@@ -3181,6 +3187,7 @@ impl VoiceWaveController {
                         downloaded_bytes: Some(downloaded),
                         total_bytes: Some(expected_total_bytes.max(1)),
                         resumable: false,
+                        failure_stage: None,
                     };
                     self.model_statuses
                         .lock()
@@ -3216,6 +3223,7 @@ impl VoiceWaveController {
                 downloaded_bytes: Some(expected_total_bytes.max(1)),
                 total_bytes: Some(expected_total_bytes.max(1)),
                 resumable: false,
+                failure_stage: None,
             };
             self.model_statuses
                 .lock()
@@ -3277,35 +3285,49 @@ impl VoiceWaveController {
                     .await
                     .finish_download(plan, outcome)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                // `DownloadPlan::run` logs its own failures; this one never ran.
+                tracing::warn!("{model_id}: couldn't start the download: {err}");
+                Err(err)
+            }
         };
 
         self.model_download_cancels.lock().await.remove(&model_id);
 
         let mut final_status = match result {
             Ok(status) => status,
-            Err(err) => self
-                .model_manager
-                .lock()
-                .await
-                .get_download_status(&model_id, Some(active_model.as_str()))
-                .unwrap_or(ModelStatus {
-                    model_id: model_id.clone(),
-                    state: ModelStatusState::Failed,
-                    progress: latest_progress
-                        .as_ref()
-                        .map(|row| row.progress)
-                        .unwrap_or(0),
-                    active: active_model == model_id,
-                    installed: false,
-                    message: Some(err.to_string()),
-                    installed_model: None,
-                    downloaded_bytes: latest_progress
-                        .as_ref()
-                        .and_then(|row| row.downloaded_bytes),
-                    total_bytes: latest_progress.as_ref().and_then(|row| row.total_bytes),
-                    resumable: true,
-                }),
+            Err(err) => {
+                let mut status = self
+                    .model_manager
+                    .lock()
+                    .await
+                    .get_download_status(&model_id, Some(active_model.as_str()))
+                    .unwrap_or(ModelStatus {
+                        model_id: model_id.clone(),
+                        state: ModelStatusState::Failed,
+                        progress: latest_progress
+                            .as_ref()
+                            .map(|row| row.progress)
+                            .unwrap_or(0),
+                        active: active_model == model_id,
+                        installed: false,
+                        message: None,
+                        installed_model: None,
+                        downloaded_bytes: latest_progress
+                            .as_ref()
+                            .and_then(|row| row.downloaded_bytes),
+                        total_bytes: latest_progress.as_ref().and_then(|row| row.total_bytes),
+                        resumable: true,
+                        failure_stage: None,
+                    });
+                // Whatever the checkpoint last said (an error before the
+                // transfer never reaches `finish_download`), this failed.
+                status.state = ModelStatusState::Failed;
+                status.message = Some(err.user_message());
+                status.failure_stage = Some(err.failure_stage());
+                status.resumable = true;
+                status
+            }
         };
 
         final_status.active = active_model == model_id;
@@ -3415,6 +3437,7 @@ impl VoiceWaveController {
                 downloaded_bytes: Some(0),
                 total_bytes: None,
                 resumable: false,
+                failure_stage: None,
             });
         status.state = ModelStatusState::Cancelled;
         status.message =
@@ -3475,6 +3498,7 @@ impl VoiceWaveController {
                 downloaded_bytes: Some(0),
                 total_bytes: None,
                 resumable: true,
+                failure_stage: None,
             });
         status.state = ModelStatusState::Paused;
         status.message = Some("Pause requested. Resume continues from saved bytes.".to_string());
