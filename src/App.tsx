@@ -40,7 +40,7 @@ import {
   openIssueReport,
   openLogsFolder
 } from "./lib/tauri";
-import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
+import { ANONYMOUS_USAGE_DETAILS, USAGE_COUNT_NOTICE_VERSION } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
@@ -819,11 +819,13 @@ function App() {
   // One-time notice for installs that finished (or skipped) onboarding before
   // usage counting became on-by-default. Onboarding carries its own
   // disclosure, and the model gate goes first so the two never stack.
+  // Gated on the notice's own revision, not ANALYTICS_CONSENT_VERSION:
+  // version 1 users already answered it and wait for the PostHog disclosure.
   const showAnalyticsConsent =
     tauriAvailable &&
     !showOnboarding &&
     !showModelSetupGate &&
-    (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
+    (settings.analyticsConsentVersion ?? 0) < USAGE_COUNT_NOTICE_VERSION;
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU

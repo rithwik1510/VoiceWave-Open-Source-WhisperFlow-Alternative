@@ -15,8 +15,13 @@ const LAST_ACTIVE_DAY_KEY = "voicewave.analytics.last-active-day";
 /** Prefix for the funnel "already sent" markers, one key per dedupe slot. */
 const FUNNEL_KEY_PREFIX = "voicewave.analytics.funnel.";
 /** Mirrors `ANALYTICS_CONSENT_VERSION` in src-tauri/src/settings/mod.rs: the
- * analytics disclosure revision every user must have seen once. */
-export const ANALYTICS_CONSENT_VERSION = 1;
+ * analytics disclosure revision every user must have seen once. 2 = PostHog
+ * (plan 024); the backend sends PostHog events only at this version. */
+export const ANALYTICS_CONSENT_VERSION = 2;
+/** The revision the TelemetryDeck "Anonymous usage count" notice records.
+ * That notice only asks users who have seen none; the PostHog disclosure
+ * moves version 1 to 2. TelemetryDeck sending follows the switch alone. */
+export const USAGE_COUNT_NOTICE_VERSION = 1;
 /** The in-app answer to "what does the anonymous usage count send?". Keep it
  * in step with the events below whenever one is added or changed. */
 export const ANONYMOUS_USAGE_DETAILS =

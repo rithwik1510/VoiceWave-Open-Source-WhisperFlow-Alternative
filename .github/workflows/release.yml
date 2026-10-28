@@ -41,6 +41,10 @@ jobs:
       VIBE_SAFE_TARGET_DIR: C:\vw-target
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VITE_TELEMETRYDECK_APP_ID: ${{ secrets.TELEMETRYDECK_APP_ID }}
+      # PostHog project key (write-only, phc_...), compiled into the release
+      # binary by `option_env!` in src-tauri/src/analytics. Without it the
+      # build sends no PostHog events.
+      VOICEWAVE_POSTHOG_KEY: ${{ secrets.POSTHOG_PROJECT_KEY }}
     steps:
       - name: Checkout at release tag
         uses: actions/checkout@v4

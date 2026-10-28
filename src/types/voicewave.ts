@@ -73,9 +73,12 @@ export interface VoiceWaveSettings {
    * activity, and the setup/reliability funnel (src/lib/telemetry.ts). On by
    * default; the user can turn it off. */
   anonymousUsageOptIn: boolean;
-  /** Analytics disclosure revision the user has seen (0 = never). Below
-   * ANALYTICS_CONSENT_VERSION after onboarding, the app asks once. */
+  /** Analytics disclosure revision the user has seen: 0 = never, 1 = the
+   * TelemetryDeck notice, 2 = the PostHog disclosure (or sharing is off).
+   * PostHog sends only at ANALYTICS_CONSENT_VERSION (src/lib/telemetry.ts). */
   analyticsConsentVersion?: number;
+  /** Unanswered showings of the v2 privacy prompt; it stops asking at 3. */
+  analyticsConsentPromptShows?: number;
   toggleHotkey: string;
   pushToTalkHotkey: string;
   preferClipboardFallback: boolean;
@@ -294,6 +297,12 @@ export type TelemetryEvent =
   | { type: "dictation-failed"; kind: DictationFailureKind }
   | { type: "worker-crashed"; worker: WorkerKind; exit: WorkerExit }
   | { type: "panicked"; area: PanicArea };
+
+/** Plan 024 analytics events the webview sends through `track`. Mirrors
+ * `ClientEvent` in src-tauri/src/analytics/events.rs; the backend drops
+ * anything else. Fixed values and numbers only. */
+export type OnboardingStepName = "welcome" | "mic" | "speak" | "done";
+export type ClientEvent = { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number };
 
 export interface DiagnosticsExportResult {
   filePath: string;

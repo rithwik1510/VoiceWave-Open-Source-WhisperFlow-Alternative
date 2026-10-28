@@ -4,12 +4,7 @@
 
 use super::ModelError;
 use serde::{Deserialize, Serialize};
-use std::{
-    error::Error as _,
-    fmt, io,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{error::Error as _, fmt, io, sync::OnceLock, time::Duration};
 
 /// Where a model download failed. Sent to the frontend and, as the enum name
 /// only, to usage telemetry.
@@ -113,59 +108,18 @@ fn is_timeout(err: &io::Error) -> bool {
     )
 }
 
-/// The shared download agent, built on first use: rustls trusting both the
-/// bundled Mozilla roots and the Windows certificate store (antivirus HTTPS
-/// scanning and corporate TLS inspection install their own root there).
-/// Proxy variables from the environment are deliberately ignored: ureq skips
-/// `NO_PROXY` and has no SOCKS support here, so a dev's `ALL_PROXY` would turn
-/// a working direct download into a confusing "couldn't reach" failure.
+/// The shared download agent, built on first use from `crate::net` (Windows
+/// certificate store trusted, environment proxies ignored).
 pub(super) fn http_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let builder = ureq::AgentBuilder::new()
+        crate::net::agent_builder()
             .timeout_connect(Duration::from_secs(15))
             // A stall longer than this (sleep, Wi-Fi drop) ends the attempt;
             // `DownloadPlan::run` then resumes from the bytes on disk.
             .timeout_read(Duration::from_secs(30))
-            .user_agent(concat!("voicewave/", env!("CARGO_PKG_VERSION")));
-        match tls_config() {
-            Some(config) => builder.tls_config(config),
-            None => builder,
-        }
-        .build()
+            .build()
     })
-}
-
-fn tls_config() -> Option<Arc<rustls::ClientConfig>> {
-    let mut roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let bundled = roots.len();
-    // The loader unwraps a couple of Win32 results; a panic there must not
-    // take every model download down with it.
-    match std::panic::catch_unwind(rustls_native_certs::load_native_certs) {
-        Ok(native) => {
-            let (added, ignored) = roots.add_parsable_certificates(native.certs);
-            for err in &native.errors {
-                tracing::warn!("couldn't read Windows certificate store: {err}");
-            }
-            tracing::info!(
-                "download client trusts {bundled} bundled + {added} Windows roots ({ignored} unparsable)"
-            );
-        }
-        Err(_) => tracing::warn!("Windows certificate store load panicked; using bundled roots"),
-    }
-    // `builder_with_provider`, not `builder()`: no reliance on a process-wide
-    // crypto provider (same choice ureq makes for its own default).
-    let config = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::ring::default_provider().into(),
-    )
-    .with_safe_default_protocol_versions()
-    .map_err(|err| tracing::warn!("custom TLS config unavailable, using ureq defaults: {err}"))
-    .ok()?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    Some(Arc::new(config))
 }
 
 /// Scheme, host and path only: signed CDN redirects carry credentials in the
