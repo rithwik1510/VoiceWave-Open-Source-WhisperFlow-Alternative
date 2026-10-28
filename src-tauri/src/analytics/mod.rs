@@ -77,7 +77,9 @@ struct Core {
     os_major: OsMajor,
     hypervisor: Hypervisor,
     outbox: Mutex<Outbox>,
-    agent: ureq::Agent,
+    /// Built on the first send, off the startup path: reading the Windows
+    /// certificate store for the TLS config can take a noticeable moment.
+    agent: OnceLock<ureq::Agent>,
     /// Held for a whole flush, so the sender thread and the quit-time flush
     /// never send the same entries at once.
     sending: Mutex<()>,
@@ -144,10 +146,7 @@ fn start(api_key: String, identity: Identity, outbox_path: PathBuf) {
         os_major: OsMajor::current(),
         hypervisor: Hypervisor::detect(),
         outbox: Mutex::new(Outbox::load(outbox_path, now_ms)),
-        agent: crate::net::agent_builder()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(10))
-            .build(),
+        agent: OnceLock::new(),
         sending: Mutex::new(()),
         woken: Mutex::new(false),
         wake_signal: Condvar::new(),
@@ -420,8 +419,14 @@ fn flush(core: &Core, deadline: Option<Instant>) {
             None => None,
         };
         let uuids: Vec<String> = batch.iter().map(|entry| entry.uuid.clone()).collect();
+        let agent = core.agent.get_or_init(|| {
+            crate::net::agent_builder()
+                .timeout_connect(Duration::from_secs(10))
+                .timeout_read(Duration::from_secs(10))
+                .build()
+        });
         match posthog::send(
-            &core.agent,
+            agent,
             &core.api_key,
             &core.identity.install_id,
             &batch,
