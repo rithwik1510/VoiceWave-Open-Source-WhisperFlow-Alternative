@@ -64,6 +64,9 @@
       WriteRegStr HKCU "${VW_INSTALL_KEY}" "InstallSourceBy" "${VERSION}"
     ${EndIf}
   ${EndIf}
+  ; A missing value or switch leaves the error flag set; don't hand that to
+  ; whatever the template runs next.
+  ClearErrors
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
