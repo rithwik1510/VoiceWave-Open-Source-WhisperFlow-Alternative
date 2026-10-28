@@ -1499,6 +1499,12 @@ body {
 .vw-onb-card-inner {
   padding: 48px 52px 40px;
   min-height: 460px;
+  /* Short windows (the 700 px minimum, small laptop screens): the done step
+     with the acquisition question is taller than the window, and the
+     backdrop clips. The card scrolls instead. */
+  max-height: calc(100vh - 52px);
+  overflow: hidden auto;
+  scrollbar-width: thin;
   display: flex;
   flex-direction: column;
 }

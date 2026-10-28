@@ -23,6 +23,7 @@ import {
   getSessionHistory,
   getSupportContext,
   insertText,
+  track,
   listenVoicewaveAudioQuality,
   listenVoicewaveHistoryUpdated,
   listenVoicewaveHotkey,
@@ -91,7 +92,6 @@ import { DEFAULT_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY } from "../lib/hotkey
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
 import {
   ANALYTICS_CONSENT_VERSION,
-  USAGE_COUNT_NOTICE_VERSION,
   classifyGpuStepDown,
   downloadProgressBucket,
   funnelEventFromTelemetry,
@@ -1345,12 +1345,15 @@ export function useVoiceWave() {
   // Onboarding shows the analytics disclosure on its first screen, so finishing
   // or skipping it also counts as having seen the notice. Its model step
   // already offers Parakeet, so the existing-user Parakeet card never follows.
-  const completeOnboarding = useCallback(async () => {
+  // `acquisitionAsked`: the done step showed "Where did you hear about
+  // VoiceWave?", so it never shows again.
+  const completeOnboarding = useCallback(async (acquisitionAsked: boolean) => {
     const nextSettings = {
       ...settings,
       onboardingCompleted: true,
       analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
-      parakeetOfferAnswered: true
+      parakeetOfferAnswered: true,
+      acquisitionAsked: settings.acquisitionAsked || acquisitionAsked
     };
     setSettings(nextSettings);
     if (!tauriAvailable) {
@@ -1488,35 +1491,15 @@ export function useVoiceWave() {
     [tauriAvailable]
   );
 
+  // The switch's own description (Settings, onboarding welcome) is the
+  // current disclosure, so turning it on also records it as seen and PostHog
+  // can send. Turning it off keeps the version; the backend purges its outbox.
   const setAnonymousUsageOptIn = useCallback(
-    async (enabled: boolean) => {
-      const nextSettings = { ...settings, anonymousUsageOptIn: enabled };
-      setSettings(nextSettings);
-      if (!tauriAvailable) {
-        return;
-      }
-      try {
-        setSettings(normalizeSettings(await updateSettings(nextSettings)));
-      } catch (persistErr) {
-        setError(
-          persistErr instanceof Error
-            ? persistErr.message
-            : "Failed to update anonymous usage sharing"
-        );
-      }
-    },
-    [settings, tauriAvailable]
-  );
-
-  // Existing-user TelemetryDeck notice: records the choice and marks the
-  // notice seen in one save so it can never show twice. It records its own
-  // revision, so PostHog still waits for the plan 024 disclosure.
-  const resolveAnalyticsConsent = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {
         ...settings,
         anonymousUsageOptIn: enabled,
-        analyticsConsentVersion: USAGE_COUNT_NOTICE_VERSION
+        ...(enabled ? { analyticsConsentVersion: ANALYTICS_CONSENT_VERSION } : {})
       };
       setSettings(nextSettings);
       if (!tauriAvailable) {
@@ -1534,6 +1517,55 @@ export function useVoiceWave() {
     },
     [settings, tauriAvailable]
   );
+
+  // "A quick privacy check" (plan 024): records the choice and the current
+  // disclosure in one save so it never shows again. "Keep sharing" is sent
+  // after the save: on the last allowed showing the backend is off until the
+  // version lands, and would drop it. "Turn off" sends nothing.
+  const resolveAnalyticsConsent = useCallback(
+    async (enabled: boolean) => {
+      const nextSettings = {
+        ...settings,
+        anonymousUsageOptIn: enabled,
+        analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+      };
+      setSettings(nextSettings);
+      if (!tauriAvailable) {
+        return;
+      }
+      try {
+        setSettings(normalizeSettings(await updateSettings(nextSettings)));
+        if (enabled) {
+          void track({ type: "consent_answered", choice: "keep_sharing" });
+        }
+      } catch (persistErr) {
+        setError(
+          persistErr instanceof Error
+            ? persistErr.message
+            : "Failed to update anonymous usage sharing"
+        );
+      }
+    },
+    [settings, tauriAvailable]
+  );
+
+  // Counts a launch that showed the privacy check. At the limit the dialog
+  // stops showing and the backend keeps PostHog off (TelemetryDeck carries on).
+  const noteAnalyticsConsentShown = useCallback(async () => {
+    const nextSettings = {
+      ...settings,
+      analyticsConsentPromptShows: (settings.analyticsConsentPromptShows ?? 0) + 1
+    };
+    setSettings(nextSettings);
+    if (!tauriAvailable) {
+      return;
+    }
+    try {
+      setSettings(normalizeSettings(await updateSettings(nextSettings)));
+    } catch {
+      // Non-fatal: this showing just isn't counted.
+    }
+  }, [settings, tauriAvailable]);
 
   const exportDiagnosticsBundle = useCallback(async () => {
     if (!tauriAvailable) {
@@ -2812,6 +2844,7 @@ export function useVoiceWave() {
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,
+    noteAnalyticsConsentShown,
     setLlmPolishEnabled,
     polishModelProgress,
     setPushToTalkHotkey,

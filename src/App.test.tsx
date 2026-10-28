@@ -563,7 +563,7 @@ describe("App navigation and phase three panels", () => {
     fireEvent.click(within(settingsDialog).getByRole("button", { name: "Diagnostics" }));
     fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Enable diagnostics" }));
     expect(setDiagnosticsOptIn).toHaveBeenCalledWith(true);
-    fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Share anonymous usage count" }));
+    fireEvent.click(within(settingsDialog).getByRole("checkbox", { name: "Share anonymous usage and problem reports" }));
     expect(setAnonymousUsageOptIn).toHaveBeenCalledWith(true);
 
     fireEvent.click(within(settingsDialog).getByRole("button", { name: "Export Diagnostics Bundle" }));

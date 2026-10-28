@@ -79,6 +79,8 @@ export interface VoiceWaveSettings {
   analyticsConsentVersion?: number;
   /** Unanswered showings of the v2 privacy prompt; it stops asking at 3. */
   analyticsConsentPromptShows?: number;
+  /** The onboarding acquisition question was shown and left; never asked again. */
+  acquisitionAsked?: boolean;
   toggleHotkey: string;
   pushToTalkHotkey: string;
   preferClipboardFallback: boolean;
@@ -266,6 +268,8 @@ export interface SupportContext {
   logDir: string;
   /** This process was started with `--autostart` (Windows sign-in). */
   launchedAtLogin: boolean;
+  /** A first install of 0.7.7 or later, not an update of an older one. */
+  isNewInstall: boolean;
 }
 
 /** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
@@ -302,7 +306,28 @@ export type TelemetryEvent =
  * `ClientEvent` in src-tauri/src/analytics/events.rs; the backend drops
  * anything else. Fixed values and numbers only. */
 export type OnboardingStepName = "welcome" | "mic" | "speak" | "done";
-export type ClientEvent = { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number };
+/** Plan 024 section 7, in display order. */
+export type AcquisitionAnswer =
+  | "reddit"
+  | "x"
+  | "youtube"
+  | "github"
+  | "search"
+  | "ai_assistant"
+  | "hacker_news"
+  | "alternativeto"
+  | "saashub"
+  | "devhunt"
+  | "friend"
+  | "winget"
+  | "article"
+  | "other"
+  | "skipped";
+export type ClientEvent =
+  | { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number }
+  | { type: "onboarding_finished"; outcome: "finished" | "skipped"; totalS: number }
+  | { type: "consent_answered"; choice: "keep_sharing" }
+  | { type: "acquisition_answered"; answer: AcquisitionAnswer };
 
 export interface DiagnosticsExportResult {
   filePath: string;
