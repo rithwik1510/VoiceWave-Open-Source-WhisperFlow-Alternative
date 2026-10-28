@@ -11,6 +11,7 @@ pub mod inference;
 pub mod insertion;
 mod job_object;
 pub mod model_manager;
+mod net;
 pub mod permissions;
 pub mod phase1;
 #[cfg(feature = "desktop")]
