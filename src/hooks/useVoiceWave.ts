@@ -91,6 +91,7 @@ import { DEFAULT_PUSH_TO_TALK_HOTKEY, LOCKED_TOGGLE_HOTKEY } from "../lib/hotkey
 import { syncVoiceSnippetsWithCloud as syncVoiceSnippetRecordsWithCloud } from "../lib/snippetSync";
 import {
   ANALYTICS_CONSENT_VERSION,
+  USAGE_COUNT_NOTICE_VERSION,
   classifyGpuStepDown,
   downloadProgressBucket,
   funnelEventFromTelemetry,
@@ -1507,14 +1508,15 @@ export function useVoiceWave() {
     [settings, tauriAvailable]
   );
 
-  // Existing-user consent notice: records the choice and marks the notice
-  // seen in one save so it can never show twice.
+  // Existing-user TelemetryDeck notice: records the choice and marks the
+  // notice seen in one save so it can never show twice. It records its own
+  // revision, so PostHog still waits for the plan 024 disclosure.
   const resolveAnalyticsConsent = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {
         ...settings,
         anonymousUsageOptIn: enabled,
-        analyticsConsentVersion: ANALYTICS_CONSENT_VERSION
+        analyticsConsentVersion: USAGE_COUNT_NOTICE_VERSION
       };
       setSettings(nextSettings);
       if (!tauriAvailable) {

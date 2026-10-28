@@ -16,6 +16,7 @@ import type {
   DictionaryTerm,
   DictationMode,
   AppProfileOverrides,
+  ClientEvent,
   EntitlementSnapshot,
   FormatProfile,
   HotkeyAction,
@@ -403,6 +404,16 @@ export async function getDiagnosticsReport(): Promise<string> {
  * recorded by the previous run. */
 export async function drainTelemetry(): Promise<TelemetryEvent[]> {
   return invokeVoicewave<TelemetryEvent[]>("drain_telemetry");
+}
+
+/** Queues a plan 024 analytics event in the backend, which applies the
+ * consent gate and sends it. Never throws: analytics must not break the UI. */
+export async function track(event: ClientEvent): Promise<void> {
+  try {
+    await invokeVoicewave<void>("track", { event });
+  } catch {
+    // Outside Tauri, or a payload the backend rejected: nothing is sent.
+  }
 }
 
 export async function openLogsFolder(): Promise<void> {
