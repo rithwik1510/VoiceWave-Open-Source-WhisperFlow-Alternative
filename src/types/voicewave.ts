@@ -266,6 +266,8 @@ export interface SupportContext {
   logDir: string;
   /** This process was started with `--autostart` (Windows sign-in). */
   launchedAtLogin: boolean;
+  /** The previous run crashed or panicked (plan 024 section 5). */
+  previousExitUnclean: boolean;
 }
 
 /** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
@@ -302,7 +304,12 @@ export type TelemetryEvent =
  * `ClientEvent` in src-tauri/src/analytics/events.rs; the backend drops
  * anything else. Fixed values and numbers only. */
 export type OnboardingStepName = "welcome" | "mic" | "speak" | "done";
-export type ClientEvent = { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number };
+export type UpdateFailureStage = "download" | "verify" | "install";
+export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | "other";
+export type ClientEvent =
+  | { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number }
+  /** `targetVersion` is sent as `other` unless it's plain `major.minor.patch`. */
+  | { type: "update_failed"; stage: UpdateFailureStage; errorKind: UpdateErrorKind; targetVersion: string };
 
 export interface DiagnosticsExportResult {
   filePath: string;

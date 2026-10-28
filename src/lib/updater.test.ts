@@ -6,7 +6,12 @@ const mocks = vi.hoisted(() => ({
   relaunch: vi.fn()
 }));
 
-vi.mock("./tauri", () => ({ canUseTauri: mocks.canUseTauri }));
+vi.mock("./tauri", () => ({
+  canUseTauri: mocks.canUseTauri,
+  markUpdateInstalling: vi.fn(async () => undefined),
+  clearUpdateInstalling: vi.fn(async () => undefined),
+  track: vi.fn(async () => undefined)
+}));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
 
