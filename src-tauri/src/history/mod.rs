@@ -897,6 +897,7 @@ mod tests {
             transaction_id: "txn-1".to_string(),
             undo_available: false,
             blocked_by_elevation: false,
+            app_kind: None,
         };
         let meta = PolishHistoryMeta {
             selected_profile: Some("coding".to_string()),
