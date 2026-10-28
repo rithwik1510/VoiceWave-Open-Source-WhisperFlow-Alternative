@@ -1181,6 +1181,8 @@ struct SupportContext {
     os_version: String,
     log_dir: String,
     launched_at_login: bool,
+    /// Gates the onboarding acquisition question (plan 024 section 7).
+    is_new_install: bool,
 }
 
 /// This process was started by the "Start with Windows" Run-key entry.
@@ -1199,6 +1201,7 @@ fn get_support_context() -> SupportContext {
             .map(|dir| dir.display().to_string())
             .unwrap_or_default(),
         launched_at_login: launched_at_login(),
+        is_new_install: analytics::is_new_install(),
     }
 }
 

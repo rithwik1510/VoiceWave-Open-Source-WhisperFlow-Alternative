@@ -188,6 +188,10 @@ pub struct VoiceWaveSettings {
     /// PostHog stays off; TelemetryDeck carries on as before.
     #[serde(default)]
     pub analytics_consent_prompt_shows: u32,
+    /// The onboarding "Where did you hear about VoiceWave?" question was
+    /// shown and left (answered or skipped), so it never shows again.
+    #[serde(default)]
+    pub acquisition_asked: bool,
     pub toggle_hotkey: String,
     pub push_to_talk_hotkey: String,
     pub prefer_clipboard_fallback: bool,
@@ -280,6 +284,7 @@ impl Default for VoiceWaveSettings {
             anonymous_usage_opt_in: true,
             analytics_consent_version: 0,
             analytics_consent_prompt_shows: 0,
+            acquisition_asked: false,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
             push_to_talk_hotkey: DEFAULT_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
