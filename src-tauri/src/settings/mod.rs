@@ -166,9 +166,10 @@ pub struct VoiceWaveSettings {
     pub diagnostics_opt_in: bool,
     /// Content-free activated-install analytics. On by default for new
     /// installs; the user can turn it off in onboarding, the one-time consent
-    /// notice, or Settings. The frontend sends only first-use and
-    /// once-per-day active markers tied to a random local identifier;
-    /// transcript/audio/account data never leaves.
+    /// notice, or Settings. One switch for both senders: TelemetryDeck from
+    /// the frontend and PostHog from Rust (`crate::analytics`, which also
+    /// checks `analytics_consent_version`). Both use a random local
+    /// identifier; transcript/audio/account data never leaves.
     ///
     /// FIELD-level `serde(default)` on purpose: a legacy settings file without
     /// this key predates the opt-in entirely, so it must read as `false`
@@ -177,11 +178,16 @@ pub struct VoiceWaveSettings {
     pub anonymous_usage_opt_in: bool,
     /// Which analytics disclosure the user has seen. 0 = never seen (legacy
     /// installs, or a new install that has not finished onboarding); 1 = saw
-    /// the on-by-default notice in onboarding or the existing-user prompt.
-    /// The frontend shows the existing-user prompt while this is below
-    /// `ANALYTICS_CONSENT_VERSION` and onboarding is done.
+    /// the TelemetryDeck notice in onboarding or the existing-user prompt;
+    /// 2 = saw the PostHog disclosure (plan 024), or has sharing off. PostHog
+    /// sends only at `ANALYTICS_CONSENT_VERSION` (see `analytics::set_consent`).
     #[serde(default)]
     pub analytics_consent_version: u32,
+    /// How many times the v2 privacy prompt has been shown without an
+    /// answer. At `ANALYTICS_CONSENT_PROMPT_MAX_SHOWS` it stops asking and
+    /// PostHog stays off; TelemetryDeck carries on as before.
+    #[serde(default)]
+    pub analytics_consent_prompt_shows: u32,
     pub toggle_hotkey: String,
     pub push_to_talk_hotkey: String,
     pub prefer_clipboard_fallback: bool,
@@ -273,6 +279,7 @@ impl Default for VoiceWaveSettings {
             diagnostics_opt_in: false,
             anonymous_usage_opt_in: true,
             analytics_consent_version: 0,
+            analytics_consent_prompt_shows: 0,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
             push_to_talk_hotkey: DEFAULT_PUSH_TO_TALK_HOTKEY.to_string(),
             prefer_clipboard_fallback: false,
@@ -346,13 +353,21 @@ impl SettingsStore {
         normalize_hotkey_bindings(&mut settings);
         normalize_pro_settings(&mut settings);
         migrate_analytics_consent(&mut settings);
+        crate::analytics::apply_settings(&settings);
         Ok(settings)
     }
 
     pub fn save(&self, settings: &VoiceWaveSettings) -> Result<(), SettingsError> {
         let raw = serde_json::to_string_pretty(settings).map_err(SettingsError::Parse)?;
         atomic_file::atomic_write(&self.path, raw.as_bytes()).map_err(SettingsError::Write)?;
+        // Every settings write passes here, so turning sharing off reaches
+        // the analytics gate (and purges its outbox) at once.
+        crate::analytics::apply_settings(settings);
         Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -399,19 +414,28 @@ pub fn normalize_pro_settings(settings: &mut VoiceWaveSettings) {
 }
 
 /// Current analytics disclosure revision. Bump only when what is collected
-/// changes enough that every user should be asked again.
-pub const ANALYTICS_CONSENT_VERSION: u32 = 1;
+/// changes enough that every user should be asked again. 2 = PostHog (plan
+/// 024).
+pub const ANALYTICS_CONSENT_VERSION: u32 = 2;
+/// Unanswered showings of the v2 prompt before it stops asking.
+pub const ANALYTICS_CONSENT_PROMPT_MAX_SHOWS: u32 = 3;
 
-/// Before analytics became on-by-default, `true` could only come from the user
-/// flipping the Settings switch, so a finished-onboarding install holding
-/// `true` already gave explicit consent: mark the notice as seen instead of
-/// nagging. A stored `false` is left alone and the frontend asks once.
+/// Moves older consent states to where plan 024 needs them:
+/// - Sharing off: nothing is sent under any version, so there's nothing to
+///   ask. Straight to the current version, still off.
+/// - On, onboarding done, never saw a notice: before analytics became
+///   on-by-default, `true` could only come from the user flipping the
+///   Settings switch, so that's explicit consent to the v1 notice. Version 1,
+///   so the v2 prompt still asks before PostHog sends.
+/// - On at version 1 stays at 1 until the v2 prompt is answered.
 fn migrate_analytics_consent(settings: &mut VoiceWaveSettings) {
-    if settings.analytics_consent_version < ANALYTICS_CONSENT_VERSION
-        && settings.onboarding_completed
-        && settings.anonymous_usage_opt_in
-    {
+    if settings.analytics_consent_version >= ANALYTICS_CONSENT_VERSION {
+        return;
+    }
+    if !settings.anonymous_usage_opt_in {
         settings.analytics_consent_version = ANALYTICS_CONSENT_VERSION;
+    } else if settings.onboarding_completed && settings.analytics_consent_version == 0 {
+        settings.analytics_consent_version = 1;
     }
 }
 

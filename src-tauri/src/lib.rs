@@ -1,3 +1,6 @@
+// Not desktop-gated: settings (also in core builds) feed its consent gate.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
+mod analytics;
 mod atomic_file;
 pub mod audio;
 pub mod benchmark;
@@ -2415,6 +2418,9 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         .setup(|app| {
+            // First, before anything can save settings: analytics tells a
+            // pre-0.7.7 install from a new one by whether they existed.
+            analytics::init();
             // The main window is created hidden (tauri.conf.json) so a login
             // launch never flashes it. Normal launches show it straight away.
             telemetry::attach(app.handle().clone());
@@ -2429,6 +2435,19 @@ pub fn run() {
                     .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
             );
             let initial_settings = tauri::async_runtime::block_on(controller.load_settings());
+
+            // Startup analytics, once settings (the consent gate) are loaded.
+            // The engine status comes first so `app_launched` carries the
+            // speech context.
+            let controller_for_analytics = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                controller_for_analytics.speech_engine_status().await;
+                analytics::capture_launch(if launched_at_login {
+                    analytics::LaunchMode::Autostart
+                } else {
+                    analytics::LaunchMode::Manual
+                });
+            });
 
             let controller_for_hotkeys = controller.clone();
             let app_handle = app.handle().clone();
@@ -2576,6 +2595,7 @@ pub fn run() {
             get_diagnostics_report,
             open_issue_report,
             telemetry::drain_telemetry,
+            analytics::track,
             open_logs_folder,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
@@ -2654,6 +2674,7 @@ pub fn run() {
             // not just the tray Quit item.
             if matches!(event, tauri::RunEvent::Exit) {
                 shutdown_inference_workers();
+                analytics::flush_on_exit();
             }
         });
 }

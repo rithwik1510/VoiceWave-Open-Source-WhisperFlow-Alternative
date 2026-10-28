@@ -138,10 +138,17 @@ impl VoiceWaveController {
             None
         };
 
+        let gpu_vendor = hardware.gpu.as_ref().map(|device| device.vendor());
+        crate::analytics::note_speech_engine(
+            gpu_vendor,
+            running_on.as_ref().map(|running| running.device),
+            preparing,
+        );
+
         SpeechEngineStatus {
             cpu_support: hardware.cpu,
             gpu_name: hardware.gpu.as_ref().map(|device| device.name.clone()),
-            gpu_vendor: hardware.gpu.as_ref().map(|device| device.vendor()),
+            gpu_vendor,
             recommended_model_id: hardware.recommended_model_id().to_string(),
             running_on,
             preparing,
