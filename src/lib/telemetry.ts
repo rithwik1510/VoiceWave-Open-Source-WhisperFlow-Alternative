@@ -16,23 +16,28 @@ const LAST_ACTIVE_DAY_KEY = "voicewave.analytics.last-active-day";
 const FUNNEL_KEY_PREFIX = "voicewave.analytics.funnel.";
 /** Mirrors `ANALYTICS_CONSENT_VERSION` in src-tauri/src/settings/mod.rs: the
  * analytics disclosure revision every user must have seen once. 2 = PostHog
- * (plan 024); the backend sends PostHog events only at this version. */
+ * (plan 024); the backend sends PostHog events only at this version.
+ * TelemetryDeck sending follows the switch alone. */
 export const ANALYTICS_CONSENT_VERSION = 2;
-/** The revision the TelemetryDeck "Anonymous usage count" notice records.
- * That notice only asks users who have seen none; the PostHog disclosure
- * moves version 1 to 2. TelemetryDeck sending follows the switch alone. */
-export const USAGE_COUNT_NOTICE_VERSION = 1;
-/** The in-app answer to "what does the anonymous usage count send?". Keep it
- * in step with the events below whenever one is added or changed. */
+/** Mirrors `ANALYTICS_CONSENT_PROMPT_MAX_SHOWS` in src-tauri/src/settings/mod.rs:
+ * launches that may show "A quick privacy check" without an answer. */
+export const ANALYTICS_CONSENT_PROMPT_MAX_SHOWS = 3;
+/** The in-app answer to "what's sent?" (plan 024 section 8.3), for PostHog
+ * events from src-tauri/src/analytics and the TelemetryDeck ones below. Keep
+ * it in step whenever an event is added or changed. */
 export const ANONYMOUS_USAGE_DETAILS =
-  "A random install ID, a random ID that changes every launch, the app version, a first-use marker and a " +
-  "once-a-day active marker, a once-a-day app-launch marker and whether the app started with Windows, setup " +
-  "progress, whether your first dictation ran on the graphics card or the processor, model download failures " +
-  "(with a failure category and how far the download got), graphics-card-to-processor fallbacks, the type of " +
-  "a failed dictation (for example no microphone or a timeout), the type of a speech helper crash, and which part of the app hit an internal error. Each comes " +
-  "with whether speech runs on the graphics card or the processor, the speech model family, the graphics card " +
-  "maker, and Windows 10 or 11. Never audio, transcripts, error messages, dictionary or snippet content, " +
-  "account identity, device names, filenames, or your other settings.";
+  "A random install ID and a random ID for each launch; the app version; Windows 10 or 11; your graphics card " +
+  "maker; whether speech runs on the graphics card or the processor and which model family; how you installed " +
+  "VoiceWave (winget, Scoop, a direct download, or unknown) and how many days ago; whether the PC is a virtual " +
+  "machine. Events: installed, launched (and whether the last run ended normally, crashed, or was cut off by a " +
+  "restart or an update), setup steps, your first dictation, and once for each day you dictate: how many " +
+  "dictations worked, came back empty or failed, how fast text appeared, how long you spoke, how many words were " +
+  "inserted, how the text got in, and how many went into each kind of app (browser, code editor, terminal, chat, " +
+  "office, notes, AI app, or other). Also failed dictations by type, speech helper crashes by cause, model " +
+  "downloads and how they ended, graphics card to processor fallbacks, failed updates, shortcut setup problems, " +
+  "internal errors by area, and your answers to \"Where did you hear about VoiceWave?\" and \"Something wrong?\" if " +
+  "you give them. Never audio, transcripts, dictionary or snippet content, window titles, app names, file paths, " +
+  "device names, error messages, account details, or your IP address.";
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";
 
 type SignalClient = {

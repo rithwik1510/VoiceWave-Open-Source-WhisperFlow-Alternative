@@ -40,7 +40,7 @@ import {
   openIssueReport,
   openLogsFolder
 } from "./lib/tauri";
-import { ANONYMOUS_USAGE_DETAILS, USAGE_COUNT_NOTICE_VERSION } from "./lib/telemetry";
+import { ANALYTICS_CONSENT_PROMPT_MAX_SHOWS, ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
@@ -723,6 +723,7 @@ function App() {
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,
+    noteAnalyticsConsentShown,
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
@@ -816,16 +817,27 @@ function App() {
   // onboarding without installing a model; it hides while the flow is up.
   const showModelSetupGate =
     tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
-  // One-time notice for installs that finished (or skipped) onboarding before
-  // usage counting became on-by-default. Onboarding carries its own
-  // disclosure, and the model gate goes first so the two never stack.
-  // Gated on the notice's own revision, not ANALYTICS_CONSENT_VERSION:
-  // version 1 users already answered it and wait for the PostHog disclosure.
+  // "A quick privacy check" (plan 024): users sharing under an older
+  // disclosure (the settings migration leaves them below version 2) see it
+  // after onboarding. The model gate goes first so the two never stack.
+  // Sharing off needs no check: nothing is sent. After
+  // ANALYTICS_CONSENT_PROMPT_MAX_SHOWS unanswered launches it stops asking.
+  // Once shown, it stays up this launch until answered, even though
+  // counting the showing may reach the limit.
+  const [analyticsConsentShown, setAnalyticsConsentShown] = useState(false);
   const showAnalyticsConsent =
     tauriAvailable &&
     !showOnboarding &&
     !showModelSetupGate &&
-    (settings.analyticsConsentVersion ?? 0) < USAGE_COUNT_NOTICE_VERSION;
+    settings.anonymousUsageOptIn &&
+    (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION &&
+    (analyticsConsentShown || (settings.analyticsConsentPromptShows ?? 0) < ANALYTICS_CONSENT_PROMPT_MAX_SHOWS);
+  useEffect(() => {
+    if (showAnalyticsConsent && !analyticsConsentShown) {
+      setAnalyticsConsentShown(true);
+      void noteAnalyticsConsentShown();
+    }
+  }, [analyticsConsentShown, noteAnalyticsConsentShown, showAnalyticsConsent]);
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU
@@ -1311,13 +1323,14 @@ function App() {
   const reportRowVisible =
     activeOverlay === "help" || (activeOverlay === "settings" && settingsSection === "diagnostics");
   useEffect(() => {
-    if (!reportRowVisible || !tauriAvailable || supportContext) {
+    // Onboarding needs `isNewInstall` for the acquisition question.
+    if (!(reportRowVisible || showOnboarding) || !tauriAvailable || supportContext) {
       return;
     }
     void getSupportContext()
       .then(setSupportContext)
       .catch(() => undefined);
-  }, [reportRowVisible, supportContext, tauriAvailable]);
+  }, [reportRowVisible, showOnboarding, supportContext, tauriAvailable]);
 
   // Report a problem: Rust builds the GitHub issue URL with the diagnostics
   // report in it and opens the browser. Opening the form sends the report to
@@ -3110,17 +3123,17 @@ function App() {
                 <div>
                   <div className="vw-set-row">
                     <div>
-                      <p className="vw-set-title">Anonymous usage count (on by default)</p>
+                      <p className="vw-set-title">Anonymous usage and problem reports</p>
                       <p className="vw-set-desc">
-                        Helps us count real installs and spot where setup goes wrong. Never audio, transcripts,
-                        or your other settings. Turn off anytime.
+                        How setup, dictation, downloads and updates go for you, with a random ID. Never audio,
+                        transcripts or app names.
                       </p>
                       <UsageCountDetails />
                     </div>
                     <span className="vw-switch">
                       <input
                         type="checkbox"
-                        aria-label="Share anonymous usage count"
+                        aria-label="Share anonymous usage and problem reports"
                         checked={settings.anonymousUsageOptIn}
                         onChange={(event) => void setAnonymousUsageOptIn(event.target.checked)}
                       />
@@ -3732,38 +3745,48 @@ function App() {
           onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}
           autostart={autostartEnabled}
           onAutostartChange={(enabled) => void setAutostartEnabled(enabled)}
-          onComplete={() => void completeOnboarding()}
+          askAcquisition={
+            (supportContext?.isNewInstall ?? false) &&
+            settings.anonymousUsageOptIn &&
+            !settings.acquisitionAsked
+          }
+          onComplete={(acquisitionAsked) => void completeOnboarding(acquisitionAsked)}
         />
       )}
 
       {showAnalyticsConsent && (
         <div className="vw-model-gate-backdrop">
-          <section
-            className="vw-model-gate-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Anonymous usage count"
-          >
+          <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Privacy check">
             <header>
-              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
-                Anonymous usage count
-              </h3>
+              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">A quick privacy check</h3>
               <p className="mt-1 text-sm text-faint">
-                VoiceWave now counts active installs by default, so we know how many people use it and where
-                setup goes wrong.
+                VoiceWave 0.7.7 sends a little more about how the app is working for you, so we can find and fix
+                problems. It is anonymous: a random ID, never your name or account.
               </p>
             </header>
             <p className="mt-4 text-sm leading-relaxed text-label">
-              It sends: {ANONYMOUS_USAGE_DETAILS} You can change this anytime in Settings → Diagnostics.
+              Each day you use it: how many dictations worked or failed, how fast text appeared, and the kind of
+              app it went into (such as a browser or a code editor, never its name). Also setup progress, model
+              downloads, updates, crashes and your answers to our two optional questions.
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-label">
+              Never sent: audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
+              device names, error messages, or your IP address.
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-2">
-              <button type="button" className="vw-btn-primary" onClick={() => void resolveAnalyticsConsent(true)}>
-                Keep on
+              <button
+                type="button"
+                className="vw-btn-primary"
+                autoFocus
+                onClick={() => void resolveAnalyticsConsent(true)}
+              >
+                Keep sharing
               </button>
               <button type="button" className="vw-btn-secondary" onClick={() => void resolveAnalyticsConsent(false)}>
                 Turn off
               </button>
             </div>
+            <p className="mt-4 text-xs text-faint">You can change this anytime in Settings → Diagnostics.</p>
           </section>
         </div>
       )}

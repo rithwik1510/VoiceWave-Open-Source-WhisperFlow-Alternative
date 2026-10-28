@@ -205,6 +205,9 @@ fn enqueue(event: AnalyticsEvent) -> bool {
             }),
         );
     }
+    if let AnalyticsEvent::AcquisitionAnswered { answer } = event {
+        properties.insert("$set_once".to_string(), json!({ "acquisition": answer }));
+    }
     properties.extend(base);
     lock(&core.outbox).push(
         OutboxEntry {
@@ -237,6 +240,16 @@ pub fn capture_launch(launch_mode: LaunchMode) {
         identity::mark_app_installed_queued();
     }
     enqueue(AnalyticsEvent::AppLaunched { launch_mode });
+}
+
+/// A first install of 0.7.7 or later, not an older install that updated
+/// (plan 3.2). Without a project key the identity isn't loaded, so this falls
+/// back to whether settings existed when this launch started.
+pub fn is_new_install() -> bool {
+    CORE.get().map_or_else(
+        || !identity::note_settings_existed_at_launch(),
+        |core| !core.identity.first_seen_estimated,
+    )
 }
 
 /// Applies the consent gate (plan 3.8). Turning sharing off deletes the
