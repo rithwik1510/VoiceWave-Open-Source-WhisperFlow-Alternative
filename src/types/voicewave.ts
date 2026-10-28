@@ -270,6 +270,8 @@ export interface SupportContext {
   launchedAtLogin: boolean;
   /** A first install of 0.7.7 or later, not an update of an older one. */
   isNewInstall: boolean;
+  /** The previous run crashed or panicked (plan 024 section 5). */
+  previousExitUnclean: boolean;
 }
 
 /** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
@@ -323,11 +325,15 @@ export type AcquisitionAnswer =
   | "article"
   | "other"
   | "skipped";
+export type UpdateFailureStage = "download" | "verify" | "install";
+export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | "other";
 export type ClientEvent =
   | { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number }
   | { type: "onboarding_finished"; outcome: "finished" | "skipped"; totalS: number }
   | { type: "consent_answered"; choice: "keep_sharing" }
-  | { type: "acquisition_answered"; answer: AcquisitionAnswer };
+  | { type: "acquisition_answered"; answer: AcquisitionAnswer }
+  /** `targetVersion` is sent as `other` unless it's plain `major.minor.patch`. */
+  | { type: "update_failed"; stage: UpdateFailureStage; errorKind: UpdateErrorKind; targetVersion: string };
 
 export interface DiagnosticsExportResult {
   filePath: string;

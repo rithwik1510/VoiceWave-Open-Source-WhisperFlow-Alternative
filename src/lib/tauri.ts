@@ -416,6 +416,26 @@ export async function track(event: ClientEvent): Promise<void> {
   }
 }
 
+/** Records that the updater is about to install `targetVersion`, so the next
+ * launch can tell whether it landed. Never throws: an update must not fail
+ * over its own bookkeeping. */
+export async function markUpdateInstalling(targetVersion: string): Promise<void> {
+  try {
+    await invokeVoicewave<void>("mark_update_installing", { targetVersion });
+  } catch {
+    // Outside Tauri, or a version that isn't plain semver: nothing recorded.
+  }
+}
+
+/** The update threw before the installer took over. Never throws. */
+export async function clearUpdateInstalling(): Promise<void> {
+  try {
+    await invokeVoicewave<void>("clear_update_installing");
+  } catch {
+    // Outside Tauri: nothing was recorded.
+  }
+}
+
 export async function openLogsFolder(): Promise<void> {
   await invokeVoicewave<void>("open_logs_folder");
 }

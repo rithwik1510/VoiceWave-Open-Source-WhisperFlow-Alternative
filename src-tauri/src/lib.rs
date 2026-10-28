@@ -21,6 +21,9 @@ pub mod phase1;
 mod pill_hit_target;
 mod secure_store;
 pub mod settings;
+// Not desktop-gated: the panic hook in `support` marks the session file.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod session;
 pub mod snippet;
 pub mod stats;
 // Not desktop-gated: the inference workers record telemetry and redact
@@ -1183,6 +1186,9 @@ struct SupportContext {
     launched_at_login: bool,
     /// Gates the onboarding acquisition question (plan 024 section 7).
     is_new_install: bool,
+    /// The previous run crashed or panicked (plan 024 section 5), for the
+    /// unclean-exit banner. Independent of the analytics switch.
+    previous_exit_unclean: bool,
 }
 
 /// This process was started by the "Start with Windows" Run-key entry.
@@ -1202,7 +1208,28 @@ fn get_support_context() -> SupportContext {
             .unwrap_or_default(),
         launched_at_login: launched_at_login(),
         is_new_install: analytics::is_new_install(),
+        previous_exit_unclean: session::previous().unclean(),
     }
+}
+
+/// The updater is about to download and install `target_version`, so the
+/// next launch can tell whether it landed (plan 024 section 5).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn mark_update_installing(target_version: String) -> Result<(), String> {
+    let target = analytics::Semver::parse(&target_version);
+    if !target.is_valid() {
+        return Err(format!("not a release version: {target_version}"));
+    }
+    session::mark_update_installing(target);
+    Ok(())
+}
+
+/// The update threw before the installer took over.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn clear_update_installing() {
+    session::clear_update_installing();
 }
 
 /// Gathers the diagnostics report's setup facts (see
@@ -2392,6 +2419,8 @@ pub fn run() {
     // runs after main()'s single-instance claim, so a second launch that
     // exits there never opens or rotates the log.
     support::init();
+    // Before anything else can fail: how the previous run ended.
+    session::start();
 
     tauri::Builder::default()
         // Single instance: two event-driven keyboard hooks would BOTH capture
@@ -2438,6 +2467,7 @@ pub fn run() {
                     .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
             );
             let initial_settings = tauri::async_runtime::block_on(controller.load_settings());
+            session::set_phase(analytics::SessionPhase::Idle);
 
             // Startup analytics, once settings (the consent gate) are loaded.
             // The engine status comes first so `app_launched` carries the
@@ -2445,11 +2475,14 @@ pub fn run() {
             let controller_for_analytics = controller.clone();
             tauri::async_runtime::spawn(async move {
                 controller_for_analytics.speech_engine_status().await;
-                analytics::capture_launch(if launched_at_login {
-                    analytics::LaunchMode::Autostart
-                } else {
-                    analytics::LaunchMode::Manual
-                });
+                analytics::capture_launch(
+                    if launched_at_login {
+                        analytics::LaunchMode::Autostart
+                    } else {
+                        analytics::LaunchMode::Manual
+                    },
+                    &session::previous(),
+                );
             });
 
             let controller_for_hotkeys = controller.clone();
@@ -2599,6 +2632,8 @@ pub fn run() {
             open_issue_report,
             telemetry::drain_telemetry,
             analytics::track,
+            mark_update_installing,
+            clear_update_installing,
             open_logs_folder,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
@@ -2677,6 +2712,7 @@ pub fn run() {
             // not just the tray Quit item.
             if matches!(event, tauri::RunEvent::Exit) {
                 shutdown_inference_workers();
+                session::clear();
                 analytics::flush_on_exit();
             }
         });

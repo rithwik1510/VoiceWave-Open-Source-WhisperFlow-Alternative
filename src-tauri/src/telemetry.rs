@@ -7,7 +7,14 @@
 //! before the frontend's listener exists wait in the queue for its startup
 //! `drain_telemetry`; panics wait in `panics.log` (see `support`) because the
 //! process may not survive them.
+//!
+//! Each fact recorded here also goes to PostHog analytics (plan 024) as the
+//! matching `AnalyticsEvent`, so it's recorded once in code and reaches both.
+//! Fields marked `skip_serializing` are for analytics only: the TelemetryDeck
+//! payloads stay exactly as they were.
 
+use crate::analytics::{self, AnalyticsEvent, DictationFact};
+use crate::insertion::AppKind;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
@@ -26,10 +33,16 @@ static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 pub enum TelemetryEvent {
     DictationFailed {
         kind: DictationFailureKind,
+        /// Analytics only, for `kind = insert` (plan 4.5).
+        #[serde(skip_serializing)]
+        app_kind: Option<AppKind>,
     },
     WorkerCrashed {
         worker: WorkerKind,
         exit: WorkerExit,
+        /// Analytics only (plan 4.4).
+        #[serde(skip_serializing)]
+        cause: WorkerCause,
     },
     Panicked {
         area: PanicArea,
@@ -79,6 +92,62 @@ pub enum WorkerExit {
     /// Never came up: executable or runtime missing, launch failed, or no
     /// ready line.
     SpawnFailed,
+}
+
+/// Why a speech helper died, classified on the PC from its exit code and
+/// stderr (plan 4.4). The stderr text itself never leaves the local log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCause {
+    AccessViolation,
+    IllegalInstruction,
+    OutOfMemory,
+    GpuDeviceLost,
+    GpuOutOfMemory,
+    MissingDll,
+    Abort,
+    ExitNonzero,
+    /// No exit code (timed out, killed, still running) or exit code 0.
+    Unknown,
+}
+
+impl WorkerCause {
+    /// Codes are NTSTATUS values as Windows reports them for a crashed
+    /// process. A hard exit code wins over stderr, except that GPU and
+    /// memory messages explain an abort better than the abort itself.
+    pub fn classify(code: Option<i32>, stderr: &[String]) -> Self {
+        let code = code.map(|code| code as u32);
+        let stderr = stderr.join("\n").to_ascii_lowercase();
+        let says = |needles: &[&str]| needles.iter().any(|needle| stderr.contains(needle));
+        match code {
+            Some(0xC000_0005) => Self::AccessViolation,
+            Some(0xC000_001D) => Self::IllegalInstruction,
+            Some(0xC000_0135 | 0xC000_0139 | 0xC000_0142) => Self::MissingDll,
+            _ if says(&["errordevicelost", "vk_error_device_lost"]) => Self::GpuDeviceLost,
+            _ if says(&["erroroutofdevicememory", "vk_error_out_of_device_memory"]) => {
+                Self::GpuOutOfMemory
+            }
+            Some(0xC000_0017) => Self::OutOfMemory,
+            _ if says(&["failed to allocate", "out of memory"]) => Self::OutOfMemory,
+            Some(0xC000_0409) => Self::Abort,
+            Some(0) | None => Self::Unknown,
+            Some(_) => Self::ExitNonzero,
+        }
+    }
+}
+
+/// Logs a dead worker's exit code and whole stderr tail locally (profile
+/// folder redacted; the support file picks it up), then classifies it.
+pub fn worker_exit_cause(worker: &str, code: Option<i32>, stderr: &[String]) -> WorkerCause {
+    let cause = WorkerCause::classify(code, stderr);
+    let code = code.map_or_else(|| "none".to_string(), |code| format!("{:#010X}", code as u32));
+    let tail = stderr
+        .iter()
+        .map(|line| crate::support::redact_profile_dir(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    tracing::warn!("{worker} worker exited (code {code}, cause {cause:?}); stderr tail:\n{tail}");
+    cause
 }
 
 /// Top-level module of the panicking source file; `Dependency` for anything
@@ -169,6 +238,21 @@ pub fn record(event: TelemetryEvent) {
         queue.push_back(event);
     }
     tracing::debug!("telemetry queued: {event:?}");
+    match event {
+        TelemetryEvent::DictationFailed { kind, app_kind } => {
+            analytics::note_dictation(DictationFact::Failed { kind, app_kind });
+        }
+        TelemetryEvent::WorkerCrashed {
+            worker,
+            exit,
+            cause,
+        } => analytics::capture(AnalyticsEvent::WorkerCrashed {
+            worker,
+            exit,
+            cause,
+        }),
+        TelemetryEvent::Panicked { area } => analytics::capture(AnalyticsEvent::AppError { area }),
+    }
     #[cfg(feature = "desktop")]
     if let Some(app) = APP.get() {
         use tauri::Emitter;
@@ -178,11 +262,16 @@ pub fn record(event: TelemetryEvent) {
 
 /// Returns and clears the queue and the panic file (panics from this run and
 /// earlier ones). Called by the frontend after startup and on every nudge.
+/// The panic file has one reader, this, so each panic also becomes one
+/// analytics `app_error` here.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn drain_telemetry() -> Vec<TelemetryEvent> {
     let mut events: Vec<TelemetryEvent> = crate::support::take_panic_areas()
         .into_iter()
-        .map(|area| TelemetryEvent::Panicked { area })
+        .map(|area| {
+            analytics::capture(AnalyticsEvent::AppError { area });
+            TelemetryEvent::Panicked { area }
+        })
         .collect();
     events.extend(
         QUEUE

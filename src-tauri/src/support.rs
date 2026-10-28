@@ -1,6 +1,6 @@
 //! What a user can hand us when something breaks: a rolling log file, a panic
 //! hook that writes into it (and notes the panic's area in `panics.log` for
-//! telemetry), the diagnostics report, and the helpers behind the in-app
+//! telemetry, and in the session file), the diagnostics report, and the helpers behind the in-app
 //! "Report a problem" commands.
 //!
 //! Privacy rule for every log line in the crate: never log transcript text,
@@ -103,6 +103,7 @@ fn install_panic_hook() {
         note_panic_area(info.location().map_or(PanicArea::Other, |location| {
             PanicArea::from_file(location.file())
         }));
+        crate::session::mark_panicked();
         let location = info
             .location()
             .map(ToString::to_string)
