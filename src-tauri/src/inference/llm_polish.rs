@@ -9,7 +9,7 @@
 //! `Ok(None)` and the caller silently keeps the deterministic text.
 
 use super::InferenceError;
-use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
+use crate::telemetry::{self, TelemetryEvent, WorkerCause, WorkerExit, WorkerKind};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
@@ -305,6 +305,8 @@ fn record_crash(exit: WorkerExit) {
     telemetry::record(TelemetryEvent::WorkerCrashed {
         worker: WorkerKind::Polish,
         exit,
+        // Plan 4.4 covers the speech workers; polish is gone in 0.8.0.
+        cause: WorkerCause::Unknown,
     });
 }
 

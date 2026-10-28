@@ -66,6 +66,30 @@ pub enum HotkeyError {
     Runtime(String),
 }
 
+impl HotkeyError {
+    /// The analytics kind of a hook that couldn't start (plan 024 4.3),
+    /// matched on this module's own messages. `None` for a bad shortcut,
+    /// which is the user's input, not a failure.
+    pub fn failure_kind(&self) -> Option<crate::analytics::HotkeyFailureKind> {
+        use crate::analytics::HotkeyFailureKind;
+        let Self::Runtime(message) = self else {
+            return None;
+        };
+        Some(if message.contains("already owns the keyboard hook") {
+            HotkeyFailureKind::OtherInstance
+        } else if message.contains("SetWindowsHookExW") || message.contains("GetModuleHandleW") {
+            HotkeyFailureKind::HookRejected
+        } else if message.contains("hook thread")
+            || message.contains("startup timed out")
+            || message.contains("poisoned")
+        {
+            HotkeyFailureKind::HookThread
+        } else {
+            HotkeyFailureKind::Other
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeySignal {
     pub action: HotkeyAction,

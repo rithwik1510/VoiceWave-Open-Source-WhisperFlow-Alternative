@@ -1,6 +1,6 @@
 //! Recording: latency telemetry (UI event + opt-in diagnostics), the
-//! always-on Stats numbers, and the background History rescue write and
-//! dictionary-candidate queue.
+//! always-on Stats numbers, the analytics day accumulator, and the background
+//! History rescue write and dictionary-candidate queue.
 
 use super::capture::CapturedAudio;
 use super::insert::Insertion;
@@ -8,6 +8,7 @@ use super::polish::Delivery;
 use super::post_process::FormattedText;
 use super::transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::DictationRun;
+use crate::analytics::{self, DictationFact, FallbackReason, Finished, InsertKind};
 use crate::diagnostics::LatencyMetricRecord;
 use crate::history::PolishHistoryMeta;
 use crate::settings::DecodeMode;
@@ -221,6 +222,8 @@ impl VoiceWaveController {
             method: insertion_method,
             target_class: insertion_target_class,
             history_recorded: insertion_history_recorded,
+            blocked_by_elevation: insertion_blocked_by_elevation,
+            app_kind: insertion_app_kind,
             correction_candidates,
             post_started,
             post_before_insert_ms,
@@ -322,6 +325,35 @@ impl VoiceWaveController {
             mic_input_volume_percent: mic_input_volume_slot.lock().ok().and_then(|slot| *slot),
         };
         let _ = app.emit("voicewave://latency", LatencyBreakdownEvent::new(&latency, mode));
+        // Analytics' day accumulator (plan 024 4.2): counts and timings only,
+        // handed to the recorder thread. Not gated on `diagnostics_opt_in`
+        // below, which is for the encrypted diagnostics store; analytics has
+        // its own consent gate.
+        if mode == DictationMode::Microphone {
+            analytics::note_dictation(DictationFact::Finished(Finished {
+                success: insertion_success,
+                latency_ms: release_to_inserted_ms,
+                audio_ms: audio_duration_ms,
+                words: asr_final_word_count,
+                on_gpu: latency.backend_used != "cpu",
+                insert: match latency.insertion_method.as_deref() {
+                    Some("direct") => Some(InsertKind::Typed),
+                    Some("clipboardPaste") => Some(InsertKind::Pasted),
+                    Some("clipboardOnly") if insertion_blocked_by_elevation => {
+                        Some(InsertKind::BlockedElevated)
+                    }
+                    Some("clipboardOnly") => Some(InsertKind::ClipboardOnly),
+                    Some("historyFallback") => Some(InsertKind::HistoryOnly),
+                    _ => None,
+                },
+                app_kind: insertion_app_kind,
+                format_style: settings.effective_polish_profile(),
+                fallback: latency
+                    .asr_step_down_reason
+                    .as_deref()
+                    .and_then(|reason| FallbackReason::classify(reason, latency.backend_fallback)),
+            }));
+        }
         // Always-on aggregate stats (counts and durations only, never text)
         // feeding the Stats tab. Deliberately OUTSIDE the diagnostics opt-in:
         // diagnostics gates the detailed per-utterance records below. Only

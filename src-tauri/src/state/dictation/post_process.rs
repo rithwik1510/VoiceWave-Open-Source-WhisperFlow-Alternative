@@ -281,6 +281,7 @@ impl VoiceWaveController {
         {
             telemetry::record(TelemetryEvent::DictationFailed {
                 kind: DictationFailureKind::NoSpeech,
+                app_kind: None,
             });
             self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                 .await;

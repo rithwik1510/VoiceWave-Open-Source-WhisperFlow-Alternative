@@ -57,6 +57,7 @@ impl VoiceWaveController {
             max_capture_ms,
             ..
         } = *run;
+        crate::session::set_phase(crate::analytics::SessionPhase::Dictating);
         let mic_input_volume_slot = self.spawn_mic_volume_guard(run);
         let mut release_tail_ms = effective_release_tail_ms(
             clamp_release_tail_ms(settings.release_tail_ms),
@@ -300,6 +301,7 @@ impl VoiceWaveController {
                 tracing::info!("capture ended with no speech (session={session_id})");
                 telemetry::record(TelemetryEvent::DictationFailed {
                     kind: DictationFailureKind::NoSpeech,
+                    app_kind: None,
                 });
                 self.set_session_state(session_id, DictationLifecycleState::Idle, None, None)
                     .await;

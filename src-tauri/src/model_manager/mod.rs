@@ -1,3 +1,4 @@
+use crate::analytics;
 use crate::atomic_file;
 use crate::inference::gpu_select::{
     model_tier, CpuSupport, HardwareProfile, ModelTier, PARAKEET_MODEL_ID,
@@ -262,6 +263,9 @@ pub struct DownloadPlan {
     quarantine_dir: PathBuf,
     max_storage_bytes: Option<u64>,
     chunk_bytes: usize,
+    /// The last `run`'s retries and duration, for analytics.
+    retries: u32,
+    run_time: Duration,
 }
 
 /// How `DownloadPlan::run` ended when it did not fail.
@@ -288,6 +292,24 @@ const RETRY_BACKOFF: [Duration; 5] = [
 ];
 
 impl DownloadPlan {
+    /// `model_download_finished` (plan 024 4.3), from `finish_download`.
+    fn report_finished(
+        &self,
+        outcome: analytics::DownloadOutcome,
+        failure_stage: Option<DownloadFailureStage>,
+    ) {
+        let total = self.checkpoint.total_bytes.max(1);
+        let downloaded_pct = (self.checkpoint.downloaded_bytes.min(total) * 100 / total) as u8;
+        analytics::capture(analytics::AnalyticsEvent::ModelDownloadFinished {
+            model: analytics::ModelFamily::of(&self.manifest.model_id),
+            outcome,
+            failure_stage,
+            retries: self.retries,
+            downloaded_pct,
+            duration_s: self.run_time.as_secs(),
+        });
+    }
+
     /// Downloads the rest of the artifact into the partial file and checks it
     /// against the pinned SHA-256. Touches no installed model and no manager
     /// state, so it runs without the `model_manager` lock.
@@ -329,6 +351,8 @@ impl DownloadPlan {
             &mut should_pause,
             &mut on_progress,
         );
+        self.retries = retries;
+        self.run_time = started.elapsed();
         let done = self.checkpoint.downloaded_bytes;
         match &result {
             Ok(DownloadOutcome::Verified { .. }) => tracing::info!(
@@ -1019,6 +1043,8 @@ impl ModelManager {
             quarantine_dir: self.quarantine_dir.clone(),
             max_storage_bytes: self.max_storage_bytes,
             chunk_bytes: self.download_chunk_bytes.max(4 * 1024),
+            retries: 0,
+            run_time: Duration::ZERO,
         })
     }
 
@@ -1036,11 +1062,16 @@ impl ModelManager {
         let verified_sha256 = match outcome {
             Ok(DownloadOutcome::Verified { sha256 }) => sha256,
             Ok(DownloadOutcome::Stopped) => {
+                // A pause isn't an end: only a cancel is reported.
+                if plan.checkpoint.state == ModelStatusState::Cancelled {
+                    plan.report_finished(analytics::DownloadOutcome::Cancelled, None);
+                }
                 self.downloads.insert(model_id, plan.checkpoint.clone());
                 self.persist_downloads()?;
                 return Ok(status_from_checkpoint(&plan.checkpoint, false));
             }
             Err(err) => {
+                plan.report_finished(analytics::DownloadOutcome::Failed, Some(err.failure_stage()));
                 // `run` already logged the raw error; the status gets the
                 // plain message for its stage.
                 plan.checkpoint.state = ModelStatusState::Failed;
@@ -1059,6 +1090,7 @@ impl ModelManager {
             // the move again without downloading anything.
             let err = ModelError::Rename(err);
             tracing::warn!("{model_id}: {err}");
+            plan.report_finished(analytics::DownloadOutcome::Failed, Some(err.failure_stage()));
             plan.checkpoint.state = ModelStatusState::Failed;
             plan.checkpoint.last_error = Some(err.user_message());
             plan.checkpoint.failure_stage = Some(err.failure_stage());
@@ -1079,6 +1111,7 @@ impl ModelManager {
             checksum_verified: true,
         };
 
+        plan.report_finished(analytics::DownloadOutcome::Installed, None);
         self.installed
             .insert(installed.model_id.clone(), installed.clone());
         self.persist_installed()?;

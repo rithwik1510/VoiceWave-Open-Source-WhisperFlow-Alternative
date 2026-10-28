@@ -1,26 +1,32 @@
 //! Usage analytics on PostHog (plan 024), sent from Rust.
 //!
-//! `capture` resolves an `AnalyticsEvent` plus the base properties into an
-//! entry in the persisted outbox; one background thread sends due entries to
-//! PostHog with their real timestamps. Nothing happens without a project key
+//! `capture` hands an `AnalyticsEvent` to the recorder thread (`day.rs`),
+//! which resolves it plus the base properties into an entry in the persisted
+//! outbox; one sender thread sends due entries to PostHog with their real
+//! timestamps. Nothing happens without a project key
 //! (section 3.5), and the consent gate (3.8) is checked when an event is
 //! queued and again before each send. Privacy rules: section 2 of the plan.
 //! The older TelemetryDeck path (`crate::telemetry`, src/lib/telemetry.ts)
 //! is separate and unchanged.
 
 mod context;
+mod day;
 mod events;
 mod identity;
 mod outbox;
 mod posthog;
 
-pub use context::note_speech_engine;
-pub use events::{AnalyticsEvent, ClientEvent, LaunchMode};
+pub use context::{note_speech_engine, ModelFamily};
+pub use day::{note_dictation, DictationFact, Finished, InsertKind};
+pub use events::{
+    AnalyticsEvent, ClientEvent, DownloadOutcome, FallbackReason, HotkeyFailureKind, LaunchMode,
+    PreviousExit, Semver, SessionPhase, UpdateStage,
+};
 
 use crate::settings::{
     VoiceWaveSettings, ANALYTICS_CONSENT_PROMPT_MAX_SHOWS, ANALYTICS_CONSENT_VERSION,
 };
-use context::{Hypervisor, ModelFamily, OsMajor};
+use context::{Hypervisor, OsMajor};
 use identity::Identity;
 use outbox::{Outbox, OutboxEntry};
 use posthog::SendOutcome;
@@ -36,6 +42,7 @@ use std::{
 };
 
 const OUTBOX_FILE: &str = "analytics-outbox.json";
+const DAY_FILE: &str = "analytics-day.json";
 /// Events per `/batch/` POST.
 const MAX_BATCH: usize = 50;
 /// How often the sender looks at the outbox without being woken.
@@ -135,11 +142,13 @@ pub fn init() {
     let Some(identity) = identity::load_or_create(now_ms) else {
         return;
     };
-    start(api_key, identity, data_dir.join(OUTBOX_FILE));
+    start(api_key, identity, data_dir);
 }
 
-fn start(api_key: String, identity: Identity, outbox_path: PathBuf) {
+fn start(api_key: String, identity: Identity, data_dir: PathBuf) {
     let (now_ms, _) = now();
+    let outbox_path = data_dir.join(OUTBOX_FILE);
+    let first_dictation_queued = identity.first_dictation_queued;
     let core = Core {
         api_key,
         identity,
@@ -163,6 +172,7 @@ fn start(api_key: String, identity: Identity, outbox_path: PathBuf) {
             lock(&core.outbox).purge();
         }
     }
+    day::spawn(data_dir.join(DAY_FILE), first_dictation_queued);
     if let Err(err) = std::thread::Builder::new()
         .name("analytics-sender".to_string())
         .spawn(move || run_sender(core))
@@ -171,15 +181,19 @@ fn start(api_key: String, identity: Identity, outbox_path: PathBuf) {
     }
 }
 
-/// Queues `event` when sharing allows it. Never blocks on the network.
+/// Queues `event` when sharing allows it. Never blocks: the outbox write
+/// happens on the recorder thread.
 pub fn capture(event: AnalyticsEvent) {
-    enqueue(event);
+    if !day::send_capture(event) {
+        enqueue(event, None);
+    }
 }
 
-/// Returns whether the event was queued. Holds the consent lock until the
+/// Returns whether the event was queued. `at_ms` backdates it (a day's
+/// summary); otherwise it happened now. Holds the consent lock until the
 /// entry is stored, so a switch-off can't purge in between and leave it
 /// behind (lock order everywhere: consent, then outbox).
-fn enqueue(event: AnalyticsEvent) -> bool {
+fn enqueue(event: AnalyticsEvent, at_ms: Option<u64>) -> bool {
     let Some(core) = CORE.get() else {
         return false;
     };
@@ -193,7 +207,12 @@ fn enqueue(event: AnalyticsEvent) -> bool {
     let Some(Value::String(name)) = properties.remove("event") else {
         return false;
     };
-    let (now_ms, timestamp) = now();
+    let (now_ms, now_timestamp) = now();
+    let timestamp = at_ms
+        .and_then(|at_ms| chrono::DateTime::from_timestamp_millis(i64::try_from(at_ms).ok()?))
+        .map_or(now_timestamp, |at| {
+            at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        });
     let base = core.base_properties(now_ms);
     if event.sets_person() {
         properties.insert("$set".to_string(), core.person_properties(&base));
@@ -223,20 +242,49 @@ fn enqueue(event: AnalyticsEvent) -> bool {
 }
 
 /// Queues the startup events: `app_installed` once per install (including
-/// an install first launched with sharing off, once it's turned on), then
-/// `app_launched`. Call after settings have loaded.
-pub fn capture_launch(launch_mode: LaunchMode) {
+/// an install first launched with sharing off, once it's turned on), an
+/// update that didn't land, then `app_launched` with how the previous run
+/// ended. Also sends a due `day_summary`. Call after settings have loaded.
+pub fn capture_launch(launch_mode: LaunchMode, previous: &crate::session::PreviousRun) {
     let Some(core) = CORE.get() else {
         return;
     };
     if !core.identity.app_installed_queued
-        && enqueue(AnalyticsEvent::AppInstalled {
-            estimated: core.identity.first_seen_estimated,
-        })
+        && enqueue(
+            AnalyticsEvent::AppInstalled {
+                estimated: core.identity.first_seen_estimated,
+            },
+            None,
+        )
     {
         identity::mark_app_installed_queued();
     }
-    enqueue(AnalyticsEvent::AppLaunched { launch_mode });
+    if let Some(target_version) = previous.update_not_applied {
+        enqueue(
+            AnalyticsEvent::UpdateFailed {
+                stage: UpdateStage::NotApplied,
+                error_kind: None,
+                target_version,
+            },
+            None,
+        );
+    }
+    // No session file: a clean exit deleted it, or this install never ran.
+    let previous_exit = match previous.exit {
+        Some(exit) => exit,
+        None if core.identity.first_launch => PreviousExit::FirstRun,
+        None => PreviousExit::Clean,
+    };
+    enqueue(
+        AnalyticsEvent::AppLaunched {
+            launch_mode,
+            previous_exit,
+            previous_phase: previous.phase,
+            previous_uptime_min: previous.uptime_min,
+        },
+        None,
+    );
+    day::check_day();
 }
 
 /// Applies the consent gate (plan 3.8). Turning sharing off deletes the
@@ -264,6 +312,9 @@ pub fn set_consent(opt_in: bool, version: u32, prompt_exhausted: bool) {
         Consent::On => core.wake(),
         Consent::Hold | Consent::Unknown => {}
     }
+    drop(consent);
+    // Off: the recorder deletes the day file; on: it may owe a summary.
+    day::check_day();
 }
 
 /// Called by the settings store after every load and save: the consent gate

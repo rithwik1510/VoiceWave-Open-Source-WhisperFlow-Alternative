@@ -19,6 +19,8 @@ const INSTALL_SOURCE: &str = "InstallSource";
 /// 1 once `app_installed` has been queued, so an install first launched with
 /// sharing off still reports it once sharing is turned on.
 const APP_INSTALLED_QUEUED: &str = "AppInstalledQueued";
+/// 1 once `first_dictation` has been queued, so it's sent once per install.
+const FIRST_DICTATION_QUEUED: &str = "FirstDictationQueued";
 
 static SETTINGS_EXISTED_AT_LAUNCH: OnceLock<bool> = OnceLock::new();
 
@@ -62,6 +64,10 @@ pub struct Identity {
     pub first_seen_version: String,
     pub install_source: InstallSource,
     pub app_installed_queued: bool,
+    pub first_dictation_queued: bool,
+    /// This launch created the first-seen facts of a new (not pre-0.7.7)
+    /// install: the install's first run.
+    pub first_launch: bool,
 }
 
 /// A random UUID v4 string.
@@ -112,12 +118,13 @@ pub fn load_or_create(now_ms: u64) -> Option<Identity> {
         }
     };
 
-    let (first_seen_utc_ms, first_seen_estimated, first_seen_version) =
+    let (first_seen_utc_ms, first_seen_estimated, first_seen_version, first_launch) =
         match key.read_u64(FIRST_SEEN_UTC_MS) {
             Some(ms) => (
                 ms,
                 key.read_u32(FIRST_SEEN_ESTIMATED) == Some(1),
                 key.read_string(FIRST_SEEN_VERSION).unwrap_or_default(),
+                false,
             ),
             None => {
                 let estimated = note_settings_existed_at_launch();
@@ -135,7 +142,7 @@ pub fn load_or_create(now_ms: u64) -> Option<Identity> {
                 if let Err(code) = stored {
                     tracing::warn!("analytics: couldn't store first-seen facts (error {code})");
                 }
-                (ms, estimated, version)
+                (ms, estimated, version, !estimated)
             }
         };
 
@@ -147,6 +154,8 @@ pub fn load_or_create(now_ms: u64) -> Option<Identity> {
         first_seen_version,
         install_source: InstallSource::parse(key.read_string(INSTALL_SOURCE).as_deref()),
         app_installed_queued: key.read_u32(APP_INSTALLED_QUEUED) == Some(1),
+        first_dictation_queued: key.read_u32(FIRST_DICTATION_QUEUED) == Some(1),
+        first_launch,
     })
 }
 
@@ -156,17 +165,24 @@ pub fn load_or_create(_now_ms: u64) -> Option<Identity> {
 }
 
 /// Remembers that `app_installed` is queued, so it's never queued twice.
-#[cfg(windows)]
 pub fn mark_app_installed_queued() {
-    if let Err(code) =
-        registry::Key::open_or_create().and_then(|key| key.write_u32(APP_INSTALLED_QUEUED, 1))
-    {
-        tracing::warn!("analytics: couldn't record app_installed (error {code})");
+    mark_queued(APP_INSTALLED_QUEUED);
+}
+
+/// Remembers that `first_dictation` is queued, so it's never queued twice.
+pub fn mark_first_dictation_queued() {
+    mark_queued(FIRST_DICTATION_QUEUED);
+}
+
+#[cfg(windows)]
+fn mark_queued(name: &str) {
+    if let Err(code) = registry::Key::open_or_create().and_then(|key| key.write_u32(name, 1)) {
+        tracing::warn!("analytics: couldn't record {name} (error {code})");
     }
 }
 
 #[cfg(not(windows))]
-pub fn mark_app_installed_queued() {}
+fn mark_queued(_name: &str) {}
 
 fn settings_created_ms() -> Option<u64> {
     let store = crate::settings::SettingsStore::new().ok()?;
