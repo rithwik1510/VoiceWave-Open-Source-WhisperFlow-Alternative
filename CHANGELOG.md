@@ -56,6 +56,10 @@ a support file you can attach to an issue.
 
 ### Fixed
 
+- **The close button works after reopening VoiceWave.** Since 0.7.5, if
+  you opened VoiceWave from the Start menu or a shortcut while it was
+  already running, the window's close button stopped sending it to the
+  tray. It hides to the tray every time again.
 - **A failed update says so plainly.** Instead of a raw error, the update
   prompt and Settings → Updates now say the update didn't install, that
   VoiceWave will try again later, and that you can download the latest
