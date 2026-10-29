@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ExternalLink, Mic, X } from "lucide-react";
+import { ExternalLink, MessageSquareWarning, Mic, X } from "lucide-react";
 import type { PillQuickControlsInvocation, PolishProfile } from "../types/voicewave";
 
 export type QuickControlsFeedback =
@@ -15,6 +15,8 @@ interface PillQuickControlsProps {
   onSelectProfile: (profile: PolishProfile) => void;
   onStartHandsFree: () => void;
   onOpenMain: () => void;
+  /** Opens the main window on Help's "Something wrong?". */
+  onSomethingWrong: () => void;
   onClose: () => void;
   onActivity: () => void;
 }
@@ -43,6 +45,7 @@ export function PillQuickControls({
   onSelectProfile,
   onStartHandsFree,
   onOpenMain,
+  onSomethingWrong,
   onClose,
   onActivity
 }: PillQuickControlsProps) {
@@ -88,6 +91,16 @@ export function PillQuickControls({
         >
           Open
           <ExternalLink size={11} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="vw-pill-quick-report"
+          aria-label="Something wrong?"
+          title="Something wrong?"
+          onClick={onSomethingWrong}
+          disabled={busy}
+        >
+          <MessageSquareWarning size={14} aria-hidden="true" />
         </button>
         <button
           ref={closeRef}

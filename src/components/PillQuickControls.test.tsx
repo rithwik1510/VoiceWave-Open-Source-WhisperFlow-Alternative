@@ -12,6 +12,7 @@ function renderControls(overrides: Partial<Parameters<typeof PillQuickControls>[
     onSelectProfile: vi.fn(),
     onStartHandsFree: vi.fn(),
     onOpenMain: vi.fn(),
+    onSomethingWrong: vi.fn(),
     onClose: vi.fn(),
     onActivity: vi.fn(),
     ...overrides

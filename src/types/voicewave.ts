@@ -324,12 +324,25 @@ export type AcquisitionAnswer =
   | "article"
   | "other"
   | "skipped";
+/** "Something wrong?" reasons, in the order the picker lists them. */
+export type FeedbackKind =
+  | "wrong_words"
+  | "missed_words"
+  | "too_slow"
+  | "text_did_not_appear"
+  | "wrong_place"
+  | "froze_or_crashed"
+  | "hotkey"
+  | "other";
+/** Where "Something wrong?" was opened: the pill's quick menu or the main window's Help. */
+export type FeedbackSurface = "pill" | "settings";
 export type UpdateFailureStage = "download" | "verify" | "install";
 export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | "other";
 export type ClientEvent =
   | { event: "onboarding_step"; step: OnboardingStepName }
   | { event: "onboarding_finished"; outcome: "finished" | "skipped" }
   | { event: "acquisition_answered"; answer: AcquisitionAnswer }
+  | { event: "feedback_reported"; kind: FeedbackKind; surface: FeedbackSurface }
   /** `target_version` is sent as `other` unless it's plain `major.minor.patch`. */
   | { event: "update_failed"; stage: UpdateFailureStage; error_kind: UpdateErrorKind; target_version: string };
 

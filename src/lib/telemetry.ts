@@ -38,8 +38,9 @@ export const ANONYMOUS_USAGE_DETAILS =
   "dictations by type (with the kind of app when the text couldn't be inserted), speech helper crashes by cause, " +
   "internal errors by area, graphics card to processor fallbacks, model downloads (which model, how they ended, " +
   "where a failed one stopped, retries, how far they got and how long they took), failed updates (the step, the " +
-  "kind of error and the version), shortcut setup problems, and your answers to \"Where did you hear about " +
-  "VoiceWave?\" and \"Something wrong?\" if you give them. Never audio, transcripts, dictionary or snippet " +
+  "kind of error and the version), shortcut setup problems, your answer to \"Where did you hear about " +
+  "VoiceWave?\", and the reason you pick in \"Something wrong?\" with whether you opened it from " +
+  "the pill or the main window. Never audio, transcripts, dictionary or snippet " +
   "content, window titles, app names, file paths, device names, error messages, account details, or your IP " +
   "address.";
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";

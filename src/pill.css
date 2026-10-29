@@ -236,6 +236,7 @@ body,
 
 .vw-pill-quick-open,
 .vw-pill-quick-close,
+.vw-pill-quick-report,
 .vw-pill-quick-profile,
 .vw-pill-quick-hands-free {
   border: 1px solid transparent;
@@ -251,6 +252,7 @@ body,
 
 .vw-pill-quick-open:focus-visible,
 .vw-pill-quick-close:focus-visible,
+.vw-pill-quick-report:focus-visible,
 .vw-pill-quick-profile:focus-visible,
 .vw-pill-quick-hands-free:focus-visible {
   outline: 2px solid var(--vw-brand-cyan-soft);
@@ -260,6 +262,7 @@ body,
 
 .vw-pill-quick-open:disabled,
 .vw-pill-quick-close:disabled,
+.vw-pill-quick-report:disabled,
 .vw-pill-quick-profile:disabled,
 .vw-pill-quick-hands-free:disabled {
   cursor: default;
@@ -279,7 +282,8 @@ body,
   font-weight: 650;
 }
 
-.vw-pill-quick-close {
+.vw-pill-quick-close,
+.vw-pill-quick-report {
   width: 36px;
   height: 36px;
   display: grid;
@@ -291,7 +295,8 @@ body,
 }
 
 .vw-pill-quick-open:hover:not(:disabled),
-.vw-pill-quick-close:hover:not(:disabled) {
+.vw-pill-quick-close:hover:not(:disabled),
+.vw-pill-quick-report:hover:not(:disabled) {
   color: #fafafa;
   border-color: rgba(126, 216, 255, 0.24);
   background: rgba(63, 63, 70, 0.8);
