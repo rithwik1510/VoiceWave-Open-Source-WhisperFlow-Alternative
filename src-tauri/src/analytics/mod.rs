@@ -2,12 +2,13 @@
 //!
 //! `capture` hands an `AnalyticsEvent` to the recorder thread (`day.rs`),
 //! which resolves it plus the base properties into an entry in the persisted
-//! outbox; one sender thread sends due entries to PostHog with their real
-//! timestamps. Nothing happens without a project key
-//! (section 3.5), and the consent gate (3.8) is checked when an event is
-//! queued and again before each send. Privacy rules: section 2 of the plan.
-//! The older TelemetryDeck path (`crate::telemetry`, src/lib/telemetry.ts)
-//! is separate and unchanged.
+//! outbox; one sender thread sends the outbox to PostHog with each event's
+//! real timestamp. Nothing happens without a project key (section 3.5), and
+//! the consent gate (3.8) is checked when an event is queued and again before
+//! each send. Quitting never waits on the network: whatever is unsent stays in
+//! the outbox for the next pass or the next launch. Privacy rules: section 2
+//! of the plan. The older TelemetryDeck path (`crate::telemetry`,
+//! src/lib/telemetry.ts) is separate and unchanged.
 
 mod context;
 mod day;
@@ -19,50 +20,49 @@ mod posthog;
 pub use context::{note_speech_engine, ModelFamily};
 pub use day::{note_dictation, DictationFact, Finished, InsertKind};
 pub use events::{
-    AnalyticsEvent, ClientEvent, DownloadOutcome, FallbackReason, HotkeyFailureKind, LaunchMode,
-    PreviousExit, Semver, SessionPhase, UpdateStage,
+    AnalyticsEvent, DownloadOutcome, HotkeyFailureKind, LaunchMode, PreviousExit, Semver,
+    SessionPhase,
 };
 
-use crate::settings::{
-    VoiceWaveSettings, ANALYTICS_CONSENT_PROMPT_MAX_SHOWS, ANALYTICS_CONSENT_VERSION,
-};
+use crate::settings::{VoiceWaveSettings, ANALYTICS_CONSENT_VERSION};
+use chrono::{DateTime, Utc};
 use context::{Hypervisor, OsMajor};
+use events::UpdateStage;
 use identity::Identity;
 use outbox::{Outbox, OutboxEntry};
 use posthog::SendOutcome;
-use rand::Rng;
 use serde_json::{json, Map, Value};
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError,
+        Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-const OUTBOX_FILE: &str = "analytics-outbox.json";
+const OUTBOX_FILE: &str = "analytics-outbox.jsonl";
 const DAY_FILE: &str = "analytics-day.json";
 /// Events per `/batch/` POST.
 const MAX_BATCH: usize = 50;
-/// How often the sender looks at the outbox without being woken.
+/// How often the sender runs without being woken: it retries a failed send
+/// and checks whether the day has ended.
 const IDLE_FLUSH: Duration = Duration::from_secs(60);
 /// After a wake, so a burst of events goes out in one POST.
 const DEBOUNCE: Duration = Duration::from_secs(2);
-/// Total time the quit-time flush may take.
-const EXIT_BUDGET: Duration = Duration::from_secs(2);
-const MAX_BACKOFF_MS: u64 = 5 * 60 * 1000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Consent {
-    /// Settings not loaded yet: nothing is queued or sent.
+    /// Nothing is recorded or sent, and nothing is deleted: settings aren't
+    /// loaded yet, or the user shared under an older disclosure (version 1)
+    /// and hasn't answered the privacy check for the current one.
     Unknown,
-    /// Sharing off, or the v2 prompt went unanswered too often: nothing is
-    /// queued and the outbox is deleted.
+    /// Sharing off: nothing is recorded, and the outbox and day file are
+    /// deleted.
     Off,
-    /// On under an older disclosure (or onboarding not finished): queue, but
-    /// send only once the user has seen the current one.
+    /// A new install that hasn't finished onboarding (version 0): record, but
+    /// send only once onboarding has shown the current disclosure.
     Hold,
     On,
 }
@@ -87,9 +87,6 @@ struct Core {
     /// Built on the first send, off the startup path: reading the Windows
     /// certificate store for the TLS config can take a noticeable moment.
     agent: OnceLock<ureq::Agent>,
-    /// Held for a whole flush, so the sender thread and the quit-time flush
-    /// never send the same entries at once.
-    sending: Mutex<()>,
     woken: Mutex<bool>,
     wake_signal: Condvar,
 }
@@ -98,12 +95,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn now() -> (u64, String) {
-    let now = chrono::Utc::now();
-    (
-        u64::try_from(now.timestamp_millis()).unwrap_or_default(),
-        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    )
+fn now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
 /// Release builds use the key compiled in by release.yml. Debug builds send
@@ -138,25 +131,20 @@ pub fn init() {
     else {
         return;
     };
-    let (now_ms, _) = now();
-    let Some(identity) = identity::load_or_create(now_ms) else {
+    let Some(identity) = identity::load_or_create(now_ms()) else {
         return;
     };
     start(api_key, identity, data_dir);
 }
 
 fn start(api_key: String, identity: Identity, data_dir: PathBuf) {
-    let (now_ms, _) = now();
-    let outbox_path = data_dir.join(OUTBOX_FILE);
-    let first_dictation_queued = identity.first_dictation_queued;
     let core = Core {
         api_key,
         identity,
         os_major: OsMajor::current(),
         hypervisor: Hypervisor::detect(),
-        outbox: Mutex::new(Outbox::load(outbox_path, now_ms)),
+        outbox: Mutex::new(Outbox::load(data_dir.join(OUTBOX_FILE), now_ms())),
         agent: OnceLock::new(),
-        sending: Mutex::new(()),
         woken: Mutex::new(false),
         wake_signal: Condvar::new(),
     };
@@ -166,13 +154,10 @@ fn start(api_key: String, identity: Identity, data_dir: PathBuf) {
     let Some(core) = CORE.get() else {
         return;
     };
-    {
-        let consent = lock(&CONSENT);
-        if *consent == Consent::Off {
-            lock(&core.outbox).purge();
-        }
+    if *lock(&CONSENT) == Consent::Off {
+        lock(&core.outbox).purge();
     }
-    day::spawn(data_dir.join(DAY_FILE), first_dictation_queued);
+    day::spawn(data_dir.join(DAY_FILE));
     if let Err(err) = std::thread::Builder::new()
         .name("analytics-sender".to_string())
         .spawn(move || run_sender(core))
@@ -189,38 +174,29 @@ pub fn capture(event: AnalyticsEvent) {
     }
 }
 
-/// Returns whether the event was queued. `at_ms` backdates it (a day's
-/// summary); otherwise it happened now. Holds the consent lock until the
-/// entry is stored, so a switch-off can't purge in between and leave it
-/// behind (lock order everywhere: consent, then outbox).
-fn enqueue(event: AnalyticsEvent, at_ms: Option<u64>) -> bool {
+/// Returns whether the event was queued. `at` backdates it (a day's summary,
+/// the launch); otherwise it happened now.
+fn enqueue(event: AnalyticsEvent, at: Option<DateTime<Utc>>) -> bool {
     let Some(core) = CORE.get() else {
         return false;
     };
-    let consent = lock(&CONSENT);
-    if !consent.queues() {
-        return false;
-    }
     let Ok(Value::Object(mut properties)) = serde_json::to_value(event) else {
         return false;
     };
     let Some(Value::String(name)) = properties.remove("event") else {
         return false;
     };
-    let (now_ms, now_timestamp) = now();
-    let timestamp = at_ms
-        .and_then(|at_ms| chrono::DateTime::from_timestamp_millis(i64::try_from(at_ms).ok()?))
-        .map_or(now_timestamp, |at| {
-            at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        });
-    let base = core.base_properties(now_ms);
-    if event.sets_person() {
+    let now = Utc::now();
+    let queued_ms = u64::try_from(now.timestamp_millis()).unwrap_or_default();
+    let base = core.base_properties(queued_ms);
+    if let AnalyticsEvent::AppLaunched { .. } = event {
         properties.insert("$set".to_string(), core.person_properties(&base));
         properties.insert(
             "$set_once".to_string(),
             json!({
-                "first_version": semver_or_other(&core.identity.first_seen_version),
+                "first_version": Semver::parse(&core.identity.first_seen_version),
                 "first_install_source": core.identity.install_source,
+                "first_seen_estimated": core.identity.first_seen_estimated,
             }),
         );
     }
@@ -228,40 +204,40 @@ fn enqueue(event: AnalyticsEvent, at_ms: Option<u64>) -> bool {
         properties.insert("$set_once".to_string(), json!({ "acquisition": answer }));
     }
     properties.extend(base);
-    lock(&core.outbox).push(
-        OutboxEntry {
-            uuid: identity::uuid_v4(),
-            event: name,
-            timestamp,
-            properties,
-            attempts: 0,
-            next_at_ms: 0,
-        },
-        now_ms,
-    );
-    drop(consent);
+    let entry = OutboxEntry {
+        uuid: uuid::Uuid::new_v4().to_string(),
+        event: name,
+        timestamp: at
+            .unwrap_or(now)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        queued_ms,
+        properties,
+    };
+    {
+        // Consent is checked under the outbox lock, so a switch-off can't
+        // purge between the check and the append and leave this entry
+        // behind: `set_consent` purges after it has set `Off`.
+        let mut outbox = lock(&core.outbox);
+        if !lock(&CONSENT).queues() {
+            return false;
+        }
+        outbox.push(entry);
+    }
     core.wake();
     true
 }
 
-/// Queues the startup events: `app_installed` once per install (including
-/// an install first launched with sharing off, once it's turned on), an
-/// update that didn't land, then `app_launched` with how the previous run
-/// ended. Also sends a due `day_summary`. Call after settings have loaded.
-pub fn capture_launch(launch_mode: LaunchMode, previous: &crate::session::PreviousRun) {
+/// Queues the startup events, timestamped `launched_at`: an update that
+/// didn't land, then `app_launched` with how the previous run ended. Also
+/// queues a due `day_summary`. Call after settings have loaded.
+pub fn capture_launch(
+    launch_mode: LaunchMode,
+    previous: &crate::session::PreviousRun,
+    launched_at: DateTime<Utc>,
+) {
     let Some(core) = CORE.get() else {
         return;
     };
-    if !core.identity.app_installed_queued
-        && enqueue(
-            AnalyticsEvent::AppInstalled {
-                estimated: core.identity.first_seen_estimated,
-            },
-            None,
-        )
-    {
-        identity::mark_app_installed_queued();
-    }
     if let Some(target_version) = previous.update_not_applied {
         enqueue(
             AnalyticsEvent::UpdateFailed {
@@ -269,7 +245,7 @@ pub fn capture_launch(launch_mode: LaunchMode, previous: &crate::session::Previo
                 error_kind: None,
                 target_version,
             },
-            None,
+            Some(launched_at),
         );
     }
     // No session file: a clean exit deleted it, or this install never ran.
@@ -285,7 +261,7 @@ pub fn capture_launch(launch_mode: LaunchMode, previous: &crate::session::Previo
             previous_phase: previous.phase,
             previous_uptime_min: previous.uptime_min,
         },
-        None,
+        Some(launched_at),
     );
     day::check_day();
 }
@@ -303,16 +279,18 @@ pub fn is_new_install() -> bool {
 /// Applies the consent gate (plan 3.8). Turning sharing off deletes the
 /// outbox at once; reaching the current disclosure wakes the sender so held
 /// events go out with their original timestamps.
-pub fn set_consent(opt_in: bool, version: u32, prompt_exhausted: bool) {
-    let next = if !opt_in || (version < ANALYTICS_CONSENT_VERSION && prompt_exhausted) {
+pub fn set_consent(opt_in: bool, version: u32) {
+    let next = if !opt_in {
         Consent::Off
     } else if version >= ANALYTICS_CONSENT_VERSION {
         Consent::On
-    } else {
+    } else if version == 0 {
+        // After the settings migration, only an unfinished onboarding.
         Consent::Hold
+    } else {
+        Consent::Unknown
     };
-    let mut consent = lock(&CONSENT);
-    let previous = std::mem::replace(&mut *consent, next);
+    let previous = std::mem::replace(&mut *lock(&CONSENT), next);
     if previous == next {
         return;
     }
@@ -325,7 +303,6 @@ pub fn set_consent(opt_in: bool, version: u32, prompt_exhausted: bool) {
         Consent::On => core.wake(),
         Consent::Hold | Consent::Unknown => {}
     }
-    drop(consent);
     // Off: the recorder deletes the day file; on: it may owe a summary.
     day::check_day();
 }
@@ -337,36 +314,26 @@ pub fn apply_settings(settings: &VoiceWaveSettings) {
     set_consent(
         settings.anonymous_usage_opt_in,
         settings.analytics_consent_version,
-        settings.analytics_consent_prompt_shows >= ANALYTICS_CONSENT_PROMPT_MAX_SHOWS,
     );
 }
 
-/// One best-effort flush when the app quits, within `EXIT_BUDGET`. Whatever
-/// is left waits in the outbox for the next launch.
-pub fn flush_on_exit() {
-    if let Some(core) = CORE.get() {
-        flush(core, Some(Instant::now() + EXIT_BUDGET));
-    }
-}
-
-/// Frontend events (plan 3.9). A payload that isn't a known `ClientEvent`
-/// fails to deserialize, so nothing is queued.
+/// Frontend events (plan 3.9). Only the variants matched here may come from
+/// the webview; anything else, or a payload that doesn't deserialize, is
+/// dropped, so the frontend can't invent events or values. Mirrored by
+/// `ClientEvent` in src/types/voicewave.ts.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn track(event: ClientEvent) {
-    capture(event.into());
-}
-
-/// The app version, or `other` for anything that isn't plain semver (the
-/// only free-form string the plan allows, section 2).
-fn semver_or_other(version: &str) -> &str {
-    let mut parts = version.split('.');
-    let is_semver = parts.clone().count() == 3
-        && parts.all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
-    if is_semver {
-        version
-    } else {
-        "other"
+pub fn track(event: AnalyticsEvent) {
+    match event {
+        AnalyticsEvent::OnboardingStep { .. }
+        | AnalyticsEvent::OnboardingFinished { .. }
+        | AnalyticsEvent::AcquisitionAnswered { .. }
+        | AnalyticsEvent::UpdateFailed {
+            stage: UpdateStage::Download | UpdateStage::Verify | UpdateStage::Install,
+            error_kind: Some(_),
+            ..
+        } => capture(event),
+        _ => tracing::warn!("analytics: the webview can't send {event:?}"),
     }
 }
 
@@ -378,7 +345,7 @@ impl Core {
         let mut insert = |key: &str, value: Value| {
             properties.insert(key.to_string(), value);
         };
-        insert("app_version", json!(env!("CARGO_PKG_VERSION")));
+        insert("app_version", json!(Semver::current()));
         insert("session_id", json!(self.identity.session_id));
         insert("os_major", json!(self.os_major));
         insert("gpu_vendor", json!(live.gpu_vendor));
@@ -437,51 +404,27 @@ fn run_sender(core: &'static Core) {
         if core.wait(IDLE_FLUSH) {
             std::thread::sleep(DEBOUNCE);
         }
-        flush(core, None);
+        // A day that ended while the app sat in the tray gets its summary
+        // queued here, without waiting for the next dictation.
+        if lock(&CONSENT).queues() {
+            day::check_day();
+        }
+        flush(core);
     }
 }
 
-/// When a failed entry is next tried: `min(2 s × 2^attempts, 5 min)` ± 20%.
-fn retry_at(now_ms: u64, attempts: u32) -> u64 {
-    let backoff = 2_000u64
-        .saturating_mul(1u64 << attempts.min(20))
-        .min(MAX_BACKOFF_MS);
-    let jitter = rand::thread_rng().gen_range(0.8..=1.2);
-    now_ms + (backoff as f64 * jitter) as u64
-}
-
-/// Sends due entries, oldest first, until none are due or a send fails.
-/// With a deadline (quit) it skips when a flush is already running and caps
-/// each request at the time left.
-fn flush(core: &Core, deadline: Option<Instant>) {
-    let _sending = match deadline {
-        None => lock(&core.sending),
-        Some(_) => match core.sending.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return,
-        },
-    };
+/// Sends the outbox oldest first, `MAX_BATCH` per POST, until it's empty or a
+/// send fails. A failed batch stays queued for the next pass.
+fn flush(core: &Core) {
     loop {
         // The second consent check: sharing may have changed since queueing.
         if *lock(&CONSENT) != Consent::On {
             return;
         }
-        let (now_ms, _) = now();
-        let batch = lock(&core.outbox).due(now_ms, MAX_BATCH);
+        let batch = lock(&core.outbox).oldest(now_ms(), MAX_BATCH);
         if batch.is_empty() {
             return;
         }
-        let timeout = match deadline {
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return;
-                }
-                Some(left)
-            }
-            None => None,
-        };
         let uuids: Vec<String> = batch.iter().map(|entry| entry.uuid.clone()).collect();
         let agent = core.agent.get_or_init(|| {
             crate::net::agent_builder()
@@ -489,13 +432,7 @@ fn flush(core: &Core, deadline: Option<Instant>) {
                 .timeout_read(Duration::from_secs(10))
                 .build()
         });
-        match posthog::send(
-            agent,
-            &core.api_key,
-            &core.identity.install_id,
-            &batch,
-            timeout,
-        ) {
+        match posthog::send(agent, &core.api_key, &core.identity.install_id, &batch) {
             SendOutcome::Delivered(status) => {
                 tracing::info!("analytics: sent {} events (HTTP {status})", batch.len());
                 lock(&core.outbox).remove(&uuids);
@@ -511,8 +448,6 @@ fn flush(core: &Core, deadline: Option<Instant>) {
             }
             SendOutcome::Retry(reason) => {
                 tracing::debug!("analytics: send failed ({reason}); will retry");
-                let (now_ms, _) = now();
-                lock(&core.outbox).defer(&uuids, |attempts| retry_at(now_ms, attempts));
                 return;
             }
         }

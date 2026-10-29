@@ -8,7 +8,7 @@ use super::polish::Delivery;
 use super::post_process::FormattedText;
 use super::transcribe::{DecodeModeChoice, Decoded, TranscribingStart, Transcription};
 use super::DictationRun;
-use crate::analytics::{self, DictationFact, FallbackReason, Finished, InsertKind};
+use crate::analytics::{self, DictationFact, Finished, InsertKind};
 use crate::diagnostics::LatencyMetricRecord;
 use crate::history::PolishHistoryMeta;
 use crate::settings::DecodeMode;
@@ -348,10 +348,6 @@ impl VoiceWaveController {
                 },
                 app_kind: insertion_app_kind,
                 format_style: settings.effective_polish_profile(),
-                fallback: latency
-                    .asr_step_down_reason
-                    .as_deref()
-                    .and_then(|reason| FallbackReason::classify(reason, latency.backend_fallback)),
             }));
         }
         // Always-on aggregate stats (counts and durations only, never text)

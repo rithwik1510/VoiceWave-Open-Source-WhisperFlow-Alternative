@@ -42,6 +42,9 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 unicode-normalization = "0.1.24"
 url = "2.5.4"
+# Already in the tree through Tauri (and winreg through embed-resource): no
+# new crates. Analytics ids and the HKCU key that holds them.
+uuid = { version = "1.20", features = ["v4"] }
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 ureq = "2.12.0"
 # Model downloads: ureq's own rustls build trusts only the bundled roots, so
@@ -51,6 +54,9 @@ ureq = "2.12.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-native-certs = "0.8"
 webpki-roots = "1"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "sync", "time"] }

@@ -77,8 +77,6 @@ export interface VoiceWaveSettings {
    * TelemetryDeck notice, 2 = the PostHog disclosure (or sharing is off).
    * PostHog sends only at ANALYTICS_CONSENT_VERSION (src/lib/telemetry.ts). */
   analyticsConsentVersion?: number;
-  /** Unanswered showings of the v2 privacy prompt; it stops asking at 3. */
-  analyticsConsentPromptShows?: number;
   /** The onboarding acquisition question was shown and left; never asked again. */
   acquisitionAsked?: boolean;
   toggleHotkey: string;
@@ -304,9 +302,10 @@ export type TelemetryEvent =
   | { type: "worker-crashed"; worker: WorkerKind; exit: WorkerExit }
   | { type: "panicked"; area: PanicArea };
 
-/** Plan 024 analytics events the webview sends through `track`. Mirrors
- * `ClientEvent` in src-tauri/src/analytics/events.rs; the backend drops
- * anything else. Fixed values and numbers only. */
+/** Plan 024 analytics events the webview sends through `track`: the
+ * variants the backend's `track` command accepts of `AnalyticsEvent`
+ * (src-tauri/src/analytics/events.rs), in its wire shape (`event` tag,
+ * snake_case fields). The backend drops anything else. Fixed values only. */
 export type OnboardingStepName = "welcome" | "mic" | "speak" | "done";
 /** Plan 024 section 7, in display order. */
 export type AcquisitionAnswer =
@@ -328,12 +327,11 @@ export type AcquisitionAnswer =
 export type UpdateFailureStage = "download" | "verify" | "install";
 export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | "other";
 export type ClientEvent =
-  | { type: "onboarding_step"; step: OnboardingStepName; secondsOnPrevious: number }
-  | { type: "onboarding_finished"; outcome: "finished" | "skipped"; totalS: number }
-  | { type: "consent_answered"; choice: "keep_sharing" }
-  | { type: "acquisition_answered"; answer: AcquisitionAnswer }
-  /** `targetVersion` is sent as `other` unless it's plain `major.minor.patch`. */
-  | { type: "update_failed"; stage: UpdateFailureStage; errorKind: UpdateErrorKind; targetVersion: string };
+  | { event: "onboarding_step"; step: OnboardingStepName }
+  | { event: "onboarding_finished"; outcome: "finished" | "skipped" }
+  | { event: "acquisition_answered"; answer: AcquisitionAnswer }
+  /** `target_version` is sent as `other` unless it's plain `major.minor.patch`. */
+  | { event: "update_failed"; stage: UpdateFailureStage; error_kind: UpdateErrorKind; target_version: string };
 
 export interface DiagnosticsExportResult {
   filePath: string;

@@ -3,7 +3,6 @@
 
 use super::outbox::OutboxEntry;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 /// EU Cloud (chosen 2026-10-28); the project discards client IPs.
 const BATCH_URL: &str = "https://eu.i.posthog.com/batch/";
@@ -14,18 +13,16 @@ pub enum SendOutcome {
     /// 400, 401, 403, 413: they can never succeed, so remove them too.
     Rejected(u16),
     /// Network error, 408, 429, 5xx (or anything else unexpected): keep them
-    /// and back off. The reason is for the log.
+    /// for the next pass. The reason is for the log.
     Retry(String),
 }
 
-/// POSTs `entries` as one batch. `timeout` caps the whole request (used for
-/// the quit-time flush); otherwise the agent's own timeouts apply.
+/// POSTs `entries` as one batch.
 pub fn send(
     agent: &ureq::Agent,
     api_key: &str,
     distinct_id: &str,
     entries: &[OutboxEntry],
-    timeout: Option<Duration>,
 ) -> SendOutcome {
     let batch: Vec<Value> = entries
         .iter()
@@ -41,13 +38,11 @@ pub fn send(
         .collect();
     let body = json!({ "api_key": api_key, "batch": batch }).to_string();
 
-    let mut request = agent
+    match agent
         .post(BATCH_URL)
-        .set("Content-Type", "application/json");
-    if let Some(timeout) = timeout {
-        request = request.timeout(timeout);
-    }
-    match request.send_string(&body) {
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+    {
         Ok(response) if (200..300).contains(&response.status()) => {
             SendOutcome::Delivered(response.status())
         }

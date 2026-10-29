@@ -438,50 +438,30 @@ export function Onboarding({
   const track = useCallback((event: FunnelEvent) => {
     void trackFunnelEvent(event).catch(() => undefined);
   }, []);
-  // PostHog (plan 024) gets each step with the seconds spent on the one
-  // before, per run of the flow; the backend applies the consent gate.
-  const startedAtRef = useRef(Date.now());
-  const stepStartedAtRef = useRef(Date.now());
-
-  const reachStep = useCallback(
-    (reached: OnboardingStep) => {
-      track({ type: "Onboarding.stepReached", step: reached });
-      // Welcome is on screen from mount and has no step before it; its time
-      // counts toward the step after it.
-      const now = Date.now();
-      const secondsOnPrevious =
-        reached === "welcome" ? 0 : Math.max(0, Math.round((now - stepStartedAtRef.current) / 1000));
-      if (reached !== "welcome") {
-        stepStartedAtRef.current = now;
-      }
-      void trackAnalytics({ type: "onboarding_step", step: reached, secondsOnPrevious });
-    },
-    [track]
-  );
-
-  // Welcome counts when the user acts on it (not on mount), so the toggle
-  // shown on that screen decides; later steps count on arrival.
+  // TelemetryDeck counts welcome when the user acts on it (not on mount), so
+  // the toggle shown on that screen decides; later steps count on arrival.
+  // PostHog (plan 024) gets every step on arrival, welcome included, and the
+  // gaps between timestamps give the time on each step. Its consent gate is
+  // in the backend: a new install's events wait until onboarding ends, and
+  // turning sharing off deletes them.
   useEffect(() => {
+    void trackAnalytics({ event: "onboarding_step", step });
     if (step !== "welcome") {
-      reachStep(step);
+      track({ type: "Onboarding.stepReached", step });
     }
-  }, [reachStep, step]);
+  }, [step, track]);
 
   const acquisitionAsked = step === "done" && askAcquisition;
 
   const leaveSetup = (outcome: "finished" | "skipped") => {
     if (step === "welcome") {
-      reachStep("welcome");
+      track({ type: "Onboarding.stepReached", step: "welcome" });
     }
     track({ type: "Onboarding.completed", outcome });
-    void trackAnalytics({
-      type: "onboarding_finished",
-      outcome,
-      totalS: Math.max(0, Math.round((Date.now() - startedAtRef.current) / 1000))
-    });
-    // Sent once, on leaving: the last chip picked, or skipped for none.
+    void trackAnalytics({ event: "onboarding_finished", outcome });
+    // Sent once, on leaving: the choice picked, or skipped for none.
     if (acquisitionAsked) {
-      void trackAnalytics({ type: "acquisition_answered", answer: acquisition ?? "skipped" });
+      void trackAnalytics({ event: "acquisition_answered", answer: acquisition ?? "skipped" });
     }
     onComplete(acquisitionAsked);
   };
@@ -569,10 +549,10 @@ export function Onboarding({
   }, [installModel, makeModelActive, modelChoice, modelReady]);
 
   const begin = useCallback(() => {
-    reachStep("welcome");
+    track({ type: "Onboarding.stepReached", step: "welcome" });
     startDownload();
     setStep("mic");
-  }, [reachStep, startDownload]);
+  }, [startDownload, track]);
 
   const handleMicHeard = useCallback(() => {
     setMicHeard(true);

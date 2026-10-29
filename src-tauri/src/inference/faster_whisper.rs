@@ -764,12 +764,13 @@ fn read_worker_response_line_with_timeout(
     timeout: Duration,
     record_crash: bool,
 ) -> Result<String, InferenceError> {
-    let record = |exit, cause| {
+    let record = |exit| {
         if record_crash {
             telemetry::record(TelemetryEvent::WorkerCrashed {
                 worker: WorkerKind::FasterWhisper,
                 exit,
-                cause,
+                // faster-whisper is gone in 0.8.0: no exit-cause classifying.
+                cause: WorkerCause::Unknown,
             });
         }
     };
@@ -794,24 +795,7 @@ fn read_worker_response_line_with_timeout(
         Ok(Ok((stdout, bytes, line))) => {
             worker.stdout = Some(stdout);
             if bytes == 0 {
-                // Exit code and the whole stderr tail (plan 024 section 4.4),
-                // after a moment for the process and the stderr drain to end.
-                std::thread::sleep(Duration::from_millis(100));
-                let code = worker
-                    .child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .and_then(|status| status.code());
-                let tail: Vec<String> = worker
-                    .stderr_tail
-                    .lock()
-                    .map(|tail| tail.iter().cloned().collect())
-                    .unwrap_or_default();
-                record(
-                    WorkerExit::Crash,
-                    telemetry::worker_exit_cause("faster-whisper", code, &tail),
-                );
+                record(WorkerExit::Crash);
                 return Err(InferenceError::RuntimeJoin(format!(
                     "faster-whisper worker exited unexpectedly. stderr: {}",
                     stderr_tail_text(&worker.stderr_tail, 8)
@@ -821,13 +805,13 @@ fn read_worker_response_line_with_timeout(
         }
         Ok(Err((stdout, err))) => {
             worker.stdout = Some(stdout);
-            record(WorkerExit::Crash, WorkerCause::Unknown);
+            record(WorkerExit::Crash);
             Err(InferenceError::RuntimeJoin(format!(
                 "worker stdout read failed: {err}"
             )))
         }
         Err(RecvTimeoutError::Timeout) => {
-            record(WorkerExit::Timeout, WorkerCause::Unknown);
+            record(WorkerExit::Timeout);
             let timeout_ms = timeout.as_millis();
             let pid = worker.child.id();
             let _ = worker.child.kill();
@@ -837,7 +821,7 @@ fn read_worker_response_line_with_timeout(
             )))
         }
         Err(RecvTimeoutError::Disconnected) => {
-            record(WorkerExit::Crash, WorkerCause::Unknown);
+            record(WorkerExit::Crash);
             let _ = worker.child.kill();
             let _ = worker.child.wait();
             Err(InferenceError::RuntimeJoin(

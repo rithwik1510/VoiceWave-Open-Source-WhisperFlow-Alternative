@@ -29,7 +29,6 @@ const SAME_BOOT_TOLERANCE_MS: u64 = 120_000;
 struct SessionFile {
     v: u32,
     app_version: String,
-    pid: u32,
     started_at_ms: u64,
     last_alive_ms: u64,
     /// When Windows booted, to the minute.
@@ -109,7 +108,6 @@ fn start_at(path: PathBuf) {
         file: SessionFile {
             v: 1,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
-            pid: std::process::id(),
             started_at_ms: now,
             last_alive_ms: now,
             boot_at_ms,
@@ -137,23 +135,15 @@ pub fn previous() -> PreviousRun {
     PREVIOUS.get().copied().unwrap_or_default()
 }
 
-/// A corrupt or unreadable file counts as absent. So does one whose process
-/// is still running VoiceWave: single instance should make that impossible.
+/// A corrupt or unreadable file counts as absent. Single instance (claimed
+/// before `start`) means no other run can still own the file.
 fn previous_file(path: &Path) -> Option<SessionFile> {
-    let file = match atomic_file::load_with_recovery(path, "session", |raw| {
+    match atomic_file::load_with_recovery(path, "session", |raw| {
         serde_json::from_str::<SessionFile>(raw)
     }) {
-        StoreLoad::Loaded(file) | StoreLoad::Recovered(file) => file,
-        StoreLoad::Missing | StoreLoad::Reset => return None,
-    };
-    if file.pid != std::process::id() && process_is_voicewave(file.pid) {
-        tracing::warn!(
-            "session file belongs to a running VoiceWave (pid {})",
-            file.pid
-        );
-        return None;
+        StoreLoad::Loaded(file) | StoreLoad::Recovered(file) => Some(file),
+        StoreLoad::Missing | StoreLoad::Reset => None,
     }
-    Some(file)
 }
 
 /// Plan section 5's table, in order.
@@ -212,7 +202,7 @@ pub fn set_phase(phase: SessionPhase) {
     }
 }
 
-/// The updater is about to download and run the installer for `target`.
+/// The updater has downloaded `target` and is about to run its installer.
 /// Written at once: the installer may end this process at any moment.
 pub fn mark_update_installing(target: Semver) {
     if let Some(state) = lock(&STATE).as_mut() {
@@ -222,7 +212,7 @@ pub fn mark_update_installing(target: Semver) {
     write_now();
 }
 
-/// The update failed before the installer took over.
+/// The installer failed to start.
 pub fn clear_update_installing() {
     if let Some(state) = lock(&STATE).as_mut() {
         if state.file.phase == SessionPhase::Updating {
@@ -343,47 +333,4 @@ fn boot_at_ms(now: u64) -> u64 {
 #[cfg(not(windows))]
 fn boot_at_ms(_now: u64) -> u64 {
     0
-}
-
-/// `pid` is a running process with this executable's file name.
-#[cfg(windows)]
-fn process_is_voicewave(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    let Some(own_name) = std::env::current_exe().ok().and_then(|path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-    }) else {
-        return false;
-    };
-    // SAFETY: a null handle (no such process, no access) is handled below.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return false;
-    }
-    let mut exit_code = 0u32;
-    let mut buffer = [0u16; 1024];
-    let mut len = buffer.len() as u32;
-    // SAFETY: `handle` is live; the out pointers are valid for the calls.
-    let running = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
-        && exit_code == STILL_ACTIVE as u32
-        && unsafe {
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len)
-        } != 0;
-    // SAFETY: `handle` came from OpenProcess and is closed once.
-    unsafe { CloseHandle(handle) };
-    running
-        && String::from_utf16_lossy(&buffer[..len as usize])
-            .rsplit(['\\', '/'])
-            .next()
-            .is_some_and(|name| name.to_lowercase() == own_name)
-}
-
-#[cfg(not(windows))]
-fn process_is_voicewave(_pid: u32) -> bool {
-    false
 }

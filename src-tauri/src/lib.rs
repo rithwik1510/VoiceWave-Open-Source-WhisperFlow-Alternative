@@ -1212,8 +1212,9 @@ fn get_support_context() -> SupportContext {
     }
 }
 
-/// The updater is about to download and install `target_version`, so the
-/// next launch can tell whether it landed (plan 024 section 5).
+/// The updater has downloaded `target_version` and is about to run its
+/// installer, so the next launch can tell whether it landed (plan 024
+/// section 5).
 #[cfg(feature = "desktop")]
 #[tauri::command]
 fn mark_update_installing(target_version: String) -> Result<(), String> {
@@ -1225,7 +1226,7 @@ fn mark_update_installing(target_version: String) -> Result<(), String> {
     Ok(())
 }
 
-/// The update threw before the installer took over.
+/// The update's installer failed to start.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 fn clear_update_installing() {
@@ -2453,6 +2454,7 @@ pub fn run() {
             // First, before anything can save settings: analytics tells a
             // pre-0.7.7 install from a new one by whether they existed.
             analytics::init();
+            let launched_at = chrono::Utc::now();
             // The main window is created hidden (tauri.conf.json) so a login
             // launch never flashes it. Normal launches show it straight away.
             telemetry::attach(app.handle().clone());
@@ -2471,7 +2473,7 @@ pub fn run() {
 
             // Startup analytics, once settings (the consent gate) are loaded.
             // The engine status comes first so `app_launched` carries the
-            // speech context.
+            // speech context; its timestamp stays the launch.
             let controller_for_analytics = controller.clone();
             tauri::async_runtime::spawn(async move {
                 controller_for_analytics.speech_engine_status().await;
@@ -2482,6 +2484,7 @@ pub fn run() {
                         analytics::LaunchMode::Manual
                     },
                     &session::previous(),
+                    launched_at,
                 );
             });
 
@@ -2710,10 +2713,11 @@ pub fn run() {
         .run(|_app, event| {
             // Covers every exit route (window close, app.exit, OS shutdown),
             // not just the tray Quit item.
+            // The session file goes first: a slow worker shutdown during a
+            // Windows shutdown must not leave this run looking like a crash.
             if matches!(event, tauri::RunEvent::Exit) {
-                shutdown_inference_workers();
                 session::clear();
-                analytics::flush_on_exit();
+                shutdown_inference_workers();
             }
         });
 }

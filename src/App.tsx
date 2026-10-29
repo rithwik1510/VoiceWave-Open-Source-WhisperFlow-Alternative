@@ -40,7 +40,7 @@ import {
   openIssueReport,
   openLogsFolder
 } from "./lib/tauri";
-import { ANALYTICS_CONSENT_PROMPT_MAX_SHOWS, ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
+import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
@@ -723,7 +723,6 @@ function App() {
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,
-    noteAnalyticsConsentShown,
     setLlmPolishEnabled,
     polishModelProgress,
     setMicVolumeGuard,
@@ -819,25 +818,15 @@ function App() {
     tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
   // "A quick privacy check" (plan 024): users sharing under an older
   // disclosure (the settings migration leaves them below version 2) see it
-  // after onboarding. The model gate goes first so the two never stack.
-  // Sharing off needs no check: nothing is sent. After
-  // ANALYTICS_CONSENT_PROMPT_MAX_SHOWS unanswered launches it stops asking.
-  // Once shown, it stays up this launch until answered, even though
-  // counting the showing may reach the limit.
-  const [analyticsConsentShown, setAnalyticsConsentShown] = useState(false);
+  // after onboarding, on every launch until they answer; PostHog records
+  // nothing for them until then. The model gate goes first so the two never
+  // stack. Sharing off needs no check: nothing is sent.
   const showAnalyticsConsent =
     tauriAvailable &&
     !showOnboarding &&
     !showModelSetupGate &&
     settings.anonymousUsageOptIn &&
-    (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION &&
-    (analyticsConsentShown || (settings.analyticsConsentPromptShows ?? 0) < ANALYTICS_CONSENT_PROMPT_MAX_SHOWS);
-  useEffect(() => {
-    if (showAnalyticsConsent && !analyticsConsentShown) {
-      setAnalyticsConsentShown(true);
-      void noteAnalyticsConsentShown();
-    }
-  }, [analyticsConsentShown, noteAnalyticsConsentShown, showAnalyticsConsent]);
+    (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU
@@ -3765,10 +3754,12 @@ function App() {
               </p>
             </header>
             <p className="mt-4 text-sm leading-relaxed text-label">
-              Each day you use it: how many dictations worked or failed, how fast text appeared, and the kind of
-              app it went into (such as a browser or a code editor, never its name). Also setup progress, model
-              downloads, updates, crashes and your answers to our two optional questions.
+              Each day you use it: how many dictations worked, failed or were retried, how fast text appeared,
+              how the text got in, and the kind of app it went into (such as a browser or a code editor, never its
+              name). Also how the app started and closed, setup progress, model downloads, updates, crashes, and
+              your answer if you use “Something wrong?”.
             </p>
+            <UsageCountDetails />
             <p className="mt-3 text-sm leading-relaxed text-label">
               Never sent: audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
               device names, error messages, or your IP address.

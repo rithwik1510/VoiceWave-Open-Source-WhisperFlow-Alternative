@@ -23,7 +23,6 @@ import {
   getSessionHistory,
   getSupportContext,
   insertText,
-  track,
   listenVoicewaveAudioQuality,
   listenVoicewaveHistoryUpdated,
   listenVoicewaveHotkey,
@@ -1519,9 +1518,8 @@ export function useVoiceWave() {
   );
 
   // "A quick privacy check" (plan 024): records the choice and the current
-  // disclosure in one save so it never shows again. "Keep sharing" is sent
-  // after the save: on the last allowed showing the backend is off until the
-  // version lands, and would drop it. "Turn off" sends nothing.
+  // disclosure in one save so it never shows again. Until then the backend
+  // records nothing for PostHog.
   const resolveAnalyticsConsent = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {
@@ -1535,9 +1533,6 @@ export function useVoiceWave() {
       }
       try {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
-        if (enabled) {
-          void track({ type: "consent_answered", choice: "keep_sharing" });
-        }
       } catch (persistErr) {
         setError(
           persistErr instanceof Error
@@ -1548,24 +1543,6 @@ export function useVoiceWave() {
     },
     [settings, tauriAvailable]
   );
-
-  // Counts a launch that showed the privacy check. At the limit the dialog
-  // stops showing and the backend keeps PostHog off (TelemetryDeck carries on).
-  const noteAnalyticsConsentShown = useCallback(async () => {
-    const nextSettings = {
-      ...settings,
-      analyticsConsentPromptShows: (settings.analyticsConsentPromptShows ?? 0) + 1
-    };
-    setSettings(nextSettings);
-    if (!tauriAvailable) {
-      return;
-    }
-    try {
-      setSettings(normalizeSettings(await updateSettings(nextSettings)));
-    } catch {
-      // Non-fatal: this showing just isn't counted.
-    }
-  }, [settings, tauriAvailable]);
 
   const exportDiagnosticsBundle = useCallback(async () => {
     if (!tauriAvailable) {
@@ -2844,7 +2821,6 @@ export function useVoiceWave() {
     completeOnboarding,
     restartOnboarding,
     resolveAnalyticsConsent,
-    noteAnalyticsConsentShown,
     setLlmPolishEnabled,
     polishModelProgress,
     setPushToTalkHotkey,

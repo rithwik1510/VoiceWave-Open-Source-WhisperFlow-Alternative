@@ -15,7 +15,7 @@
 
 use crate::analytics::{self, AnalyticsEvent, DictationFact};
 use crate::insertion::AppKind;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
 
@@ -51,7 +51,7 @@ pub enum TelemetryEvent {
 
 /// Why a dictation failed. User cancels, "too short" and sessions replaced
 /// by a newer dictation are never recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DictationFailureKind {
     /// No speech model installed.
@@ -73,7 +73,7 @@ pub enum DictationFailureKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkerKind {
     AsrGpu,
@@ -82,7 +82,7 @@ pub enum WorkerKind {
     Polish,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkerExit {
     /// Exited (or its pipe broke) mid-request.
@@ -96,7 +96,7 @@ pub enum WorkerExit {
 
 /// Why a speech helper died, classified on the PC from its exit code and
 /// stderr (plan 4.4). The stderr text itself never leaves the local log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerCause {
     AccessViolation,
@@ -152,7 +152,7 @@ pub fn worker_exit_cause(worker: &str, code: Option<i32>, stderr: &[String]) -> 
 
 /// Top-level module of the panicking source file; `Dependency` for anything
 /// outside this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PanicArea {
     State,

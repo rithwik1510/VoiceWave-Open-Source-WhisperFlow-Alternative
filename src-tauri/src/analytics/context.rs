@@ -4,7 +4,7 @@
 //! queued, so each one describes the app at that moment.
 
 use crate::inference::{self, gpu_select, AsrRung};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, PoisonError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -27,7 +27,7 @@ pub enum SpeechPath {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFamily {
     Parakeet,

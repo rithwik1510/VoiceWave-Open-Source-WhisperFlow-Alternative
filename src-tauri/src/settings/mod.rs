@@ -176,18 +176,14 @@ pub struct VoiceWaveSettings {
     /// (not the container default `true`) and go through the consent notice.
     #[serde(default)]
     pub anonymous_usage_opt_in: bool,
-    /// Which analytics disclosure the user has seen. 0 = never seen (legacy
-    /// installs, or a new install that has not finished onboarding); 1 = saw
-    /// the TelemetryDeck notice in onboarding or the existing-user prompt;
-    /// 2 = saw the PostHog disclosure (plan 024), or has sharing off. PostHog
-    /// sends only at `ANALYTICS_CONSENT_VERSION` (see `analytics::set_consent`).
+    /// Which analytics disclosure the user has seen. 0 = never seen (a new
+    /// install that has not finished onboarding); 1 = saw the TelemetryDeck
+    /// notice in onboarding or the existing-user prompt; 2 = saw the PostHog
+    /// disclosure (plan 024), or has sharing off. PostHog sends only at
+    /// `ANALYTICS_CONSENT_VERSION` and records nothing at 1 (see
+    /// `analytics::set_consent`).
     #[serde(default)]
     pub analytics_consent_version: u32,
-    /// How many times the v2 privacy prompt has been shown without an
-    /// answer. At `ANALYTICS_CONSENT_PROMPT_MAX_SHOWS` it stops asking and
-    /// PostHog stays off; TelemetryDeck carries on as before.
-    #[serde(default)]
-    pub analytics_consent_prompt_shows: u32,
     /// The onboarding "Where did you hear about VoiceWave?" question was
     /// shown and left (answered or skipped), so it never shows again.
     #[serde(default)]
@@ -283,7 +279,6 @@ impl Default for VoiceWaveSettings {
             diagnostics_opt_in: false,
             anonymous_usage_opt_in: true,
             analytics_consent_version: 0,
-            analytics_consent_prompt_shows: 0,
             acquisition_asked: false,
             toggle_hotkey: LOCKED_TOGGLE_HOTKEY.to_string(),
             push_to_talk_hotkey: DEFAULT_PUSH_TO_TALK_HOTKEY.to_string(),
@@ -422,8 +417,6 @@ pub fn normalize_pro_settings(settings: &mut VoiceWaveSettings) {
 /// changes enough that every user should be asked again. 2 = PostHog (plan
 /// 024).
 pub const ANALYTICS_CONSENT_VERSION: u32 = 2;
-/// Unanswered showings of the v2 prompt before it stops asking.
-pub const ANALYTICS_CONSENT_PROMPT_MAX_SHOWS: u32 = 3;
 
 /// Moves older consent states to where plan 024 needs them:
 /// - Sharing off: nothing is sent under any version, so there's nothing to
@@ -431,8 +424,10 @@ pub const ANALYTICS_CONSENT_PROMPT_MAX_SHOWS: u32 = 3;
 /// - On, onboarding done, never saw a notice: before analytics became
 ///   on-by-default, `true` could only come from the user flipping the
 ///   Settings switch, so that's explicit consent to the v1 notice. Version 1,
-///   so the v2 prompt still asks before PostHog sends.
+///   so the v2 prompt asks before PostHog records anything.
 /// - On at version 1 stays at 1 until the v2 prompt is answered.
+///
+/// Afterwards, sharing on at version 0 only means onboarding isn't finished.
 fn migrate_analytics_consent(settings: &mut VoiceWaveSettings) {
     if settings.analytics_consent_version >= ANALYTICS_CONSENT_VERSION {
         return;

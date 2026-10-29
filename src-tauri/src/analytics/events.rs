@@ -11,15 +11,15 @@ use crate::telemetry::{DictationFailureKind, PanicArea, WorkerCause, WorkerExit,
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Serialized with the variant name as `event` and each field as an event
-/// property, e.g. `{"event":"app_launched","launch_mode":"manual"}`.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// property, e.g. `{"event":"app_launched","launch_mode":"manual"}`. The
+/// webview sends the same shape through `track`, which accepts only the
+/// variants it lists.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AnalyticsEvent {
-    /// The first launch of an install, sent once. `estimated` marks an
-    /// install that predates 0.7.7 (its first-seen time is a backfill).
-    AppInstalled { estimated: bool },
     /// Every launch, with how the previous run ended (plan section 5). Also
-    /// updates the PostHog person (see `sets_person`).
+    /// updates the PostHog person (`$set`, `$set_once`; see `enqueue`). A new
+    /// install's first launch has `previous_exit = first_run`.
     AppLaunched {
         launch_mode: LaunchMode,
         previous_exit: PreviousExit,
@@ -29,25 +29,16 @@ pub enum AnalyticsEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         previous_uptime_min: Option<u64>,
     },
-    /// The frontend reached an onboarding step (through `track`).
-    OnboardingStep {
-        step: OnboardingStep,
-        seconds_on_previous: u32,
-    },
+    /// The frontend showed an onboarding step (through `track`). Time on a
+    /// step is the gap to the next event's timestamp.
+    OnboardingStep { step: OnboardingStep },
     /// Onboarding finished or skipped (through `track`).
-    OnboardingFinished {
-        outcome: OnboardingOutcome,
-        total_s: u32,
-    },
-    /// The user answered the v2 privacy check with "Keep sharing" (through
-    /// `track`). Turning sharing off sends nothing.
-    ConsentAnswered { choice: ConsentChoice },
+    OnboardingFinished { outcome: OnboardingOutcome },
     /// "Where did you hear about VoiceWave?" on the onboarding done step
     /// (through `track`). Also stored on the person, see `enqueue`.
     AcquisitionAnswered { answer: Acquisition },
-    /// The install's first successful dictation, sent once.
-    FirstDictation { latency_ms: u64, audio_ms: u64 },
-    /// The first successful dictation of each UTC day.
+    /// The first successful dictation of each UTC day. A person's first one
+    /// is the install's first dictation.
     ActiveDay,
     /// One earlier UTC day's dictations (plan 4.2), timestamped that day
     /// at 23:59:59 UTC.
@@ -72,8 +63,6 @@ pub enum AnalyticsEvent {
         #[serde(serialize_with = "snake_case")]
         area: PanicArea,
     },
-    /// A dictation ran on the CPU instead of the GPU.
-    SpeechFallback { reason: FallbackReason },
     ModelDownloadFinished {
         model: ModelFamily,
         outcome: DownloadOutcome,
@@ -94,14 +83,6 @@ pub enum AnalyticsEvent {
         target_version: Semver,
     },
     HotkeyFailed { kind: HotkeyFailureKind },
-}
-
-impl AnalyticsEvent {
-    /// Events that carry `$set` / `$set_once`, so a PostHog person shows the
-    /// install's current setup (plan 3.3).
-    pub(super) fn sets_person(&self) -> bool {
-        matches!(self, Self::AppLaunched { .. } | Self::ConsentAnswered { .. })
-    }
 }
 
 /// The plan's values are snake_case; the TelemetryDeck enums reused here
@@ -127,7 +108,7 @@ fn snake_case<T: Serialize, S: Serializer>(value: &T, serializer: S) -> Result<S
     serializer.serialize_str(&snake)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     /// Started by the "Start with Windows" Run-key entry.
@@ -136,7 +117,7 @@ pub enum LaunchMode {
 }
 
 /// How the previous run ended, from its session file (plan section 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviousExit {
     FirstRun,
@@ -174,8 +155,11 @@ pub enum OnboardingOutcome {
 }
 
 /// `day_summary` properties (plan 4.2). Counts are for the UTC day; the
-/// percentiles come from the day's samples, which never leave the PC.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+/// percentiles come from the day's samples, which never leave the PC. Also
+/// the day file's counters (`day.rs`), where the derived fields stay `None`
+/// until the summary is sent.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DaySummary {
     /// Dictations started (a Try again is counted in `retried` instead).
     pub dictations: u32,
@@ -215,53 +199,12 @@ pub struct DaySummary {
     pub format_style: Option<PolishProfile>,
 }
 
-/// Why a dictation stepped down from the GPU, bucketed from the speech
-/// worker's `asr_step_down_reason` (see `FallbackReason::classify`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FallbackReason {
-    Preparing,
-    Cooldown,
-    DriverDisabled,
-    Unavailable,
-    Fault,
-}
-
-impl FallbackReason {
-    /// The same buckets as the frontend's `classifyGpuStepDown`
-    /// (src/lib/telemetry.ts): prefixes from `primary_rung_blocking` in
-    /// inference/asr_worker.rs. A GPU fault the CPU retried carries free
-    /// error text, so `backend_fallback` identifies it. `gpu-retry-recovered`
-    /// (a fresh GPU worker finished the dictation) is not a step-down.
-    pub fn classify(reason: &str, backend_fallback: bool) -> Option<Self> {
-        if reason.starts_with("gpu-retry-recovered") {
-            None
-        } else if reason.starts_with("gpu-cooldown") {
-            Some(Self::Cooldown)
-        } else if reason.starts_with("driver-disabled") {
-            Some(Self::DriverDisabled)
-        } else if reason.starts_with("gpu-preparing") {
-            Some(Self::Preparing)
-        } else if backend_fallback {
-            Some(Self::Fault)
-        } else {
-            Some(Self::Unavailable)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadOutcome {
     Installed,
     Failed,
     Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConsentChoice {
-    KeepSharing,
 }
 
 /// The acquisition choices, in the order the question lists them (plan
@@ -310,7 +253,7 @@ pub enum UpdateErrorKind {
 }
 
 /// Why the keyboard hook couldn't be set up (see `HotkeyError::failure_kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotkeyFailureKind {
     OtherInstance,
@@ -365,66 +308,5 @@ impl<'de> Deserialize<'de> for Semver {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         Ok(Self::parse(&value))
-    }
-}
-
-/// The events the webview may send through the `track` command, a subset of
-/// `AnalyticsEvent`. An unknown `type` or value fails to deserialize, so the
-/// frontend can't invent events or values. Mirrored by `ClientEvent` in
-/// src/types/voicewave.ts.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum ClientEvent {
-    OnboardingStep {
-        step: OnboardingStep,
-        seconds_on_previous: u32,
-    },
-    OnboardingFinished {
-        outcome: OnboardingOutcome,
-        total_s: u32,
-    },
-    ConsentAnswered {
-        choice: ConsentChoice,
-    },
-    AcquisitionAnswered {
-        answer: Acquisition,
-    },
-    /// The in-app updater threw (src/lib/updater.ts).
-    UpdateFailed {
-        stage: UpdateStage,
-        error_kind: UpdateErrorKind,
-        target_version: Semver,
-    },
-}
-
-impl From<ClientEvent> for AnalyticsEvent {
-    fn from(event: ClientEvent) -> Self {
-        match event {
-            ClientEvent::OnboardingStep {
-                step,
-                seconds_on_previous,
-            } => Self::OnboardingStep {
-                step,
-                seconds_on_previous,
-            },
-            ClientEvent::OnboardingFinished { outcome, total_s } => {
-                Self::OnboardingFinished { outcome, total_s }
-            }
-            ClientEvent::ConsentAnswered { choice } => Self::ConsentAnswered { choice },
-            ClientEvent::AcquisitionAnswered { answer } => Self::AcquisitionAnswered { answer },
-            ClientEvent::UpdateFailed {
-                stage,
-                error_kind,
-                target_version,
-            } => Self::UpdateFailed {
-                stage,
-                error_kind: Some(error_kind),
-                target_version,
-            },
-        }
     }
 }

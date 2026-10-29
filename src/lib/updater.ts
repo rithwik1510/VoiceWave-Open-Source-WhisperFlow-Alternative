@@ -53,16 +53,17 @@ export async function checkForUpdate(): Promise<AvailableUpdate | null> {
 /**
  * Buckets an updater error for the `update_failed` analytics event (plan 024
  * 4.3). The message is matched here and then dropped; it's never sent.
+ * `installing`: the download (and its signature check) had succeeded.
  */
 export function classifyUpdateFailure(
   error: unknown,
-  downloadFinished: boolean
-): { stage: UpdateFailureStage; errorKind: UpdateErrorKind } {
+  installing: boolean
+): { stage: UpdateFailureStage; error_kind: UpdateErrorKind } {
   const message = String(error instanceof Error ? error.message : error).toLowerCase();
   const has = (...needles: string[]) => needles.some((needle) => message.includes(needle));
   const stage: UpdateFailureStage = has("signature", "minisign")
     ? "verify"
-    : downloadFinished
+    : installing
       ? "install"
       : "download";
   const errorKind: UpdateErrorKind = has("network", "request", "dns", "timed out", "connection")
@@ -74,7 +75,7 @@ export function classifyUpdateFailure(
         : has("access is denied", "os error 5")
           ? "permission"
           : "other";
-  return { stage, errorKind };
+  return { stage, error_kind: errorKind };
 }
 
 /**
@@ -86,20 +87,18 @@ export function classifyUpdateFailure(
 export async function installPendingUpdate(
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<void> {
-  if (!pendingUpdate) {
+  const update = pendingUpdate;
+  if (!update) {
     throw new Error("No update is queued. Call checkForUpdate() first.");
   }
 
-  const targetVersion = pendingUpdate.version;
+  const targetVersion = update.version;
   let downloaded = 0;
   let contentLength: number | undefined;
-  let downloadFinished = false;
+  let installing = false;
 
-  // The next launch compares its version against this target, so an update
-  // that never lands is still counted (plan 024 section 5).
-  await markUpdateInstalling(targetVersion);
   try {
-    await pendingUpdate.downloadAndInstall((event) => {
+    await update.download((event) => {
       switch (event.event) {
         case "Started":
           contentLength = event.data.contentLength;
@@ -110,14 +109,21 @@ export async function installPendingUpdate(
           onProgress?.({ phase: "progress", downloaded, contentLength });
           break;
         case "Finished":
-          downloadFinished = true;
           onProgress?.({ phase: "finished" });
           break;
       }
     });
+    // Marked only once the download is in hand, so quitting mid-download
+    // doesn't look like an update that never landed: the next launch
+    // compares its version against this target (plan 024 section 5).
+    await markUpdateInstalling(targetVersion);
+    installing = true;
+    await update.install();
   } catch (error) {
-    await clearUpdateInstalling();
-    void track({ type: "update_failed", ...classifyUpdateFailure(error, downloadFinished), targetVersion });
+    if (installing) {
+      await clearUpdateInstalling();
+    }
+    void track({ event: "update_failed", ...classifyUpdateFailure(error, installing), target_version: targetVersion });
     throw error;
   }
 
