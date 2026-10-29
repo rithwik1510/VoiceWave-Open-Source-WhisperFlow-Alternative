@@ -1284,17 +1284,54 @@ async fn get_diagnostics_report(runtime: State<'_, RuntimeContext>) -> Result<St
 }
 
 /// Opens the prefilled GitHub bug form in the default browser. The frontend
-/// only supplies the engine label; the URL itself is built from fixed parts
-/// plus the diagnostics report.
+/// only supplies the engine label and the reason picked in "Something
+/// wrong?"; the URL itself is built from fixed parts plus the diagnostics
+/// report.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn open_issue_report(
     engine: String,
+    reason: Option<analytics::FeedbackKind>,
     runtime: State<'_, RuntimeContext>,
 ) -> Result<(), String> {
     let report = diagnostics_report(&runtime.controller).await;
-    let url = support::issue_report_url(&engine, &report)?;
+    let url = support::issue_report_url(&engine, reason, &report)?;
     support::shell_open(url.as_ref()).map_err(|err| format!("failed to open the issue form: {err}"))
+}
+
+/// Saves the support file to Downloads and returns its path (plan 024
+/// section 8.2). Reading the logs and compressing run on a blocking thread.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn export_support_zip(runtime: State<'_, RuntimeContext>) -> Result<String, String> {
+    let report = diagnostics_report(&runtime.controller).await.text();
+    let diagnostics = runtime
+        .controller
+        .diagnostics_bundle_json()
+        .await
+        .map_err(|err| String::from(AppError::Controller(err)))?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        support::write_support_zip(&report, &diagnostics)
+    })
+    .await
+    .map_err(|err| format!("the support file task failed: {err}"))??;
+    Ok(path.display().to_string())
+}
+
+/// "Show in folder" after saving a support file. Accepts only a saved support
+/// file, so the webview can't point Explorer anywhere else.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn reveal_support_file(path: String) -> Result<(), String> {
+    let path = std::path::PathBuf::from(path);
+    let is_support_file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("voicewave-support-") && name.ends_with(".zip"));
+    if !is_support_file || !path.is_file() {
+        return Err("not a saved support file".to_string());
+    }
+    support::reveal_in_explorer(&path)
 }
 
 #[cfg(feature = "desktop")]
@@ -2638,6 +2675,8 @@ pub fn run() {
             mark_update_installing,
             clear_update_installing,
             open_logs_folder,
+            export_support_zip,
+            reveal_support_file,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
             set_pill_window_mode,

@@ -2500,6 +2500,25 @@ impl VoiceWaveController {
         Ok(result)
     }
 
+    /// The same bundle for the support file, without the opt-in gate: the
+    /// user asked for the file.
+    pub async fn diagnostics_bundle_json(&self) -> Result<String, ControllerError> {
+        let settings = self.settings.lock().await.clone();
+        let watchdog_recovery_count = self.watchdog_recovery_count.load(Ordering::Relaxed);
+        let speech_engine =
+            tokio::task::spawn_blocking(crate::inference::gpu_select::diagnostics_snapshot)
+                .await
+                .unwrap_or_default();
+        let json = self.diagnostics_manager.lock().await.bundle_json(
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
+            env!("CARGO_PKG_VERSION"),
+            &settings,
+            watchdog_recovery_count,
+            speech_engine,
+        )?;
+        Ok(json)
+    }
+
     pub async fn request_microphone_access(&self, app: AppHandle) -> PermissionSnapshot {
         let snapshot = self
             .permission_manager

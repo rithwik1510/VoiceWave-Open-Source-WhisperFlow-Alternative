@@ -1,15 +1,16 @@
 //! What a user can hand us when something breaks: a rolling log file, a panic
 //! hook that writes into it (and notes the panic's area in `panics.log` for
-//! telemetry, and in the session file), the diagnostics report, and the helpers behind the in-app
-//! "Report a problem" commands.
+//! telemetry, and in the session file), the diagnostics report, the support
+//! file, and the helpers behind the in-app "Report a problem" commands.
 //!
 //! Privacy rule for every log line in the crate: never log transcript text,
 //! dictionary terms, snippet contents, clipboard contents or audio. Log sizes,
 //! counts, ids and the app's own paths instead. The diagnostics report quotes
 //! warning and error lines, with the user's profile folder redacted.
 
+use crate::analytics::FeedbackKind;
 use crate::telemetry::PanicArea;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -28,6 +29,29 @@ const DIAGNOSTICS_WARNING: &str = "Check before posting: this includes your micr
 const MAX_PROBLEM_LINES: usize = 20;
 const MAX_PROBLEM_LINE_CHARS: usize = 300;
 const MAX_REPORT_BYTES: usize = 6 * 1024;
+const SUPPORT_LOGS_KEPT: usize = 3;
+const MAX_SUPPORT_LOG_BYTES: usize = 2 * 1024 * 1024;
+/// Uncompressed, so the zip itself is always smaller.
+const MAX_SUPPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
+const SUPPORT_README: &str = "\
+VoiceWave support file
+
+VoiceWave saved this file because you asked it to. It is never uploaded.
+Attach it to a GitHub issue if you want help:
+https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/issues
+
+What's inside:
+  report.txt        The same text as Copy diagnostics: app and Windows versions,
+                    speech engine, microphone name and recent warnings.
+  diagnostics.json  Speech engine checks and recent dictation timings.
+  logs/             The newest daily logs, up to 2 MB each.
+  panics.log        Where internal errors happened, if any were noted.
+  session.json      How the last run ended, only if it closed unexpectedly.
+
+Your Windows user folder appears as %USERPROFILE%. Never included: audio,
+anything you dictated, your history, dictionary or snippets, models or saved
+sign ins.
+";
 
 /// `%LOCALAPPDATA%\voicewave\localcore\data\logs` on Windows: the same
 /// `ProjectDirs` root every store uses, under its local (non-roaming) half.
@@ -368,19 +392,27 @@ impl DiagnosticsReport {
     }
 }
 
-/// The first line of each of the last `MAX_PROBLEM_LINES` WARN/ERROR events
-/// in the newest daily log. An event starts with a timestamp line; the lines
-/// after it (a panic's backtrace) are skipped.
-fn recent_problems(dir: &std::path::Path) -> Vec<String> {
-    let newest = std::fs::read_dir(dir)
+/// The file names of the newest `count` daily logs, newest first.
+fn newest_logs(dir: &Path, count: usize) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("voicewave.") && name.ends_with(".log"))
-        // Daily files are named voicewave.YYYY-MM-DD.log.
-        .max();
-    let Some(text) = newest
+        .collect();
+    // Daily files are named voicewave.YYYY-MM-DD.log, so names sort by date.
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names.truncate(count);
+    names
+}
+
+/// The first line of each of the last `MAX_PROBLEM_LINES` WARN/ERROR events
+/// in the newest daily log. An event starts with a timestamp line; the lines
+/// after it (a panic's backtrace) are skipped.
+fn recent_problems(dir: &Path) -> Vec<String> {
+    let Some(text) = newest_logs(dir, 1)
+        .pop()
         .and_then(|name| std::fs::read(dir.join(name)).ok())
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     else {
@@ -414,30 +446,43 @@ fn recent_problems(dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-/// The prefilled bug-report form. Only `engine` comes from the frontend, so it
-/// is length-capped and stripped of control characters; host and path are
-/// fixed here. The report goes in `diagnostics`; to keep the URL under
-/// `MAX_ISSUE_URL_CHARS` its oldest log lines go first, then its tail.
-pub fn issue_report_url(engine: &str, report: &DiagnosticsReport) -> Result<String, String> {
+/// The prefilled bug-report form. Only `engine` comes from the frontend as
+/// text, so it is length-capped and stripped of control characters; host and
+/// path are fixed here. The reason picked in "Something wrong?" starts the
+/// "What happened?" field. The report goes in `diagnostics`; to keep the URL
+/// under `MAX_ISSUE_URL_CHARS` its oldest log lines go first, then its tail.
+pub fn issue_report_url(
+    engine: &str,
+    reason: Option<FeedbackKind>,
+    report: &DiagnosticsReport,
+) -> Result<String, String> {
     let engine: String = engine
         .chars()
         .filter(|c| !c.is_control())
         .take(MAX_ENGINE_CHARS)
         .collect();
     let os = os_version();
+    // `text_did_not_appear` → "text did not appear".
+    let what_happened = reason
+        .and_then(|reason| match serde_json::to_value(reason) {
+            Ok(serde_json::Value::String(name)) => Some(name.replace('_', " ")),
+            _ => None,
+        })
+        .map(|reason| format!("Reason picked in the app: {reason}\n\n"));
     let build = |diagnostics: &str| {
-        url::Url::parse_with_params(
-            ISSUE_FORM_URL,
-            [
-                ("template", "bug_report.yml"),
-                ("version", env!("CARGO_PKG_VERSION")),
-                ("os", os.as_str()),
-                ("engine", engine.trim()),
-                ("diagnostics", diagnostics),
-            ],
-        )
-        .map(String::from)
-        .map_err(|err| format!("failed to build the issue URL: {err}"))
+        let mut params = vec![
+            ("template", "bug_report.yml"),
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("os", os.as_str()),
+            ("engine", engine.trim()),
+            ("diagnostics", diagnostics),
+        ];
+        if let Some(what_happened) = &what_happened {
+            params.push(("what-happened", what_happened.as_str()));
+        }
+        url::Url::parse_with_params(ISSUE_FORM_URL, params)
+            .map(String::from)
+            .map_err(|err| format!("failed to build the issue URL: {err}"))
     };
     for keep in (0..=report.problems.len()).rev() {
         let url = build(&report.render(keep))?;
@@ -461,6 +506,115 @@ pub fn issue_report_url(engine: &str, report: &DiagnosticsReport) -> Result<Stri
         }
     }
     build(&prefix(fits))
+}
+
+/// Saves the support file (plan 024 section 8.2) as
+/// `Downloads\voicewave-support-YYYYMMDD-HHMM.zip` and returns its path.
+/// `report` is the "Copy diagnostics" text and `diagnostics_json` the
+/// diagnostics bundle. Blocking: run it off the async runtime.
+pub fn write_support_zip(report: &str, diagnostics_json: &str) -> Result<PathBuf, String> {
+    let downloads = directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+        .ok_or("cannot find the Downloads folder")?;
+    let path = downloads.join(format!(
+        "voicewave-support-{}.zip",
+        chrono::Local::now().format("%Y%m%d-%H%M")
+    ));
+    let zip = support_zip(report, diagnostics_json)
+        .map_err(|err| format!("failed to build the support file: {err}"))?;
+    crate::atomic_file::atomic_write(&path, &zip)
+        .map_err(|err| format!("failed to save the support file: {err}"))?;
+    tracing::info!(bytes = zip.len(), "saved a support file");
+    Ok(path)
+}
+
+/// The zip's bytes. Only the entries listed in `SUPPORT_README`: never
+/// settings, history, dictionary, snippets, models or the secure store. Text
+/// is passed through `redact_profile_dir`. Entries are added in order of
+/// importance, so the newest logs are the ones the size cap keeps.
+fn support_zip(report: &str, diagnostics_json: &str) -> zip::result::ZipResult<Vec<u8>> {
+    use std::io::Write;
+
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        ("README.txt".to_string(), SUPPORT_README.into()),
+        ("report.txt".to_string(), redact_profile_dir(report).into()),
+        (
+            "diagnostics.json".to_string(),
+            redact_profile_dir(diagnostics_json).into(),
+        ),
+    ];
+    if let Some(session) = crate::session::unclean_previous_file() {
+        entries.push(("session.json".to_string(), session.to_vec()));
+    }
+    if let Some(dir) = log_dir() {
+        // Panic areas only; read without draining, so telemetry still sees them.
+        if let Ok(panics) = std::fs::read(dir.join(PANIC_FILE)) {
+            entries.push((PANIC_FILE.to_string(), panics));
+        }
+        for name in newest_logs(&dir, SUPPORT_LOGS_KEPT) {
+            match log_tail(&dir.join(&name)) {
+                Ok(tail) => entries.push((format!("logs/{name}"), tail.into())),
+                Err(err) => tracing::warn!("support file: couldn't read {name}: {err}"),
+            }
+        }
+    }
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut total = 0;
+    for (name, bytes) in entries {
+        if total + bytes.len() > MAX_SUPPORT_FILE_BYTES {
+            tracing::warn!("support file: left out {name} to stay under the size cap");
+            continue;
+        }
+        total += bytes.len();
+        zip.start_file(name, options)?;
+        zip.write_all(&bytes)?;
+    }
+    Ok(zip.finish()?.into_inner())
+}
+
+/// The last `MAX_SUPPORT_LOG_BYTES` of a log, from its first whole line, with
+/// the profile folder redacted (a path never spans lines, so redacting the
+/// whole text is the same as redacting each line).
+fn log_tail(path: &Path) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let start = file
+        .metadata()?
+        .len()
+        .saturating_sub(MAX_SUPPORT_LOG_BYTES as u64);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    // `take`: today's log may grow while it's read.
+    file.take(MAX_SUPPORT_LOG_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok(redact_profile_dir(text))
+}
+
+/// Opens Explorer on `path`'s folder with the file selected.
+#[cfg(windows)]
+pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // Raw, so Explorer gets `/select,"<path>"` quoted the way it expects.
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("failed to open Explorer: {err}"))
+}
+
+#[cfg(not(windows))]
+pub fn reveal_in_explorer(_path: &Path) -> Result<(), String> {
+    Err("showing files is only supported on Windows".to_string())
 }
 
 /// Hands a URL or folder to the shell (default browser / Explorer).

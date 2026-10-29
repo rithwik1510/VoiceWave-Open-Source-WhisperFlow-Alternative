@@ -1,8 +1,8 @@
 //! The recorder: one background thread that queues every `capture` and turns
 //! dictation facts into the day accumulator (plan 4.2) and its events
-//! (`active_day`, `day_summary`, capped `dictation_failed`). Callers only send
-//! on a channel, so nothing on the dictation path waits for analytics' disk
-//! writes.
+//! (`active_day`, `day_summary`, capped `dictation_failed`); it also caps
+//! `feedback_reported`. Callers only send on a channel, so nothing on the
+//! dictation path waits for analytics' disk writes.
 //!
 //! The day is kept in `<data_dir>/analytics-day.json`: the UTC day, its
 //! counts, and up to 500 latency and audio samples for the percentiles. Raw
@@ -24,6 +24,8 @@ use std::{
 const MAX_SAMPLES: usize = 500;
 /// `dictation_failed` events per UTC day; the day's counts still see them all.
 const MAX_FAILURE_EVENTS: u32 = 20;
+/// `feedback_reported` events per UTC day.
+const MAX_FEEDBACK_EVENTS: u32 = 10;
 
 /// What the dictation pipeline tells analytics. Microphone dictations only.
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +127,7 @@ struct DayFile {
     audio_samples: Vec<u64>,
     active_day_sent: bool,
     failure_events_sent: u32,
+    feedback_events_sent: u32,
 }
 
 impl DayFile {
@@ -223,14 +226,14 @@ impl Recorder {
 
     /// Returns whether the day changed and needs saving.
     fn handle(&mut self, message: Message) -> bool {
-        let fact = match message {
-            Message::Capture(event) => {
+        // Feedback goes through the day for its daily cap; other captures
+        // are queued as they come.
+        if let Message::Capture(event) = message {
+            if !matches!(event, AnalyticsEvent::FeedbackReported { .. }) {
                 super::enqueue(event, None);
                 return false;
             }
-            Message::CheckDay => None,
-            Message::Fact(fact) => Some(fact),
-        };
+        }
         match *lock(&CONSENT) {
             Consent::Unknown => return false,
             Consent::Off => {
@@ -241,11 +244,25 @@ impl Recorder {
         }
         let today = now_ms() / DAY_MS;
         let mut dirty = self.roll_over(today);
-        if let Some(fact) = fact {
-            self.apply(fact, today);
-            dirty = true;
+        match message {
+            Message::Fact(fact) => {
+                self.apply(fact, today);
+                dirty = true;
+            }
+            Message::Capture(feedback) => dirty |= self.report_feedback(feedback, today),
+            Message::CheckDay => {}
         }
         dirty
+    }
+
+    /// Queues a `feedback_reported`, at most `MAX_FEEDBACK_EVENTS` a day.
+    fn report_feedback(&mut self, feedback: AnalyticsEvent, today: u64) -> bool {
+        let day = self.day.get_or_insert_with(|| DayFile::new(today));
+        if day.feedback_events_sent >= MAX_FEEDBACK_EVENTS || !super::enqueue(feedback, None) {
+            return false;
+        }
+        day.feedback_events_sent += 1;
+        true
     }
 
     /// Starts `today`'s file, first queueing the stored day's summary when

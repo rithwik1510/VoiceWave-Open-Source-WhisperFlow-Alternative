@@ -83,6 +83,12 @@ pub enum AnalyticsEvent {
         target_version: Semver,
     },
     HotkeyFailed { kind: HotkeyFailureKind },
+    /// The reason picked in "Something wrong?" (plan 8.1, through `track`),
+    /// at most 10 a day (see `day.rs`). Never any text.
+    FeedbackReported {
+        kind: FeedbackKind,
+        surface: FeedbackSurface,
+    },
 }
 
 /// The plan's values are snake_case; the TelemetryDeck enums reused here
@@ -260,6 +266,29 @@ pub enum HotkeyFailureKind {
     HookRejected,
     HookThread,
     Other,
+}
+
+/// The "Something wrong?" reasons, in the order the picker lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackKind {
+    WrongWords,
+    MissedWords,
+    TooSlow,
+    TextDidNotAppear,
+    WrongPlace,
+    FrozeOrCrashed,
+    Hotkey,
+    Other,
+}
+
+/// Where "Something wrong?" was opened: the pill's quick menu, or the main
+/// window's Help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSurface {
+    Pill,
+    Settings,
 }
 
 /// A plain `major.minor.patch` version, the only version string the plan

@@ -20,8 +20,8 @@ mod posthog;
 pub use context::{note_speech_engine, ModelFamily};
 pub use day::{note_dictation, DictationFact, Finished, InsertKind};
 pub use events::{
-    AnalyticsEvent, DownloadOutcome, HotkeyFailureKind, LaunchMode, PreviousExit, Semver,
-    SessionPhase,
+    AnalyticsEvent, DownloadOutcome, FeedbackKind, HotkeyFailureKind, LaunchMode, PreviousExit,
+    Semver, SessionPhase,
 };
 
 use crate::settings::{VoiceWaveSettings, ANALYTICS_CONSENT_VERSION};
@@ -328,6 +328,7 @@ pub fn track(event: AnalyticsEvent) {
         AnalyticsEvent::OnboardingStep { .. }
         | AnalyticsEvent::OnboardingFinished { .. }
         | AnalyticsEvent::AcquisitionAnswered { .. }
+        | AnalyticsEvent::FeedbackReported { .. }
         | AnalyticsEvent::UpdateFailed {
             stage: UpdateStage::Download | UpdateStage::Verify | UpdateStage::Install,
             error_kind: Some(_),

@@ -3,7 +3,8 @@
 //! so a file found at startup means the last run was cut short; what it says
 //! tells a crash from a panic, a Windows restart, or an update that did or
 //! didn't land. Local only: the result reaches analytics through
-//! `app_launched` and the UI through `SupportContext`.
+//! `app_launched`, the UI through `SupportContext`, and an unclean run's file
+//! goes into the support file.
 //!
 //! Writes stay off the dictation path: `set_phase` only updates memory and
 //! wakes the heartbeat thread, which writes at most every 10 s and otherwise
@@ -73,6 +74,9 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 static WRITE: Mutex<()> = Mutex::new(());
 static WAKE: OnceLock<mpsc::Sender<()>> = OnceLock::new();
 static PREVIOUS: OnceLock<PreviousRun> = OnceLock::new();
+/// The previous run's file, kept for the support file when that run crashed
+/// or panicked: this run's file has replaced it on disk.
+static UNCLEAN_FILE: OnceLock<Vec<u8>> = OnceLock::new();
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -96,10 +100,15 @@ pub fn start() {
 fn start_at(path: PathBuf) {
     let now = now_ms();
     let boot_at_ms = boot_at_ms(now);
-    let previous = previous_file(&path);
-    let previous = classify(previous.as_ref(), boot_at_ms);
+    let stored = previous_file(&path);
+    let previous = classify(stored.as_ref(), boot_at_ms);
     if previous.exit.is_some() {
         tracing::info!("previous run: {previous:?}");
+    }
+    if let Some(file) = stored.filter(|_| previous.unclean()) {
+        if let Ok(raw) = serde_json::to_vec_pretty(&file) {
+            let _ = UNCLEAN_FILE.set(raw);
+        }
     }
     let _ = PREVIOUS.set(previous);
 
@@ -133,6 +142,11 @@ fn start_at(path: PathBuf) {
 /// How the previous run ended; the default (no file) before `start`.
 pub fn previous() -> PreviousRun {
     PREVIOUS.get().copied().unwrap_or_default()
+}
+
+/// The previous run's session file, only when that run crashed or panicked.
+pub fn unclean_previous_file() -> Option<&'static [u8]> {
+    UNCLEAN_FILE.get().map(Vec::as_slice)
 }
 
 /// A corrupt or unreadable file counts as absent. Single instance (claimed

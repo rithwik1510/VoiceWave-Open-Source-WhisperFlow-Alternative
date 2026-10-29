@@ -42,6 +42,9 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 unicode-normalization = "0.1.24"
 url = "2.5.4"
+# The support file. Already in the tree through tauri-plugin-updater; `deflate-flate2`
+# uses the flate2 (miniz_oxide) above, where `deflate` would add zopfli and zlib-rs.
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
 # Already in the tree through Tauri (and winreg through embed-resource): no
 # new crates. Analytics ids and the HKCU key that holds them.
 uuid = { version = "1.20", features = ["v4"] }
