@@ -420,11 +420,12 @@ carries switches forward since v2.12.0, and NSIS ignores switches it doesn't kno
 from the damn-good-b0t bot dropping the switch (v1 3.5). Wherever this plan says "v1 section N", read
 `plans/artifacts/telemetry-2026-10/024-v1-telemetrydeck-spec.md`.
 
-## 7. Acquisition question (unchanged from v1)
+## 7. Acquisition question
 
 - It goes on the onboarding done step, and only when `is_new_install` and the switch is on.
-- Single-select chips (`role="radiogroup"`), no free text, and it's never shown again.
-- Leaving the step without choosing sends `skipped` once.
+- One native dropdown (decided 2026-10-29; 15 chips made the done step scroll at 1366x768), no free
+  text, and it's never shown again.
+- Leaving it on the "Choose one (optional)" placeholder sends `skipped` once.
 
 Choices and values, in order:
 
@@ -444,7 +445,7 @@ Choices and values, in order:
 | Browsing winget | `winget` |
 | A blog or article | `article` |
 | Somewhere else | `other` |
-| Skip | `skipped` |
+| (placeholder left as is) | `skipped` |
 
 Hacker News was added for the 2026-10-27 Show HN.
 

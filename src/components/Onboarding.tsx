@@ -39,8 +39,7 @@ const ACQUISITION_CHOICES: { answer: AcquisitionAnswer; label: string }[] = [
   { answer: "friend", label: "A friend or coworker" },
   { answer: "winget", label: "Browsing winget" },
   { answer: "article", label: "A blog or article" },
-  { answer: "other", label: "Somewhere else" },
-  { answer: "skipped", label: "Skip" }
+  { answer: "other", label: "Somewhere else" }
 ];
 const METER_BAR_COUNT = 30;
 const METER_RADIUS = 94;
@@ -1028,28 +1027,28 @@ export function Onboarding({
                   </div>
                 ) : null}
                 {acquisitionAsked && (
-                  <div className="mt-6 w-full max-w-[34rem]">
-                    <p id="vw-onb-acquisition-label" className="vw-set-title">
+                  <div className="mt-6 w-full max-w-[26rem] text-left">
+                    <label htmlFor="vw-onb-acquisition" className="vw-set-title block">
                       Where did you hear about VoiceWave?
-                    </p>
-                    <div
-                      className="mt-2 flex flex-wrap justify-center gap-1.5"
-                      role="radiogroup"
-                      aria-labelledby="vw-onb-acquisition-label"
+                    </label>
+                    {/* Left on the placeholder, the answer is sent as "skipped". */}
+                    <select
+                      id="vw-onb-acquisition"
+                      className="vw-field mt-2 w-full"
+                      value={acquisition ?? ""}
+                      onChange={(event) =>
+                        setAcquisition(
+                          ACQUISITION_CHOICES.find((choice) => choice.answer === event.target.value)?.answer ?? null
+                        )
+                      }
                     >
+                      <option value="">Choose one (optional)</option>
                       {ACQUISITION_CHOICES.map((choice) => (
-                        <button
-                          key={choice.answer}
-                          type="button"
-                          role="radio"
-                          aria-checked={acquisition === choice.answer}
-                          className={`vw-chip${acquisition === choice.answer ? " vw-chip-accent" : ""}`}
-                          onClick={() => setAcquisition(choice.answer)}
-                        >
+                        <option key={choice.answer} value={choice.answer}>
                           {choice.label}
-                        </button>
+                        </option>
                       ))}
-                    </div>
+                    </select>
                   </div>
                 )}
                 <button type="button" className="vw-btn-primary mt-8" onClick={() => leaveSetup("finished")}>
