@@ -847,6 +847,11 @@ fn configure_main_window_close_behavior(app: &tauri::AppHandle, hide_to_tray: bo
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if hide_to_tray {
                     api.prevent_close();
+                    // A second launch brings this window back with a raw
+                    // ShowWindowAsync (main.rs) that tao never sees, so tao
+                    // still thinks it's hidden and would skip the hide. Showing
+                    // it first (it's already on screen) puts tao back in step.
+                    let _ = window_for_handler.show();
                     let _ = window_for_handler.hide();
                 }
             }
