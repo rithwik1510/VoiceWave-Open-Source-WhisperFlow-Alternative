@@ -239,16 +239,15 @@ through one Tauri command:
 fn track(event: AnalyticsEvent) // matched against an explicit allow-list
 ```
 
-- `track` accepts only `onboarding_step`, `onboarding_finished`, `acquisition_answered` and `update_failed` (with a
-  `download`, `verify` or `install` stage and an `error_kind`). Any other variant is logged and dropped; a payload
+- `track` accepts only `onboarding_step`, `onboarding_finished`, `acquisition_answered`, `feedback_reported` and
+  `update_failed` (with a `download`, `verify` or `install` stage and an `error_kind`). Any other variant is logged and dropped; a payload
   that doesn't deserialize never reaches it. The frontend can't invent events or values.
 - The TS side is `track(event: ClientEvent)` in `src/lib/tauri.ts`. `ClientEvent` lists the accepted variants in the
   event's wire shape: an `event` tag and snake_case fields.
 
 ## 4. Events
 
-There are 13 event names (12 built, plus `feedback_reported` with "Something wrong?"). Per user per day, that's in
-practice 2 to 6 events. At 100 daily users it's under 20k
+There are 13 event names, all built. Per user per day, that's in practice 2 to 6 events. At 100 daily users it's under 20k
 events a month. PostHog's free tier is 1M a month.
 
 ### 4.1 Lifecycle and "is this a real user"
@@ -368,7 +367,7 @@ from v1, with `ai_app` renamed `ai`:
 | `onboarding_step` | Each onboarding step on arrival, `welcome` when the flow mounts. Time on a step is the gap to the next event's timestamp | `step`: `welcome`, `mic`, `speak`, `done` | TS `track` |
 | `onboarding_finished` | Done or skipped. Total time is the gap from `onboarding_step {welcome}` | `outcome`: `finished`, `skipped` | TS `track` |
 | `acquisition_answered` | Onboarding done step (section 7) | `answer`: the v1 list; also `$set_once: {acquisition: answer}` | TS `track` |
-| `feedback_reported` | "Something wrong?" (section 8.1), at most 10 a day | `kind`: `wrong_words`, `missed_words`, `too_slow`, `text_did_not_appear`, `wrong_place`, `froze_or_crashed`, `hotkey`, `other`; `surface`: `pill`, `settings`, `history`; and, for history only, `latency_ms` and `audio_ms` of that dictation | TS `track` |
+| `feedback_reported` | A reason picked in "Something wrong?" (section 8.1), at most 10 a day (capped in `analytics/day.rs`, like `dictation_failed`) | `kind`: `wrong_words`, `missed_words`, `too_slow`, `text_did_not_appear`, `wrong_place`, `froze_or_crashed`, `hotkey`, `other`; `surface`: `pill` (the pill's quick menu), `settings` (the main window's Help) | TS `track` |
 
 ## 5. Launch facts: unclean exit, update installed or not applied (Rust)
 
@@ -468,22 +467,34 @@ Hacker News was added for the 2026-10-27 Show HN.
 
 ### 8.1 "Something wrong?"
 
-- **Surfaces:** the pill's quick menu, Settings → Help (next to Report a problem), and "Report this dictation" on a
-  History row. **[HIS CALL]** which of the three.
+- **Surfaces (decided 2026-10-29):** Help → Report a problem in the main window (`surface: settings`) and the pill's
+  quick menu (`surface: pill`). No History row.
+  - It's the existing Report a problem flow, not a parallel one: Help's Report a problem section now starts with the
+    reason picker (`src/components/SomethingWrong.tsx`), and its old "Report a problem" button became the thanks
+    step's "Tell us more on GitHub". Open logs folder, Copy diagnostics and the preview stay below it.
+  - The pill's quick menu has a "Something wrong?" icon button next to Open. It emits
+    `voicewave://something-wrong` and shows the main window, which opens Help on the picker. The quick menu itself
+    is still the `VOICEWAVE_PILL_QUICK_CONTROLS_SPIKE` experiment, so until that ships only Help reaches users.
+  - Settings → Diagnostics keeps its direct "Report a problem" button (no reason) beside the support file row.
 - **Flow:**
   1. The user picks one reason (the `kind` list in 4.6).
-  2. If the switch is on, `feedback_reported` is sent.
-  3. A thanks screen offers **Tell us more on GitHub** and **Save support file**:
-     - "Tell us more on GitHub" opens `issue_report_url` (support.rs L420), pre-filled with the reason, the app
-       version and the speech path.
+  2. `feedback_reported` goes through `track`; the consent gate decides whether it's sent.
+  3. A thanks step offers **Tell us more on GitHub** and **Save support file**:
+     - "Tell us more on GitHub" opens `issue_report_url` (support.rs), pre-filled with the app version and speech
+       engine as before, and "Reason picked in the app: {reason}" at the top of the "What happened?" field.
      - "Save support file" is 8.2.
-  4. With the switch off, steps 1 and 3 still work, and the thanks screen says nothing was sent.
+  4. With sharing off (or the privacy check unanswered), steps 1 and 3 still work, and the thanks step says nothing
+     was sent.
 - **No free text in analytics.** Free text only goes into a GitHub issue the user writes themselves.
 
-### 8.2 Support file (unchanged from v1 section 9)
+### 8.2 Support file (built 2026-10-29)
 
-- A new command, `export_support_zip`, writes `%USERPROFILE%\Downloads\voicewave-support-YYYYMMDD-HHMM.zip`.
-- It needs the `zip` crate (`default-features = false, features = ["deflate"]`).
+- The command `export_support_zip` writes `voicewave-support-YYYYMMDD-HHMM.zip` (local time) to the Downloads known
+  folder (`directories::UserDirs::download_dir`), off the async runtime (`spawn_blocking`), and returns the path.
+  `reveal_support_file` opens Explorer with it selected, and accepts only a `voicewave-support-*.zip` that exists.
+- `zip` 4.6.1 (already in the tree through tauri-plugin-updater) is a direct dependency with
+  `default-features = false, features = ["deflate-flate2"]`: it uses the `flate2` (miniz_oxide) the app already has.
+  The `deflate` feature would have added `zopfli` and `zlib-rs`, so it wasn't used. No new crates.
 
 | Entry | Contents |
 |---|---|
@@ -491,10 +502,12 @@ Hacker News was added for the 2026-10-27 Show HN.
 | `diagnostics.json` | The diagnostics bundle, **not** gated on `diagnostics_opt_in` here |
 | Logs | The newest 3 daily logs, each cut to its last 2 MB, every line passed through `redact_profile_dir` |
 | `panics.log` | A copy, without draining it |
-| `session.json` | Only when the last exit was unclean |
-| `README.txt` | Fixed text |
+| `session.json` | Only when the last exit was unclean: the previous run's file, kept in memory at startup (this run's file replaces it on disk) |
+| `README.txt` | Fixed text: what's inside, never uploaded |
 
-- **Size:** at most 8 MB.
+- Logs go in `logs/`. Every text entry goes through `redact_profile_dir`.
+- **Size:** at most 8 MB, counted uncompressed; entries go in order of importance and one that would pass the cap is
+  left out.
 - **Never included:** settings, history, dictionary, snippets, models or the secure store.
 - **"Open logs folder"** (already at App.tsx L1355) is also reused next to this button and in the unclean exit
   banner.
@@ -512,7 +525,7 @@ Body:     VoiceWave 0.7.7 sends a little more about how the app is working for y
 What:     Each day you use it: how many dictations worked, failed or were retried, how fast text appeared,
           how the text got in, and the kind of app it went into (such as a browser or a code editor, never its
           name). Also how the app started and closed, setup progress, model downloads, updates, crashes, and
-          your answer if you use "Something wrong?".
+          the reason you pick in "Something wrong?" and where you opened it.
 Link:     What's sent (the full ANONYMOUS_USAGE_DETAILS list)
 Never:    Never sent: audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
           device names, error messages, or your IP address.
@@ -544,7 +557,20 @@ Button:                Save support file      After save:  Saved to {path}  [Sho
 Error:                 Couldn't save the support file. You can still open the logs folder.
 ```
 
-**Unclean exit banner:**
+The row has [Open logs folder] [Save support file]; the Report a problem row below it keeps its own button.
+
+**"Something wrong?"** (Help → Report a problem):
+
+```text
+Picker:   Something wrong? Pick what happened.
+          It heard the wrong words / It missed words / It's too slow / The text didn't appear /
+          The text went to the wrong place / It froze or crashed / The shortcut didn't work / Something else
+Thanks:   Thanks for telling us. We'll get the reason you picked, and nothing else.   (sharing off: Nothing was sent.)
+          To help us fix it, tell us more on GitHub or save a support file to attach.
+Buttons:  [Tell us more on GitHub]  [Save support file]
+```
+
+**Unclean exit banner** (Home, for `crash` or `after_panic` only; until Dismiss, for that run):
 
 ```text
 VoiceWave closed unexpectedly last time. If it keeps happening, save a support file and attach it to a
@@ -577,10 +603,10 @@ formatting style. Whether your first dictation ran on the graphics card or the p
 dictations by type (with the kind of app when the text couldn't be inserted), speech helper crashes by cause,
 internal errors by area, graphics card to processor fallbacks, model downloads (which model, how they ended,
 where a failed one stopped, retries, how far they got and how long they took), failed updates (the step, the
-kind of error and the version), shortcut setup problems, and your answers to "Where did you hear about
-VoiceWave?" and "Something wrong?" if you give them. Never audio, transcripts, dictionary or snippet
-content, window titles, app names, file paths, device names, error messages, account details, or your IP
-address.
+kind of error and the version), shortcut setup problems, your answer to "Where did you hear about
+VoiceWave?", and the reason you pick in "Something wrong?" with whether you opened it from the pill or the
+main window. Never audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
+device names, error messages, account details, or your IP address.
 ```
 
 ## 9. PostHog dashboard (build after the first events)
@@ -655,11 +681,11 @@ Never audio, transcripts, app names or file paths.
 | File | Change |
 |---|---|
 | `src-tauri/src/analytics/` (new) | Section 3, plus `day.rs` (4.2) |
-| `src-tauri/Cargo.toml` | `uuid` (v4) and, on Windows, `winreg` as direct dependencies; both were already in `Cargo.lock`, so no new crates. `zip` for the support file |
+| `src-tauri/Cargo.toml` | `uuid` (v4) and, on Windows, `winreg` as direct dependencies; both were already in `Cargo.lock`, so no new crates. `zip` (`deflate-flate2`, also already in the tree) for the support file |
 | `src-tauri/src/net.rs` (new, moved) | Shared ureq agent and TLS config from `model_manager/net.rs` |
 | `src-tauri/src/session.rs` (new) | Section 5 |
 | `src-tauri/src/telemetry.rs` | `record()` also calls `analytics::capture`; `WorkerCrashed` gains `cause` |
-| `src-tauri/src/support.rs` | Panic hook marks the session |
+| `src-tauri/src/support.rs` | Panic hook marks the session; support zip builder, Explorer reveal; issue URL takes the picked reason |
 | `src-tauri/src/insertion/mod.rs` | `AppKind`, `app_kind()`, `InsertResult.app_kind` |
 | `src-tauri/src/inference/asr_worker.rs` | Exit code, full tail logged, `cause` |
 | `src-tauri/src/inference/faster_whisper.rs`, `llm_polish.rs` | `cause: unknown` |
@@ -668,8 +694,8 @@ Never audio, transcripts, app names or file paths.
 | `src-tauri/src/state/gpu_engine.rs` | `note_speech_engine` on status changes |
 | `src-tauri/src/model_manager/mod.rs` | `model_download_finished` in `finish_download` |
 | `src-tauri/src/settings/mod.rs` | Consent version 2, `acquisition_asked`, new migration, `apply_settings` calls |
-| `src-tauri/src/diagnostics/mod.rs` | A bundle builder without the opt-in gate, for the zip |
-| `src-tauri/src/lib.rs` | `mod analytics; mod session; mod net;`, startup wiring, the `track`, `mark_update_installing`, `clear_update_installing`, `export_support_zip` and `reveal_in_folder` commands, `RunEvent::Exit` session clear (first), `SupportContext` fields |
+| `src-tauri/src/diagnostics/mod.rs`, `state.rs` | `bundle_json`, the bundle without the opt-in gate, for the zip (`diagnostics_bundle_json` on the controller) |
+| `src-tauri/src/lib.rs` | `mod analytics; mod session; mod net;`, startup wiring, the `track`, `mark_update_installing`, `clear_update_installing`, `export_support_zip` and `reveal_support_file` commands, `RunEvent::Exit` session clear (first), `SupportContext` fields |
 | `src-tauri/windows/hooks.nsh` | Install source (section 6) |
 | `.github/workflows/release.yml` | `VOICEWAVE_POSTHOG_KEY` build env from the secret |
 | `.github/workflows/winget-release.yml` | Manifest guard step |
@@ -677,9 +703,10 @@ Never audio, transcripts, app names or file paths.
 | `src/lib/telemetry.ts` | New `ANONYMOUS_USAGE_DETAILS`; consent version 2; TelemetryDeck sending otherwise unchanged |
 | `src/lib/updater.ts`, `UpdatePrompt.tsx`, `UpdateSection.tsx` | Separate `download()` and `install()`, update marking between them, `update_failed`, new error copy |
 | `src/hooks/useVoiceWave.ts` | Consent answers, onboarding completion with `acquisition_asked` |
-| `src/App.tsx` | v2 dialog, Settings toggle copy, support file block, unclean exit banner, Something wrong |
+| `src/App.tsx` | v2 dialog, Settings toggle copy, support file row, unclean exit banner, Something wrong in Help |
+| `src/components/SomethingWrong.tsx`, `SupportFile.tsx` (new) | The reason picker and thanks step; the shared Save support file button, hook and status line |
 | `src/components/Onboarding.tsx` | Toggle copy, `track` calls for steps and the outcome, acquisition question |
-| `src/components/FloatingPill.tsx` (quick menu), the History row | Something wrong entry points |
+| `src/components/PillQuickControls.tsx`, `FloatingPill.tsx`, `src/pill.css` | The quick menu's Something wrong button |
 | `README.md`, `docs/PRIVACY.md` (new), `CHANGELOG.md`, `voicewave-website/src/components/Faq.tsx` | Section 11 |
 
 ## 13. Phases and how it gets built
@@ -691,7 +718,7 @@ Never audio, transcripts, app names or file paths.
 | P2 | Consent v2: settings migration, dialog, onboarding and Settings copy | P1 | 1 day |
 | P3 | Events: `session.rs` and `app_launched`, day accumulator and `active_day`, problem events, worker cause, `AppKind`, download, hotkey, onboarding `track` calls, `update_failed` | P1 | 2 to 2.5 days |
 | P4 | Install source (NSIS, guard steps) and acquisition question | P1 for `install_source` in base properties | 1 day |
-| P5 | Something wrong, support file, unclean exit banner | P3 for the banner | 1.5 days |
+| P5 | Something wrong, support file, unclean exit banner, update failure line. **Done 2026-10-29** | P3 for the banner | 1.5 days |
 | P6 | README, PRIVACY, FAQ, changelog, PostHog dashboard, the manual checklist, release | all | 1 day |
 
 That's about 8 to 9 days for one person.
@@ -749,8 +776,15 @@ No new unit tests, per the owner's rule. These run on a dev build started with `
 
 **Install source, acquisition, feedback, support file:** v1's section 13 rows (the v1 spec, see commit
 `ae5127e`; skip the Scoop rows), plus:
-- [ ] Something wrong from each surface sends its `surface`. The 11th report in a day isn't sent.
-- [ ] The support file opens, holds only the listed entries, and doesn't contain your Windows user name.
+- [ ] Something wrong from Help sends `surface: settings`; from the pill's quick menu (spike flag on) it brings up
+  the main window on the picker and sends `surface: pill`. The 11th report in a day isn't sent.
+- [ ] With sharing off, the thanks step says "Nothing was sent." and nothing is queued.
+- [ ] "Tell us more on GitHub" opens the issue form with the reason at the top of "What happened?".
+- [ ] The support file opens, holds only the listed entries, and doesn't contain your Windows user name. Show in
+  folder selects it in Explorer.
+- [ ] Kill VoiceWave in Task Manager and relaunch: the unclean exit banner shows on Home, and the support file has
+  `session.json`. After a clean Quit, an update or a reboot, no banner.
+- [ ] A failed update shows the update failure line in the prompt and in Settings → Updates.
 
 **Regression:**
 - [ ] TelemetryDeck still receives today's events, with unchanged names and values.
@@ -762,7 +796,7 @@ No new unit tests, per the owner's rule. These run on a dev build started with `
 ## 15. Open questions
 
 1. ~~Hosting~~: decided 2026-10-28, EU Cloud (section 3.6).
-2. **[HIS CALL] Something wrong surfaces:** pill, Settings, History row; which ones?
+2. ~~Something wrong surfaces~~: decided 2026-10-29, Help (Settings side) and the pill's quick menu; no History row.
 3. **TelemetryDeck removal:** proposed for the first 0.8.x release after PostHog has a week of data. Agree?
 4. **Acquisition list:** anything to add or drop? Values are fixed at release.
 5. **App kind list (4.5):** the right set?
