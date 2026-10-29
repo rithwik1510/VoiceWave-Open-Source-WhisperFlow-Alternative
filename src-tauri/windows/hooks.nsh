@@ -36,20 +36,19 @@
 !macroend
 
 ; Install source marker (plan 024): how this install first arrived, for the
-; app's anonymous usage count. One of winget | scoop | direct | unknown. The app
+; app's anonymous usage count. One of winget | direct | unknown. The app
 ; keeps InstallId and its first-seen values in the same key, so the key lives
 ; exactly as long as app data does.
 !define VW_INSTALL_KEY "Software\VoiceWave\LocalCore"
 
 !macro NSIS_HOOK_POSTINSTALL
   ; First writer wins, so in-app updates and later winget upgrades keep the
-  ; original source. Package manifests pass /VWSOURCE=winget|scoop as a Custom
+  ; original source. The winget manifest passes /VWSOURCE=winget as a Custom
   ; switch; anything else is ignored.
   ReadRegStr $R1 HKCU "${VW_INSTALL_KEY}" "InstallSource"
   ${If} $R1 == ""
     ${GetOptions} $CMDLINE "/VWSOURCE=" $R0
     ${If} $R0 S== "winget"
-    ${OrIf} $R0 S== "scoop"
       ; allowlisted marker, written as is
     ${ElseIf} $UpdateMode = 1
       StrCpy $R0 "" ; in-app update of a pre-0.7.7 install: leave it unset
@@ -61,7 +60,6 @@
     ${EndIf}
     ${If} $R0 != ""
       WriteRegStr HKCU "${VW_INSTALL_KEY}" "InstallSource" "$R0"
-      WriteRegStr HKCU "${VW_INSTALL_KEY}" "InstallSourceBy" "${VERSION}"
     ${EndIf}
   ${EndIf}
   ; A missing value or switch leaves the error flag set; don't hand that to

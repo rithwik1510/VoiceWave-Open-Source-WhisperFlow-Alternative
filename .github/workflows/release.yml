@@ -336,36 +336,6 @@ jobs:
           }
           Write-Host "WINGET PAT preflight OK."
 
-      - name: Check the last merged manifest still carries /VWSOURCE=winget
-        # Warn only. komac copies InstallerSwitches from the previous merged
-        # manifest, so once one carries Custom: /VWSOURCE=winget (the installer's
-        # install source marker, plan 024) every later PR keeps it. A bot
-        # submission without it would silently drop the switch for good.
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $dir = "manifests/v/VoiceWave/LocalCore"
-          try {
-            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "voicewave-release" }
-            $entries = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-pkgs/contents/$dir" -Headers $headers
-            $latest = $entries |
-              Where-Object { $_.type -eq "dir" -and $_.name -as [version] } |
-              Sort-Object { [version]$_.name } |
-              Select-Object -Last 1 -ExpandProperty name
-            if (-not $latest) { throw "no version folders under $dir" }
-            $yaml = Invoke-RestMethod "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/$dir/$latest/VoiceWave.LocalCore.installer.yaml"
-            if ($yaml -match '/VWSOURCE=winget') {
-              Write-Host "winget manifest $latest carries /VWSOURCE=winget."
-            } else {
-              Write-Host "::warning::winget manifest $latest has no 'Custom: /VWSOURCE=winget' switch. Add it under InstallerSwitches in the new winget-pkgs PR by hand, or winget installs report their source as unknown."
-            }
-          } catch {
-            Write-Host "::warning::Could not check the winget manifest for /VWSOURCE=winget: $($_.Exception.Message)"
-          }
-          exit 0
-
       - name: Submit manifest to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@v2
         with:
