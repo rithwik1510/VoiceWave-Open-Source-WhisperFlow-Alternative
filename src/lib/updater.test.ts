@@ -6,7 +6,12 @@ const mocks = vi.hoisted(() => ({
   relaunch: vi.fn()
 }));
 
-vi.mock("./tauri", () => ({ canUseTauri: mocks.canUseTauri }));
+vi.mock("./tauri", () => ({
+  canUseTauri: mocks.canUseTauri,
+  markUpdateInstalling: vi.fn(async () => undefined),
+  clearUpdateInstalling: vi.fn(async () => undefined),
+  track: vi.fn(async () => undefined)
+}));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
 
@@ -49,15 +54,17 @@ describe("updater bridge", () => {
 
   it("installs the queued update, reports progress, and relaunches", async () => {
     mocks.canUseTauri.mockReturnValue(true);
-    const downloadAndInstall = vi.fn(async (onEvent) => {
+    const download = vi.fn(async (onEvent) => {
       onEvent({ event: "Started", data: { contentLength: 10 } });
       onEvent({ event: "Progress", data: { chunkLength: 4 } });
       onEvent({ event: "Finished", data: {} });
     });
+    const install = vi.fn(async () => undefined);
     mocks.check.mockResolvedValue({
       version: "0.5.5",
       currentVersion: "0.5.4",
-      downloadAndInstall
+      download,
+      install
     });
     const progress = vi.fn();
 
@@ -71,6 +78,7 @@ describe("updater bridge", () => {
       contentLength: 10
     });
     expect(progress).toHaveBeenNthCalledWith(3, { phase: "finished" });
+    expect(install).toHaveBeenCalledOnce();
     expect(mocks.relaunch).toHaveBeenCalledOnce();
   });
 });

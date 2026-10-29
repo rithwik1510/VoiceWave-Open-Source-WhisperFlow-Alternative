@@ -15,19 +15,34 @@ const LAST_ACTIVE_DAY_KEY = "voicewave.analytics.last-active-day";
 /** Prefix for the funnel "already sent" markers, one key per dedupe slot. */
 const FUNNEL_KEY_PREFIX = "voicewave.analytics.funnel.";
 /** Mirrors `ANALYTICS_CONSENT_VERSION` in src-tauri/src/settings/mod.rs: the
- * analytics disclosure revision every user must have seen once. */
-export const ANALYTICS_CONSENT_VERSION = 1;
-/** The in-app answer to "what does the anonymous usage count send?". Keep it
- * in step with the events below whenever one is added or changed. */
+ * analytics disclosure revision every user must have seen once. 2 = PostHog
+ * (plan 024); the backend sends PostHog events only at this version.
+ * TelemetryDeck sending follows the switch alone. */
+export const ANALYTICS_CONSENT_VERSION = 2;
+/** The in-app answer to "what's sent?" (plan 024 section 8.3): every field
+ * PostHog gets from src-tauri/src/analytics, plus the TelemetryDeck events
+ * below. Keep it in step whenever an event or property is added or changed. */
 export const ANONYMOUS_USAGE_DETAILS =
-  "A random install ID, a random ID that changes every launch, the app version, a first-use marker and a " +
-  "once-a-day active marker, a once-a-day app-launch marker and whether the app started with Windows, setup " +
-  "progress, whether your first dictation ran on the graphics card or the processor, model download failures " +
-  "(with a failure category and how far the download got), graphics-card-to-processor fallbacks, the type of " +
-  "a failed dictation (for example no microphone or a timeout), the type of a speech helper crash, and which part of the app hit an internal error. Each comes " +
-  "with whether speech runs on the graphics card or the processor, the speech model family, the graphics card " +
-  "maker, and Windows 10 or 11. Never audio, transcripts, error messages, dictionary or snippet content, " +
-  "account identity, device names, filenames, or your other settings.";
+  "A random install ID and a random ID for each launch; the app version; Windows 10 or 11; your graphics card " +
+  "maker; whether speech runs on the graphics card or the processor and which model family; how you installed " +
+  "VoiceWave (winget, a direct download, or unknown), which version you first installed and how many days ago " +
+  "(estimated for installs older than 0.7.7); whether the PC is a virtual machine. When the app starts: whether " +
+  "it started with Windows, and whether the last run ended normally, crashed, hit an internal error, or was cut " +
+  "off by a restart or an update, what it was doing then and how long it had run. Setup steps and whether setup " +
+  "was finished or skipped. Once for each day you dictate: how many dictations were started, worked, came back " +
+  "empty, failed, heard no speech, were retried or were hands free; how fast text appeared; how long you spoke; " +
+  "how many words were inserted; how often speech ran on the graphics card; how the text got in (typed, pasted, " +
+  "left on the clipboard, kept in History only, or held back from an app running as administrator); how many " +
+  "went into each kind of app (browser, code editor, terminal, chat, office, notes, AI app, or other); and your " +
+  "formatting style. Whether your first dictation ran on the graphics card or the processor. Also failed " +
+  "dictations by type (with the kind of app when the text couldn't be inserted), speech helper crashes by cause, " +
+  "internal errors by area, graphics card to processor fallbacks, model downloads (which model, how they ended, " +
+  "where a failed one stopped, retries, how far they got and how long they took), failed updates (the step, the " +
+  "kind of error and the version), shortcut setup problems, your answer to \"Where did you hear about " +
+  "VoiceWave?\", and the reason you pick in \"Something wrong?\" with whether you opened it from " +
+  "the pill or the main window. Never audio, transcripts, dictionary or snippet " +
+  "content, window titles, app names, file paths, device names, error messages, account details, or your IP " +
+  "address.";
 const TELEMETRY_APP_ID = (import.meta.env.VITE_TELEMETRYDECK_APP_ID as string | undefined)?.trim() ?? "";
 
 type SignalClient = {

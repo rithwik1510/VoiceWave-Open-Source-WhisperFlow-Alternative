@@ -232,6 +232,8 @@ pub struct DiagnosticsManager {
 impl DiagnosticsManager {
     const MAX_RECORDS: usize = 5_000;
     const EXPORT_RECENT_LIMIT: usize = 500;
+    const REDACTION_SUMMARY: &str =
+        "Export contains no raw audio and no transcript text; only redacted performance metadata.";
 
     pub fn new() -> Result<Self, DiagnosticsError> {
         let proj_dirs =
@@ -354,14 +356,43 @@ impl DiagnosticsManager {
         let filename = format!("voicewave-diagnostics-{exported_at}.json");
         let file_path = self.export_dir.join(filename);
 
-        let redaction_summary =
-            "Export contains no raw audio and no transcript text; only redacted performance metadata."
-                .to_string();
+        let encoded = self.bundle_json(
+            exported_at,
+            app_version,
+            settings,
+            watchdog_recovery_count,
+            speech_engine,
+        )?;
+        atomic_file::atomic_write(&file_path, encoded.as_bytes())
+            .map_err(DiagnosticsError::Write)?;
+
+        self.store.last_export_path = Some(file_path.to_string_lossy().to_string());
+        self.store.last_exported_at_utc_ms = Some(exported_at);
+        self.persist()?;
+
+        Ok(DiagnosticsExportResult {
+            file_path: file_path.to_string_lossy().to_string(),
+            exported_at_utc_ms: exported_at,
+            record_count: self.store.records.len(),
+            redaction_summary: Self::REDACTION_SUMMARY.to_string(),
+        })
+    }
+
+    /// The export bundle as JSON. Not gated on the diagnostics opt-in: the
+    /// support file includes it whenever the user saves one.
+    pub fn bundle_json(
+        &self,
+        exported_at: u64,
+        app_version: &str,
+        settings: &VoiceWaveSettings,
+        watchdog_recovery_count: u64,
+        speech_engine: serde_json::Value,
+    ) -> Result<String, DiagnosticsError> {
         let bundle = DiagnosticsBundle {
             version: 1,
             app_version: app_version.to_string(),
             exported_at_utc_ms: exported_at,
-            redaction_summary: redaction_summary.clone(),
+            redaction_summary: Self::REDACTION_SUMMARY.to_string(),
             settings_snapshot: DiagnosticsSettingsSnapshot {
                 active_model: settings.active_model.clone(),
                 decode_mode: settings.decode_mode,
@@ -381,20 +412,7 @@ impl DiagnosticsManager {
                 .cloned()
                 .collect(),
         };
-        let encoded = serde_json::to_string_pretty(&bundle).map_err(DiagnosticsError::Parse)?;
-        atomic_file::atomic_write(&file_path, encoded.as_bytes())
-            .map_err(DiagnosticsError::Write)?;
-
-        self.store.last_export_path = Some(file_path.to_string_lossy().to_string());
-        self.store.last_exported_at_utc_ms = Some(exported_at);
-        self.persist()?;
-
-        Ok(DiagnosticsExportResult {
-            file_path: file_path.to_string_lossy().to_string(),
-            exported_at_utc_ms: exported_at,
-            record_count: self.store.records.len(),
-            redaction_summary,
-        })
+        serde_json::to_string_pretty(&bundle).map_err(DiagnosticsError::Parse)
     }
 
     /// Loads the metrics store, resetting rather than erroring on bad bytes.

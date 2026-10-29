@@ -51,8 +51,8 @@ machine. VoiceWave goes online for three things only:
 
 - **Model downloads**, once: the speech model at setup, and the AI polish model if you turn it on.
 - **Update checks** against GitHub. Updates are signed and verified before they install.
-- **An anonymous usage count**, on by default, which you can turn off during setup or in
-  Settings → Diagnostics. [What it sends](#anonymous-usage-count)
+- **Anonymous usage and problem reports**, on by default, which you can turn off during setup or
+  in Settings → Diagnostics. [What they send](#anonymous-usage-and-problem-reports)
 
 ## AI polish, on your machine
 
@@ -101,29 +101,48 @@ Or install with `winget install VoiceWave.LocalCore`.
 
 Wispr Flow details from [wisprflow.ai/pricing](https://wisprflow.ai/pricing), April 2026.
 
-## Anonymous usage count
+## Anonymous usage and problem reports
 
-On by default for new installs since 0.6.1 (existing users were asked once). It helps show whether
-people get through setup and whether dictation works for them. Turn it off during setup or in
-**Settings → Diagnostics**. It is sent through [TelemetryDeck](https://telemetrydeck.com).
+On by default for new installs. They show us whether setup and dictation work for you, and what
+breaks, so we can fix it. Reports go to [PostHog](https://posthog.com) on its EU Cloud, in a project
+set to discard IP addresses. If you shared the older usage count, 0.7.7 asks you once and records
+nothing new until you answer. One switch turns everything off, during setup or in
+**Settings → Diagnostics**. Details are in the [privacy notice](docs/PRIVACY.md).
 
-Every event carries a random installation ID, the app version, the download channel, and since 0.7.5
-a few coarse facts about the setup: Windows 10 or 11, the GPU vendor (NVIDIA, AMD, Intel or none),
-which speech model family is active, and whether it is running on the GPU or the CPU.
+Every report carries a random install ID and a random ID for each launch, the app version, Windows
+10 or 11, your graphics card maker, whether speech runs on the graphics card or the processor and
+which model family, how you installed VoiceWave (winget, a direct download, or unknown), which
+version you first installed and how many days ago (estimated for installs older than 0.7.7), and
+whether the PC is a virtual machine. On top of that, VoiceWave sends only:
 
-It counts only:
+- when the app starts: whether it started with Windows, and whether the last run ended normally,
+  crashed, hit an internal error, or was cut off by a restart or an update, what it was doing then
+  and how long it had run;
+- setup steps, and whether setup was finished or skipped;
+- once for each day you dictate: how many dictations were started, worked, came back empty, failed,
+  heard no speech, were retried or were hands free; how fast text appeared; how long you spoke; how
+  many words were inserted; how often speech ran on the graphics card; how the text got in (typed,
+  pasted, left on the clipboard, kept in History only, or held back from an app running as
+  administrator); how many went into each kind of app (browser, code editor, terminal, chat, office,
+  notes, AI app, or other); and your formatting style;
+- whether your first dictation ran on the graphics card or the processor;
+- failed dictations by type, with the kind of app when the text couldn't be inserted;
+- speech helper crashes by cause, internal errors by area, and graphics card to processor fallbacks;
+- model downloads: which model, how they ended, where a failed one stopped, retries, how far they
+  got and how long they took;
+- failed updates: the step, the kind of error and the version;
+- shortcut setup problems;
+- your answer to "Where did you hear about VoiceWave?", asked once at the end of setup on a new install;
+- the reason you pick in "Something wrong?", and where you opened it.
 
-- your first successful dictation, and whether it ran on the GPU or the CPU;
-- one "active today" marker per day, and one "launched today" marker (started with Windows or by hand);
-- which setup step you reached, and whether setup finished or was skipped;
-- a dictation failing, as a category such as "no speech heard" or "microphone missing";
-- a speech or AI polish model download failing, with a failure category (such as "connection
-  dropped" or "disk full") and how far it got, in quarter steps;
-- the GPU engine falling back to the CPU, with a reason category;
-- a speech worker crashing or timing out, or the app hitting an internal error, by area.
+It never sends audio, transcripts, dictionary or snippet content, window titles, app names, file
+paths, device names, error messages, account details, or your IP address. An app's name is turned
+into a kind of app on your PC and dropped there. 0.7.7 also still sends the older anonymous usage
+count through TelemetryDeck, under the same switch; that stops in the next release.
 
-It never sends audio, transcript text, dictionary or snippet content, error messages, file paths,
-device names, account details or settings.
+**Support file.** **Settings → Diagnostics → Save support file** writes a zip with your diagnostics
+report and recent logs to your Downloads folder. It never leaves your PC unless you attach it to an
+issue yourself.
 
 ## What's new in 0.7.0
 

@@ -1932,6 +1932,15 @@ impl VoiceWaveController {
         if mode == DictationMode::Microphone && !retrying {
             play_cue_without_blocking(crate::cue::CueSound::Open);
         }
+        if mode == DictationMode::Microphone {
+            crate::analytics::note_dictation(if retrying {
+                crate::analytics::DictationFact::Retried
+            } else {
+                crate::analytics::DictationFact::Started {
+                    hands_free: control_mode == DictationControlMode::HandsFree,
+                }
+            });
+        }
 
         let session_id = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let hands_free = Arc::new(AtomicBool::new(
@@ -2040,6 +2049,7 @@ impl VoiceWaveController {
             // A cancelled session may be replaced immediately. Never let the
             // old task clear the replacement session's token or stop flag.
             if still_owns_session {
+                crate::session::set_phase(crate::analytics::SessionPhase::Idle);
                 let mut token_slot = controller.cancel_token.lock().await;
                 *token_slot = None;
                 drop(token_slot);
@@ -2071,6 +2081,7 @@ impl VoiceWaveController {
                 }
                 telemetry::record(TelemetryEvent::DictationFailed {
                     kind: Self::failure_kind(&err),
+                    app_kind: None,
                 });
                 // The pill's error color-flash carries no text; the notice is
                 // the only place the user actually learns what went wrong.
@@ -2348,6 +2359,11 @@ impl VoiceWaveController {
             }
             Err(err) => {
                 tracing::error!("global hotkey runtime unavailable: {err}");
+                if let Some(kind) = err.failure_kind() {
+                    crate::analytics::capture(crate::analytics::AnalyticsEvent::HotkeyFailed {
+                        kind,
+                    });
+                }
                 // The duplicate-instance case has a fix the user can actually
                 // perform; everything else is a genuine "something broke".
                 let detail = if err.to_string().contains("already owns the keyboard hook") {
@@ -2482,6 +2498,25 @@ impl VoiceWaveController {
             speech_engine,
         )?;
         Ok(result)
+    }
+
+    /// The same bundle for the support file, without the opt-in gate: the
+    /// user asked for the file.
+    pub async fn diagnostics_bundle_json(&self) -> Result<String, ControllerError> {
+        let settings = self.settings.lock().await.clone();
+        let watchdog_recovery_count = self.watchdog_recovery_count.load(Ordering::Relaxed);
+        let speech_engine =
+            tokio::task::spawn_blocking(crate::inference::gpu_select::diagnostics_snapshot)
+                .await
+                .unwrap_or_default();
+        let json = self.diagnostics_manager.lock().await.bundle_json(
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
+            env!("CARGO_PKG_VERSION"),
+            &settings,
+            watchdog_recovery_count,
+            speech_engine,
+        )?;
+        Ok(json)
     }
 
     pub async fn request_microphone_access(&self, app: AppHandle) -> PermissionSnapshot {

@@ -8,10 +8,12 @@ import {
   openMicrophonePrivacySettings,
   setMicLevelForwarding,
   startMicLevelMonitor,
-  stopMicLevelMonitor
+  stopMicLevelMonitor,
+  track as trackAnalytics
 } from "../lib/tauri";
 import { ANONYMOUS_USAGE_DETAILS, type FunnelEvent, trackFunnelEvent } from "../lib/telemetry";
 import type {
+  AcquisitionAnswer,
   ModelCatalogItem,
   ModelStatus,
   SpeechEngineStatus,
@@ -22,6 +24,23 @@ import { ModelDownloadProgress } from "./ModelDownloadProgress";
 type OnboardingStep = "welcome" | "mic" | "speak" | "done";
 
 const STEP_ORDER: OnboardingStep[] = ["welcome", "mic", "speak", "done"];
+/** "Where did you hear about VoiceWave?" choices, in order (plan 024 section 7). */
+const ACQUISITION_CHOICES: { answer: AcquisitionAnswer; label: string }[] = [
+  { answer: "reddit", label: "Reddit" },
+  { answer: "x", label: "X" },
+  { answer: "youtube", label: "YouTube" },
+  { answer: "github", label: "GitHub" },
+  { answer: "search", label: "Google or another search engine" },
+  { answer: "ai_assistant", label: "ChatGPT or another AI assistant" },
+  { answer: "hacker_news", label: "Hacker News" },
+  { answer: "alternativeto", label: "AlternativeTo" },
+  { answer: "saashub", label: "SaaSHub" },
+  { answer: "devhunt", label: "DevHunt" },
+  { answer: "friend", label: "A friend or coworker" },
+  { answer: "winget", label: "Browsing winget" },
+  { answer: "article", label: "A blog or article" },
+  { answer: "other", label: "Somewhere else" }
+];
 const METER_BAR_COUNT = 30;
 const METER_RADIUS = 94;
 /** Mic-level (RMS-ish, 0..~0.3 for speech) above this counts as "heard". */
@@ -47,16 +66,22 @@ interface OnboardingProps {
   setInputDevice: (deviceName: string | null) => Promise<void>;
   hotkeyLabel: string;
   snapshot: VoiceWaveSnapshot;
-  /** Anonymous usage count, on by default. Disclosed on the first screen so
-   * it is seen before anything could be sent; changes persist immediately.
-   * Setup funnel events read the value current when each one fires. */
+  /** Anonymous usage and problem reports, on by default. Disclosed on the
+   * first screen so it is seen before anything could be sent; changes
+   * persist immediately. Setup events read the value current when each one
+   * fires. */
   usageOptIn: boolean;
   onUsageOptInChange: (enabled: boolean) => void;
+  /** Ask "Where did you hear about VoiceWave?" on the done step: a new
+   * install, sharing on, never asked before. */
+  askAcquisition?: boolean;
   /** "Start with Windows" on the final step. Off unless the user opts in;
    * null (not offered) outside the desktop app. */
   autostart?: boolean | null;
   onAutostartChange?: (enabled: boolean) => void;
-  onComplete: () => void;
+  /** `acquisitionAsked`: the done step showed the acquisition question, so
+   * it must never show again. */
+  onComplete: (acquisitionAsked: boolean) => void;
   /** Test/host override. Desktop normally resolves the internal rollout flag
    * from the native snapshot so onboarding never advertises a disabled card. */
   quickControlsAvailable?: boolean;
@@ -332,11 +357,11 @@ function MicMeter({
 
 /* ------------------------------------------------------------ onboarding */
 
-/** "What's counted" disclosure under every anonymous-usage toggle. */
+/** "What's sent" disclosure under every anonymous-usage toggle. */
 export function UsageCountDetails() {
   return (
     <details className="mt-1 text-xs text-faint">
-      <summary className="cursor-pointer select-none font-medium text-accent-text">What's counted</summary>
+      <summary className="cursor-pointer select-none font-medium text-accent-text">What's sent</summary>
       <p className="mt-1 max-w-[34rem] leading-relaxed">{ANONYMOUS_USAGE_DETAILS}</p>
     </details>
   );
@@ -374,6 +399,7 @@ export function Onboarding({
   snapshot,
   usageOptIn,
   onUsageOptInChange,
+  askAcquisition = false,
   autostart,
   onAutostartChange,
   onComplete,
@@ -397,6 +423,7 @@ export function Onboarding({
   const [micError, setMicError] = useState<string | null>(null);
   const [spokeDone, setSpokeDone] = useState(false);
   const [quickControlsPreviewOpen, setQuickControlsPreviewOpen] = useState(false);
+  const [acquisition, setAcquisition] = useState<AcquisitionAnswer | null>(null);
   const [quickControlsAvailable, setQuickControlsAvailable] = useState(
     quickControlsAvailableOverride ?? false
   );
@@ -411,21 +438,32 @@ export function Onboarding({
   const track = useCallback((event: FunnelEvent) => {
     void trackFunnelEvent(event).catch(() => undefined);
   }, []);
-
-  // Welcome counts when the user acts on it (not on mount), so the toggle
-  // shown on that screen decides; later steps count on arrival.
+  // TelemetryDeck counts welcome when the user acts on it (not on mount), so
+  // the toggle shown on that screen decides; later steps count on arrival.
+  // PostHog (plan 024) gets every step on arrival, welcome included, and the
+  // gaps between timestamps give the time on each step. Its consent gate is
+  // in the backend: a new install's events wait until onboarding ends, and
+  // turning sharing off deletes them.
   useEffect(() => {
+    void trackAnalytics({ event: "onboarding_step", step });
     if (step !== "welcome") {
       track({ type: "Onboarding.stepReached", step });
     }
   }, [step, track]);
+
+  const acquisitionAsked = step === "done" && askAcquisition;
 
   const leaveSetup = (outcome: "finished" | "skipped") => {
     if (step === "welcome") {
       track({ type: "Onboarding.stepReached", step: "welcome" });
     }
     track({ type: "Onboarding.completed", outcome });
-    onComplete();
+    void trackAnalytics({ event: "onboarding_finished", outcome });
+    // Sent once, on leaving: the choice picked, or skipped for none.
+    if (acquisitionAsked) {
+      void trackAnalytics({ event: "acquisition_answered", answer: acquisition ?? "skipped" });
+    }
+    onComplete(acquisitionAsked);
   };
 
   useEffect(() => {
@@ -703,17 +741,17 @@ export function Onboarding({
 
                 <div className="mt-6 flex max-w-[30rem] items-start justify-between gap-6">
                   <div>
-                    <p className="vw-set-title">Anonymous usage count · on by default</p>
+                    <p className="vw-set-title">Anonymous usage and problem reports · on by default</p>
                     <p className="vw-set-desc">
-                      Counts installs and setup progress with a random ID. Never audio, transcripts, or
-                      your other settings. Change it anytime in Settings.
+                      Tells us how setup and dictation go, with a random ID. Never audio, transcripts or app
+                      names.
                     </p>
                     <UsageCountDetails />
                   </div>
                   <span className="vw-switch">
                     <input
                       type="checkbox"
-                      aria-label="Share anonymous usage count"
+                      aria-label="Share anonymous usage and problem reports"
                       checked={usageOptIn}
                       onChange={(event) => onUsageOptInChange(event.target.checked)}
                     />
@@ -968,6 +1006,31 @@ export function Onboarding({
                     </span>
                   </div>
                 ) : null}
+                {acquisitionAsked && (
+                  <div className="mt-6 w-full max-w-[26rem] text-left">
+                    <label htmlFor="vw-onb-acquisition" className="vw-set-title block">
+                      Where did you hear about VoiceWave?
+                    </label>
+                    {/* Left on the placeholder, the answer is sent as "skipped". */}
+                    <select
+                      id="vw-onb-acquisition"
+                      className="vw-field mt-2 w-full"
+                      value={acquisition ?? ""}
+                      onChange={(event) =>
+                        setAcquisition(
+                          ACQUISITION_CHOICES.find((choice) => choice.answer === event.target.value)?.answer ?? null
+                        )
+                      }
+                    >
+                      <option value="">Choose one (optional)</option>
+                      {ACQUISITION_CHOICES.map((choice) => (
+                        <option key={choice.answer} value={choice.answer}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <button type="button" className="vw-btn-primary mt-8" onClick={() => leaveSetup("finished")}>
                   Start dictating
                 </button>

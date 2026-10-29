@@ -23,7 +23,7 @@ use super::gpu_select::{
 use super::InferenceError;
 use crate::settings::DecodeMode;
 use crate::support::redact_profile_dir;
-use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
+use crate::telemetry::{self, TelemetryEvent, WorkerCause, WorkerExit, WorkerKind};
 use flate2::{write::ZlibEncoder, Compression};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -297,6 +297,8 @@ enum Fault {
         /// `InferenceError::AsrWorker::failed_start`); `None` for an error
         /// the worker itself reported.
         exit: Option<WorkerExit>,
+        /// From the exit code and stderr when the worker died (`exited`).
+        cause: WorkerCause,
     },
 }
 
@@ -307,6 +309,7 @@ impl Fault {
             reason: reason.into(),
             timed_out: false,
             exit: None,
+            cause: WorkerCause::Unknown,
         }
     }
 
@@ -317,12 +320,14 @@ impl Fault {
                 class,
                 reason,
                 timed_out,
+                cause,
                 ..
             } => Fault::Worker {
                 class,
                 reason,
                 timed_out,
                 exit: Some(WorkerExit::SpawnFailed),
+                cause,
             },
             other => other,
         }
@@ -332,7 +337,9 @@ impl Fault {
     /// called for qualification: failing there is the check doing its job.
     fn record(&self, rung: Rung) {
         if let Fault::Worker {
-            exit: Some(exit), ..
+            exit: Some(exit),
+            cause,
+            ..
         } = self
         {
             let worker = match rung {
@@ -342,6 +349,7 @@ impl Fault {
             telemetry::record(TelemetryEvent::WorkerCrashed {
                 worker,
                 exit: *exit,
+                cause: *cause,
             });
         }
     }
@@ -457,7 +465,7 @@ impl WorkerProcess {
     }
 
     /// Next stdout line before `until`. `Ok(None)` = nothing yet this slice.
-    fn next_line(&self, until: Instant, what: &str) -> Result<Option<String>, Fault> {
+    fn next_line(&mut self, until: Instant, what: &str) -> Result<Option<String>, Fault> {
         let now = Instant::now();
         if now >= until {
             return Err(Fault::Worker {
@@ -465,6 +473,7 @@ impl WorkerProcess {
                 reason: format!("{} worker missed its {what} deadline", self.rung.dir_name()),
                 timed_out: true,
                 exit: Some(WorkerExit::Timeout),
+                cause: WorkerCause::Unknown,
             });
         }
         match self.responses.recv_timeout(POLL_SLICE.min(until - now)) {
@@ -474,9 +483,18 @@ impl WorkerProcess {
         }
     }
 
-    fn exited(&self, what: &str) -> Fault {
+    /// The worker's pipe closed: read its exit code, log the whole stderr
+    /// tail locally, and classify the cause (plan 024 section 4.4).
+    fn exited(&mut self, what: &str) -> Fault {
         // Give the stderr drain a moment to capture the last lines.
         std::thread::sleep(Duration::from_millis(100));
+        let code = self.child.try_wait().ok().flatten().and_then(|status| status.code());
+        let tail: Vec<String> = self
+            .stderr_tail
+            .lock()
+            .map(|tail| tail.iter().cloned().collect())
+            .unwrap_or_default();
+        let cause = telemetry::worker_exit_cause(self.rung.dir_name(), code, &tail);
         Fault::Worker {
             class: ErrorClass::Backend,
             reason: format!(
@@ -486,6 +504,7 @@ impl WorkerProcess {
             ),
             timed_out: false,
             exit: Some(WorkerExit::Crash),
+            cause,
         }
     }
 

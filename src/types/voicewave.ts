@@ -73,9 +73,12 @@ export interface VoiceWaveSettings {
    * activity, and the setup/reliability funnel (src/lib/telemetry.ts). On by
    * default; the user can turn it off. */
   anonymousUsageOptIn: boolean;
-  /** Analytics disclosure revision the user has seen (0 = never). Below
-   * ANALYTICS_CONSENT_VERSION after onboarding, the app asks once. */
+  /** Analytics disclosure revision the user has seen: 0 = never, 1 = the
+   * TelemetryDeck notice, 2 = the PostHog disclosure (or sharing is off).
+   * PostHog sends only at ANALYTICS_CONSENT_VERSION (src/lib/telemetry.ts). */
   analyticsConsentVersion?: number;
+  /** The onboarding acquisition question was shown and left; never asked again. */
+  acquisitionAsked?: boolean;
   toggleHotkey: string;
   pushToTalkHotkey: string;
   preferClipboardFallback: boolean;
@@ -263,6 +266,10 @@ export interface SupportContext {
   logDir: string;
   /** This process was started with `--autostart` (Windows sign-in). */
   launchedAtLogin: boolean;
+  /** A first install of 0.7.7 or later, not an update of an older one. */
+  isNewInstall: boolean;
+  /** The previous run crashed or panicked (plan 024 section 5). */
+  previousExitUnclean: boolean;
 }
 
 /** Plan 022 telemetry queue (`drain_telemetry`): fixed categories only,
@@ -294,6 +301,50 @@ export type TelemetryEvent =
   | { type: "dictation-failed"; kind: DictationFailureKind }
   | { type: "worker-crashed"; worker: WorkerKind; exit: WorkerExit }
   | { type: "panicked"; area: PanicArea };
+
+/** Plan 024 analytics events the webview sends through `track`: the
+ * variants the backend's `track` command accepts of `AnalyticsEvent`
+ * (src-tauri/src/analytics/events.rs), in its wire shape (`event` tag,
+ * snake_case fields). The backend drops anything else. Fixed values only. */
+export type OnboardingStepName = "welcome" | "mic" | "speak" | "done";
+/** Plan 024 section 7, in display order. */
+export type AcquisitionAnswer =
+  | "reddit"
+  | "x"
+  | "youtube"
+  | "github"
+  | "search"
+  | "ai_assistant"
+  | "hacker_news"
+  | "alternativeto"
+  | "saashub"
+  | "devhunt"
+  | "friend"
+  | "winget"
+  | "article"
+  | "other"
+  | "skipped";
+/** "Something wrong?" reasons, in the order the picker lists them. */
+export type FeedbackKind =
+  | "wrong_words"
+  | "missed_words"
+  | "too_slow"
+  | "text_did_not_appear"
+  | "wrong_place"
+  | "froze_or_crashed"
+  | "hotkey"
+  | "other";
+/** Where "Something wrong?" was opened: the pill's quick menu or the main window's Help. */
+export type FeedbackSurface = "pill" | "settings";
+export type UpdateFailureStage = "download" | "verify" | "install";
+export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | "other";
+export type ClientEvent =
+  | { event: "onboarding_step"; step: OnboardingStepName }
+  | { event: "onboarding_finished"; outcome: "finished" | "skipped" }
+  | { event: "acquisition_answered"; answer: AcquisitionAnswer }
+  | { event: "feedback_reported"; kind: FeedbackKind; surface: FeedbackSurface }
+  /** `target_version` is sent as `other` unless it's plain `major.minor.patch`. */
+  | { event: "update_failed"; stage: UpdateFailureStage; error_kind: UpdateErrorKind; target_version: string };
 
 export interface DiagnosticsExportResult {
   filePath: string;

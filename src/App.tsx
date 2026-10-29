@@ -37,16 +37,19 @@ import {
   copyTextToClipboard,
   getDiagnosticsReport,
   getSupportContext,
+  listenSomethingWrong,
   openIssueReport,
   openLogsFolder
 } from "./lib/tauri";
-import { ANALYTICS_CONSENT_VERSION, ANONYMOUS_USAGE_DETAILS } from "./lib/telemetry";
+import { ANALYTICS_CONSENT_VERSION } from "./lib/telemetry";
 import { CpuModelNotice } from "./components/CpuModelNotice";
 import { ParakeetOffer } from "./components/ParakeetOffer";
 import { ModelDownloadProgress } from "./components/ModelDownloadProgress";
 import { HotkeyRecorder } from "./components/HotkeyRecorder";
 import { GpuPreparingNote, Onboarding, UsageCountDetails } from "./components/Onboarding";
+import { SomethingWrong } from "./components/SomethingWrong";
 import { StatsSection } from "./components/StatsSection";
+import { SaveSupportFileButton, SupportFileStatus, useSupportFile } from "./components/SupportFile";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { UpdateSection } from "./components/UpdateSection";
 import { useAutostart } from "./hooks/useAutostart";
@@ -59,6 +62,8 @@ import type {
   AppProfileOverrides,
   CodeModeSettings,
   DomainPackId,
+  FeedbackKind,
+  FeedbackSurface,
   FormatProfile,
   GpuAccelerationMode,
   MicVolumeGuardMode,
@@ -651,10 +656,15 @@ function App() {
   // Models page: the row whose Remove is waiting for a second click.
   const [confirmRemoveModelId, setConfirmRemoveModelId] = useState<string | null>(null);
   // Report a problem (Help, Settings → Diagnostics): what the issue gets
-  // pre-filled with, fetched when either row shows, and the last
-  // "couldn't open" message.
+  // pre-filled with, fetched at launch (the unclean exit banner needs it),
+  // and the last "couldn't open" message.
   const [supportContext, setSupportContext] = useState<SupportContext | null>(null);
   const [supportError, setSupportError] = useState<string | null>(null);
+  // Help's "Something wrong?" step reports where it was opened from.
+  const [feedbackSurface, setFeedbackSurface] = useState<FeedbackSurface>("settings");
+  // The banner after a crash or panic, shown until dismissed in this run.
+  const [uncleanExitDismissed, setUncleanExitDismissed] = useState(false);
+  const supportFile = useSupportFile();
   // The diagnostics report (preview + "Copy diagnostics"), and the brief
   // "Copied" state after a copy.
   const [diagnosticsReport, setDiagnosticsReport] = useState<string | null>(null);
@@ -816,13 +826,16 @@ function App() {
   // onboarding without installing a model; it hides while the flow is up.
   const showModelSetupGate =
     tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
-  // One-time notice for installs that finished (or skipped) onboarding before
-  // usage counting became on-by-default. Onboarding carries its own
-  // disclosure, and the model gate goes first so the two never stack.
+  // "A quick privacy check" (plan 024): users sharing under an older
+  // disclosure (the settings migration leaves them below version 2) see it
+  // after onboarding, on every launch until they answer; PostHog records
+  // nothing for them until then. The model gate goes first so the two never
+  // stack. Sharing off needs no check: nothing is sent.
   const showAnalyticsConsent =
     tauriAvailable &&
     !showOnboarding &&
     !showModelSetupGate &&
+    settings.anonymousUsageOptIn &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
@@ -1011,6 +1024,7 @@ function App() {
   const closeOverlay = () => {
     setActiveOverlay(null);
     setSettingsSection("general");
+    setFeedbackSurface("settings");
   };
 
   const openOverlay = (panel: OverlayId) => {
@@ -1306,23 +1320,43 @@ function App() {
     }
   }, [refreshHotkeys, shortcutRowVisible]);
 
-  const reportRowVisible =
-    activeOverlay === "help" || (activeOverlay === "settings" && settingsSection === "diagnostics");
   useEffect(() => {
-    if (!reportRowVisible || !tauriAvailable || supportContext) {
+    if (!tauriAvailable) {
       return;
     }
     void getSupportContext()
       .then(setSupportContext)
       .catch(() => undefined);
-  }, [reportRowVisible, supportContext, tauriAvailable]);
+  }, [tauriAvailable]);
+
+  // The pill's "Something wrong?" brings this window up on Help's report step.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listenSomethingWrong(() => {
+      openOverlay("help");
+      setFeedbackSurface("pill");
+    }).then((stop) => {
+      if (active) {
+        unlisten = stop;
+      } else {
+        stop();
+      }
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+    // openOverlay only calls state setters and a ref, which never change.
+  }, []);
 
   // Report a problem: Rust builds the GitHub issue URL with the diagnostics
-  // report in it and opens the browser. Opening the form sends the report to
-  // GitHub; submitting it publishes the issue.
-  const reportProblem = () => {
+  // report in it (and the reason picked in "Something wrong?") and opens the
+  // browser. Opening the form sends the report to GitHub; submitting it
+  // publishes the issue.
+  const reportProblem = (reason?: FeedbackKind) => {
     setSupportError(null);
-    void openIssueReport(speechEngineSummary).catch(() =>
+    void openIssueReport(speechEngineSummary, reason).catch(() =>
       setSupportError("Couldn't open your browser. Report the problem on VoiceWave's GitHub Issues page instead.")
     );
   };
@@ -1645,6 +1679,33 @@ function App() {
                   Desktop runtime is not connected. Run <span className="font-mono">npm run tauri:dev</span> to
                   enable real microphone dictation and model downloads.
                 </div>
+              )}
+              {supportContext?.previousExitUnclean && !uncleanExitDismissed && (
+                <section
+                  className="mx-auto mb-6 max-w-6xl rounded-2xl border border-edge bg-inset px-5 py-4"
+                  role="status"
+                  aria-label="VoiceWave closed unexpectedly"
+                >
+                  <p className="max-w-2xl text-sm text-ink-strong">
+                    VoiceWave closed unexpectedly last time. If it keeps happening, save a support file and attach it
+                    to a GitHub issue.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <SaveSupportFileButton file={supportFile} className="vw-btn-primary vw-btn-sm" />
+                    <button type="button" className="vw-btn-secondary vw-btn-sm" onClick={showLogsFolder}>
+                      Open logs folder
+                    </button>
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm"
+                      onClick={() => setUncleanExitDismissed(true)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <SupportFileStatus state={supportFile.state} />
+                  {supportError && <p className="mt-2 text-xs text-status-danger-text">{supportError}</p>}
+                </section>
               )}
               {cpuModelOffer && (
                 <CpuModelNotice
@@ -3108,17 +3169,17 @@ function App() {
                 <div>
                   <div className="vw-set-row">
                     <div>
-                      <p className="vw-set-title">Anonymous usage count (on by default)</p>
+                      <p className="vw-set-title">Anonymous usage and problem reports</p>
                       <p className="vw-set-desc">
-                        Helps us count real installs and spot where setup goes wrong. Never audio, transcripts,
-                        or your other settings. Turn off anytime.
+                        How setup, dictation, downloads and updates go for you, with a random ID. Never audio,
+                        transcripts or app names.
                       </p>
                       <UsageCountDetails />
                     </div>
                     <span className="vw-switch">
                       <input
                         type="checkbox"
-                        aria-label="Share anonymous usage count"
+                        aria-label="Share anonymous usage and problem reports"
                         checked={settings.anonymousUsageOptIn}
                         onChange={(event) => void setAnonymousUsageOptIn(event.target.checked)}
                       />
@@ -3190,15 +3251,15 @@ function App() {
                   </div>
 
                   <div className="vw-set-row">
-                    <div>
-                      <p className="vw-set-title">Report a problem</p>
+                    <div className="min-w-0 flex-1">
+                      <p className="vw-set-title">Support file</p>
                       <p className="vw-set-desc">
-                        Opens a pre-filled GitHub issue that already includes the diagnostics report. Attaching the
-                        bundle above or the latest log file is optional; logs never contain what you dictated.
+                        Saves a zip file with your diagnostics report and recent logs to your Downloads folder.
+                        Nothing is uploaded. Attach it to a GitHub issue if you want help.
                       </p>
-                      {supportError && <p className="mt-1 text-xs text-status-danger-text">{supportError}</p>}
+                      <SupportFileStatus state={supportFile.state} />
                     </div>
-                    <div className="flex shrink-0 gap-2">
+                    <div className="flex shrink-0 gap-2 self-start">
                       <button
                         type="button"
                         className="vw-btn-secondary vw-btn-sm"
@@ -3207,15 +3268,27 @@ function App() {
                       >
                         Open logs folder
                       </button>
-                      <button
-                        type="button"
-                        className="vw-btn-secondary vw-btn-sm"
-                        onClick={reportProblem}
-                        disabled={!tauriAvailable}
-                      >
-                        Report a problem
-                      </button>
+                      {tauriAvailable && <SaveSupportFileButton file={supportFile} />}
                     </div>
+                  </div>
+
+                  <div className="vw-set-row">
+                    <div>
+                      <p className="vw-set-title">Report a problem</p>
+                      <p className="vw-set-desc">
+                        Opens a pre-filled GitHub issue that already includes the diagnostics report. Attaching the
+                        support file above is optional; logs never contain what you dictated.
+                      </p>
+                      {supportError && <p className="mt-1 text-xs text-status-danger-text">{supportError}</p>}
+                    </div>
+                    <button
+                      type="button"
+                      className="vw-btn-secondary vw-btn-sm shrink-0"
+                      onClick={() => reportProblem()}
+                      disabled={!tauriAvailable}
+                    >
+                      Report a problem
+                    </button>
                   </div>
                 </div>
               )}
@@ -3665,25 +3738,22 @@ function App() {
             </section>
             <section className="vw-surface-base rounded-2xl border border-edge bg-surface px-4 py-4">
               <p className="text-sm font-semibold text-ink-strong">Report a problem</p>
-              <p className="mt-1 text-sm text-faint">
-                Opens a pre-filled GitHub issue with the diagnostics report: app and Windows versions, speech
-                engine, microphone name and recent warnings. Opening the form sends these to GitHub to fill
-                it in; submitting it publishes the issue.
-              </p>
+              <SomethingWrong
+                key={feedbackSurface}
+                surface={feedbackSurface}
+                sharing={
+                  settings.anonymousUsageOptIn &&
+                  (settings.analyticsConsentVersion ?? 0) >= ANALYTICS_CONSENT_VERSION
+                }
+                supportFile={supportFile}
+                onTellUsMore={reportProblem}
+              />
               {supportContext && (
-                <p className="mt-2 text-xs text-hint">
+                <p className="mt-3 text-xs text-hint">
                   VoiceWave {supportContext.appVersion} · {supportContext.osVersion} · {speechEngineSummary}
                 </p>
               )}
               <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="vw-btn-primary vw-btn-sm"
-                  onClick={reportProblem}
-                  disabled={!tauriAvailable}
-                >
-                  Report a problem
-                </button>
                 <button
                   type="button"
                   className="vw-btn-secondary vw-btn-sm"
@@ -3730,38 +3800,50 @@ function App() {
           onUsageOptInChange={(enabled) => void setAnonymousUsageOptIn(enabled)}
           autostart={autostartEnabled}
           onAutostartChange={(enabled) => void setAutostartEnabled(enabled)}
-          onComplete={() => void completeOnboarding()}
+          askAcquisition={
+            (supportContext?.isNewInstall ?? false) &&
+            settings.anonymousUsageOptIn &&
+            !settings.acquisitionAsked
+          }
+          onComplete={(acquisitionAsked) => void completeOnboarding(acquisitionAsked)}
         />
       )}
 
       {showAnalyticsConsent && (
         <div className="vw-model-gate-backdrop">
-          <section
-            className="vw-model-gate-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Anonymous usage count"
-          >
+          <section className="vw-model-gate-card" role="dialog" aria-modal="true" aria-label="Privacy check">
             <header>
-              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">
-                Anonymous usage count
-              </h3>
+              <h3 className="vw-section-heading text-2xl font-semibold text-ink-strong">A quick privacy check</h3>
               <p className="mt-1 text-sm text-faint">
-                VoiceWave now counts active installs by default, so we know how many people use it and where
-                setup goes wrong.
+                VoiceWave 0.7.7 sends a little more about how the app is working for you, so we can find and fix
+                problems. It is anonymous: a random ID, never your name or account.
               </p>
             </header>
             <p className="mt-4 text-sm leading-relaxed text-label">
-              It sends: {ANONYMOUS_USAGE_DETAILS} You can change this anytime in Settings → Diagnostics.
+              Each day you use it: how many dictations worked, failed or were retried, how fast text appeared,
+              how the text got in, and the kind of app it went into (such as a browser or a code editor, never its
+              name). Also how the app started and closed, setup progress, model downloads, updates, crashes, and
+              the reason you pick in “Something wrong?” and where you opened it.
+            </p>
+            <UsageCountDetails />
+            <p className="mt-3 text-sm leading-relaxed text-label">
+              Never sent: audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
+              device names, error messages, or your IP address.
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-2">
-              <button type="button" className="vw-btn-primary" onClick={() => void resolveAnalyticsConsent(true)}>
-                Keep on
+              <button
+                type="button"
+                className="vw-btn-primary"
+                autoFocus
+                onClick={() => void resolveAnalyticsConsent(true)}
+              >
+                Keep sharing
               </button>
               <button type="button" className="vw-btn-secondary" onClick={() => void resolveAnalyticsConsent(false)}>
                 Turn off
               </button>
             </div>
+            <p className="mt-4 text-xs text-faint">You can change this anytime in Settings → Diagnostics.</p>
           </section>
         </div>
       )}

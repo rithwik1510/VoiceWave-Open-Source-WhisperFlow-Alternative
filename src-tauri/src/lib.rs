@@ -1,3 +1,6 @@
+// Not desktop-gated: settings (also in core builds) feed its consent gate.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
+mod analytics;
 mod atomic_file;
 pub mod audio;
 pub mod benchmark;
@@ -11,12 +14,16 @@ pub mod inference;
 pub mod insertion;
 mod job_object;
 pub mod model_manager;
+mod net;
 pub mod permissions;
 pub mod phase1;
 #[cfg(feature = "desktop")]
 mod pill_hit_target;
 mod secure_store;
 pub mod settings;
+// Not desktop-gated: the panic hook in `support` marks the session file.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod session;
 pub mod snippet;
 pub mod stats;
 // Not desktop-gated: the inference workers record telemetry and redact
@@ -1177,6 +1184,11 @@ struct SupportContext {
     os_version: String,
     log_dir: String,
     launched_at_login: bool,
+    /// Gates the onboarding acquisition question (plan 024 section 7).
+    is_new_install: bool,
+    /// The previous run crashed or panicked (plan 024 section 5), for the
+    /// unclean-exit banner. Independent of the analytics switch.
+    previous_exit_unclean: bool,
 }
 
 /// This process was started by the "Start with Windows" Run-key entry.
@@ -1195,7 +1207,30 @@ fn get_support_context() -> SupportContext {
             .map(|dir| dir.display().to_string())
             .unwrap_or_default(),
         launched_at_login: launched_at_login(),
+        is_new_install: analytics::is_new_install(),
+        previous_exit_unclean: session::previous().unclean(),
     }
+}
+
+/// The updater has downloaded `target_version` and is about to run its
+/// installer, so the next launch can tell whether it landed (plan 024
+/// section 5).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn mark_update_installing(target_version: String) -> Result<(), String> {
+    let target = analytics::Semver::parse(&target_version);
+    if !target.is_valid() {
+        return Err(format!("not a release version: {target_version}"));
+    }
+    session::mark_update_installing(target);
+    Ok(())
+}
+
+/// The update's installer failed to start.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn clear_update_installing() {
+    session::clear_update_installing();
 }
 
 /// Gathers the diagnostics report's setup facts (see
@@ -1249,17 +1284,54 @@ async fn get_diagnostics_report(runtime: State<'_, RuntimeContext>) -> Result<St
 }
 
 /// Opens the prefilled GitHub bug form in the default browser. The frontend
-/// only supplies the engine label; the URL itself is built from fixed parts
-/// plus the diagnostics report.
+/// only supplies the engine label and the reason picked in "Something
+/// wrong?"; the URL itself is built from fixed parts plus the diagnostics
+/// report.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn open_issue_report(
     engine: String,
+    reason: Option<analytics::FeedbackKind>,
     runtime: State<'_, RuntimeContext>,
 ) -> Result<(), String> {
     let report = diagnostics_report(&runtime.controller).await;
-    let url = support::issue_report_url(&engine, &report)?;
+    let url = support::issue_report_url(&engine, reason, &report)?;
     support::shell_open(url.as_ref()).map_err(|err| format!("failed to open the issue form: {err}"))
+}
+
+/// Saves the support file to Downloads and returns its path (plan 024
+/// section 8.2). Reading the logs and compressing run on a blocking thread.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn export_support_zip(runtime: State<'_, RuntimeContext>) -> Result<String, String> {
+    let report = diagnostics_report(&runtime.controller).await.text();
+    let diagnostics = runtime
+        .controller
+        .diagnostics_bundle_json()
+        .await
+        .map_err(|err| String::from(AppError::Controller(err)))?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        support::write_support_zip(&report, &diagnostics)
+    })
+    .await
+    .map_err(|err| format!("the support file task failed: {err}"))??;
+    Ok(path.display().to_string())
+}
+
+/// "Show in folder" after saving a support file. Accepts only a saved support
+/// file, so the webview can't point Explorer anywhere else.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn reveal_support_file(path: String) -> Result<(), String> {
+    let path = std::path::PathBuf::from(path);
+    let is_support_file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("voicewave-support-") && name.ends_with(".zip"));
+    if !is_support_file || !path.is_file() {
+        return Err("not a saved support file".to_string());
+    }
+    support::reveal_in_explorer(&path)
 }
 
 #[cfg(feature = "desktop")]
@@ -2385,6 +2457,8 @@ pub fn run() {
     // runs after main()'s single-instance claim, so a second launch that
     // exits there never opens or rotates the log.
     support::init();
+    // Before anything else can fail: how the previous run ended.
+    session::start();
 
     tauri::Builder::default()
         // Single instance: two event-driven keyboard hooks would BOTH capture
@@ -2414,6 +2488,10 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         .setup(|app| {
+            // First, before anything can save settings: analytics tells a
+            // pre-0.7.7 install from a new one by whether they existed.
+            analytics::init();
+            let launched_at = chrono::Utc::now();
             // The main window is created hidden (tauri.conf.json) so a login
             // launch never flashes it. Normal launches show it straight away.
             telemetry::attach(app.handle().clone());
@@ -2428,6 +2506,24 @@ pub fn run() {
                     .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
             );
             let initial_settings = tauri::async_runtime::block_on(controller.load_settings());
+            session::set_phase(analytics::SessionPhase::Idle);
+
+            // Startup analytics, once settings (the consent gate) are loaded.
+            // The engine status comes first so `app_launched` carries the
+            // speech context; its timestamp stays the launch.
+            let controller_for_analytics = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                controller_for_analytics.speech_engine_status().await;
+                analytics::capture_launch(
+                    if launched_at_login {
+                        analytics::LaunchMode::Autostart
+                    } else {
+                        analytics::LaunchMode::Manual
+                    },
+                    &session::previous(),
+                    launched_at,
+                );
+            });
 
             let controller_for_hotkeys = controller.clone();
             let app_handle = app.handle().clone();
@@ -2575,7 +2671,12 @@ pub fn run() {
             get_diagnostics_report,
             open_issue_report,
             telemetry::drain_telemetry,
+            analytics::track,
+            mark_update_installing,
+            clear_update_installing,
             open_logs_folder,
+            export_support_zip,
+            reveal_support_file,
             get_pill_quick_controls_snapshot,
             set_pill_quick_controls_mode,
             set_pill_window_mode,
@@ -2651,7 +2752,10 @@ pub fn run() {
         .run(|_app, event| {
             // Covers every exit route (window close, app.exit, OS shutdown),
             // not just the tray Quit item.
+            // The session file goes first: a slow worker shutdown during a
+            // Windows shutdown must not leave this run looking like a crash.
             if matches!(event, tauri::RunEvent::Exit) {
+                session::clear();
                 shutdown_inference_workers();
             }
         });

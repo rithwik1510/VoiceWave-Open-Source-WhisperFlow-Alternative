@@ -37,6 +37,10 @@ pub struct InsertResult {
     /// text went to the clipboard instead (plan 020).
     #[serde(default)]
     pub blocked_by_elevation: bool,
+    /// The foreground app's kind; `None` when the request named its own
+    /// target (`target_app`), whose process isn't known.
+    #[serde(default)]
+    pub app_kind: Option<AppKind>,
 }
 
 /// `dwExtraInfo` tag on every keystroke VoiceWave sends (typing, paste
@@ -216,6 +220,11 @@ impl InsertionEngine {
         } else {
             self.backend.detect_target_process()
         };
+        // Analytics only: the exe name stops here.
+        let target_kind = request
+            .target_app
+            .is_none()
+            .then(|| app_kind(target_process.as_deref()));
 
         // UIPI drops keystrokes into a higher-integrity app without any error,
         // so an elevated target goes straight to the clipboard (plan 020).
@@ -300,6 +309,7 @@ impl InsertionEngine {
                         transaction_id: transaction_id.clone(),
                         undo_available,
                         blocked_by_elevation,
+                        app_kind: target_kind,
                     });
                     break;
                 }
@@ -319,6 +329,7 @@ impl InsertionEngine {
             transaction_id: transaction_id.clone(),
             undo_available: false,
             blocked_by_elevation,
+            app_kind: target_kind,
         });
 
         if !result.success && result.message.is_none() {
@@ -540,6 +551,48 @@ pub fn terminal_paste_chord(exe_name: &str) -> Option<PasteChord> {
 
 pub fn is_terminal_process_exe(exe_name: &str) -> bool {
     terminal_paste_chord(exe_name).is_some()
+}
+
+/// The kind of app text went into (plan 024 section 4.5), for analytics.
+/// Only the kind leaves `app_kind`: the exe name never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppKind {
+    Browser,
+    CodeEditor,
+    Terminal,
+    Chat,
+    Office,
+    Notes,
+    Ai,
+    Other,
+    /// No foreground process could be resolved.
+    Unknown,
+}
+
+/// Maps the foreground process's exe file name (e.g. "msedge.exe").
+pub fn app_kind(exe_name: Option<&str>) -> AppKind {
+    let Some(exe_name) = exe_name else {
+        return AppKind::Unknown;
+    };
+    if is_terminal_process_exe(exe_name) {
+        return AppKind::Terminal;
+    }
+    let lower = exe_name.to_ascii_lowercase();
+    match lower.strip_suffix(".exe").unwrap_or(&lower) {
+        "chrome" | "msedge" | "firefox" | "brave" | "opera" | "vivaldi" | "arc" => AppKind::Browser,
+        "code" | "code - insiders" | "cursor" | "windsurf" | "zed" | "devenv" | "idea64"
+        | "pycharm64" | "webstorm64" | "rider64" | "sublime_text" | "notepad++" => {
+            AppKind::CodeEditor
+        }
+        "slack" | "discord" | "teams" | "ms-teams" | "whatsapp" | "telegram" | "signal" => {
+            AppKind::Chat
+        }
+        "winword" | "excel" | "powerpnt" | "outlook" | "olk" | "onenote" => AppKind::Office,
+        "notion" | "obsidian" | "notepad" | "evernote" | "logseq" => AppKind::Notes,
+        "claude" | "chatgpt" | "codex" => AppKind::Ai,
+        _ => AppKind::Other,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

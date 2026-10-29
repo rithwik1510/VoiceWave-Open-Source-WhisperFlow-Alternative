@@ -6,7 +6,7 @@
 use super::polish::Delivery;
 use super::post_process::{FormattedText, SpokenText};
 use super::DictationRun;
-use crate::insertion::{InsertTextRequest, SubmitError};
+use crate::insertion::{AppKind, InsertTextRequest, SubmitError};
 use crate::state::{
     classify_insertion_target, derive_correction_candidates, emit_pill_action_notice,
     emit_pill_notice, emit_pill_rescue, emit_submit_notice, insertion_method_key, now_utc_ms,
@@ -40,6 +40,9 @@ pub(super) struct Insertion {
     pub(super) history_recorded: bool,
     pub(super) record_id: Option<String>,
     pub(super) blocked_by_elevation: bool,
+    /// The foreground app's kind, for analytics; `None` when insertion
+    /// errored before resolving it.
+    pub(super) app_kind: Option<AppKind>,
     /// The spoken "press enter" result, when one was requested.
     pub(super) submit_outcome: Option<Result<(), SubmitError>>,
     pub(super) correction_candidates: Vec<String>,
@@ -126,6 +129,7 @@ impl VoiceWaveController {
             insertion_history_recorded,
             insertion_record_id,
             insertion_blocked_by_elevation,
+            insertion_app_kind,
         ) = match self
             .insert_text_with_polish_meta(
                 app.clone(),
@@ -146,6 +150,7 @@ impl VoiceWaveController {
                 true,
                 record_id,
                 result.blocked_by_elevation,
+                result.app_kind,
             ),
             Err(err) => {
                 self.update_run_state(
@@ -164,6 +169,7 @@ impl VoiceWaveController {
                     false,
                     None,
                     false,
+                    None,
                 )
             }
         };
@@ -173,6 +179,7 @@ impl VoiceWaveController {
         if !insertion_success && mode == DictationMode::Microphone {
             telemetry::record(TelemetryEvent::DictationFailed {
                 kind: DictationFailureKind::Insert,
+                app_kind: insertion_app_kind,
             });
         }
         // Spoken submit: Enter goes only into the window that received the
@@ -259,6 +266,7 @@ impl VoiceWaveController {
             history_recorded: insertion_history_recorded,
             record_id: insertion_record_id,
             blocked_by_elevation: insertion_blocked_by_elevation,
+            app_kind: insertion_app_kind,
             submit_outcome,
             correction_candidates,
             post_started,

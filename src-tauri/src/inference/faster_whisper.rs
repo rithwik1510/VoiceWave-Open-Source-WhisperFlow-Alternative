@@ -1,6 +1,6 @@
 use super::InferenceError;
 use crate::settings::DecodeMode;
-use crate::telemetry::{self, TelemetryEvent, WorkerExit, WorkerKind};
+use crate::telemetry::{self, TelemetryEvent, WorkerCause, WorkerExit, WorkerKind};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -769,6 +769,8 @@ fn read_worker_response_line_with_timeout(
             telemetry::record(TelemetryEvent::WorkerCrashed {
                 worker: WorkerKind::FasterWhisper,
                 exit,
+                // faster-whisper is gone in 0.8.0: no exit-cause classifying.
+                cause: WorkerCause::Unknown,
             });
         }
     };
@@ -853,6 +855,7 @@ fn spawn_worker() -> Result<WorkerProcess, InferenceError> {
         telemetry::record(TelemetryEvent::WorkerCrashed {
             worker: WorkerKind::FasterWhisper,
             exit: WorkerExit::SpawnFailed,
+            cause: WorkerCause::Unknown,
         });
         InferenceError::WorkerStartFailed(err.to_string())
     })

@@ -1344,12 +1344,15 @@ export function useVoiceWave() {
   // Onboarding shows the analytics disclosure on its first screen, so finishing
   // or skipping it also counts as having seen the notice. Its model step
   // already offers Parakeet, so the existing-user Parakeet card never follows.
-  const completeOnboarding = useCallback(async () => {
+  // `acquisitionAsked`: the done step showed "Where did you hear about
+  // VoiceWave?", so it never shows again.
+  const completeOnboarding = useCallback(async (acquisitionAsked: boolean) => {
     const nextSettings = {
       ...settings,
       onboardingCompleted: true,
       analyticsConsentVersion: ANALYTICS_CONSENT_VERSION,
-      parakeetOfferAnswered: true
+      parakeetOfferAnswered: true,
+      acquisitionAsked: settings.acquisitionAsked || acquisitionAsked
     };
     setSettings(nextSettings);
     if (!tauriAvailable) {
@@ -1487,9 +1490,16 @@ export function useVoiceWave() {
     [tauriAvailable]
   );
 
+  // The switch's own description (Settings, onboarding welcome) is the
+  // current disclosure, so turning it on also records it as seen and PostHog
+  // can send. Turning it off keeps the version; the backend purges its outbox.
   const setAnonymousUsageOptIn = useCallback(
     async (enabled: boolean) => {
-      const nextSettings = { ...settings, anonymousUsageOptIn: enabled };
+      const nextSettings = {
+        ...settings,
+        anonymousUsageOptIn: enabled,
+        ...(enabled ? { analyticsConsentVersion: ANALYTICS_CONSENT_VERSION } : {})
+      };
       setSettings(nextSettings);
       if (!tauriAvailable) {
         return;
@@ -1507,8 +1517,9 @@ export function useVoiceWave() {
     [settings, tauriAvailable]
   );
 
-  // Existing-user consent notice: records the choice and marks the notice
-  // seen in one save so it can never show twice.
+  // "A quick privacy check" (plan 024): records the choice and the current
+  // disclosure in one save so it never shows again. Until then the backend
+  // records nothing for PostHog.
   const resolveAnalyticsConsent = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {

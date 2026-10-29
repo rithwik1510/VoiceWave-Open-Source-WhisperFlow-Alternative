@@ -9,6 +9,7 @@ import {
   getPillQuickControlsSnapshot,
   loadSettings,
   loadSnapshot,
+  openSomethingWrong,
   rejectDictionaryEntry,
   retryLastDictation,
   listenVoicewaveMicLevel,
@@ -618,7 +619,8 @@ export function FloatingPill() {
     }
   }, [closeQuickControls, pendingProfile, startingHandsFree]);
 
-  const handleOpenMain = useCallback(async () => {
+  // Open, or "Something wrong?" (`openSomethingWrong`), after the card closes.
+  const handleOpenMain = useCallback(async (open: () => Promise<void>) => {
     const closed = await closeQuickControls();
     if (!closed) {
       setQuickControlsFeedback({
@@ -628,7 +630,7 @@ export function FloatingPill() {
       return;
     }
     try {
-      await showMainWindow();
+      await open();
     } catch {
       // Main-window failures are rare and the status pill is already restored;
       // do not strand an invisible interactive window on top of the target app.
@@ -802,7 +804,8 @@ export function FloatingPill() {
             feedback={quickControlsFeedback}
             onSelectProfile={(profile) => void handleSelectProfile(profile)}
             onStartHandsFree={() => void handleStartHandsFree()}
-            onOpenMain={() => void handleOpenMain()}
+            onOpenMain={() => void handleOpenMain(showMainWindow)}
+            onSomethingWrong={() => void handleOpenMain(openSomethingWrong)}
             onClose={() => void closeQuickControls()}
             onActivity={scheduleQuickControlsDismiss}
           />

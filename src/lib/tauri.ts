@@ -16,7 +16,9 @@ import type {
   DictionaryTerm,
   DictationMode,
   AppProfileOverrides,
+  ClientEvent,
   EntitlementSnapshot,
+  FeedbackKind,
   FormatProfile,
   HotkeyAction,
   HotkeyCaptureKey,
@@ -388,9 +390,36 @@ export async function getSupportContext(): Promise<SupportContext> {
 
 /** Opens a pre-filled GitHub issue form in the browser, with the diagnostics
  * report in its `diagnostics` field. `engine` is a short speech-engine
- * summary (device, engine, model id) — never user text. */
-export async function openIssueReport(engine: string): Promise<void> {
-  await invokeVoicewave<void>("open_issue_report", { engine });
+ * summary (device, engine, model id) — never user text. `reason`, picked in
+ * "Something wrong?", starts the "What happened?" field. */
+export async function openIssueReport(engine: string, reason?: FeedbackKind): Promise<void> {
+  await invokeVoicewave<void>("open_issue_report", { engine, reason });
+}
+
+/** Saves the support file (diagnostics report, bundle and recent logs) to
+ * the Downloads folder and returns its path. Nothing is uploaded. */
+export async function exportSupportZip(): Promise<string> {
+  return invokeVoicewave<string>("export_support_zip");
+}
+
+/** Opens Explorer with a saved support file selected. */
+export async function revealSupportFile(path: string): Promise<void> {
+  await invokeVoicewave<void>("reveal_support_file", { path });
+}
+
+/** From the pill: brings up the main window on "Something wrong?". */
+export async function openSomethingWrong(): Promise<void> {
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit("voicewave://something-wrong");
+  await showMainWindow();
+}
+
+export async function listenSomethingWrong(callback: () => void): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("voicewave://something-wrong", () => callback());
 }
 
 /** Plain-text diagnostics (versions, speech engine, mic, recent warnings);
@@ -403,6 +432,36 @@ export async function getDiagnosticsReport(): Promise<string> {
  * recorded by the previous run. */
 export async function drainTelemetry(): Promise<TelemetryEvent[]> {
   return invokeVoicewave<TelemetryEvent[]>("drain_telemetry");
+}
+
+/** Queues a plan 024 analytics event in the backend, which applies the
+ * consent gate and sends it. Never throws: analytics must not break the UI. */
+export async function track(event: ClientEvent): Promise<void> {
+  try {
+    await invokeVoicewave<void>("track", { event });
+  } catch {
+    // Outside Tauri, or a payload the backend rejected: nothing is sent.
+  }
+}
+
+/** Records that the updater is about to install `targetVersion`, so the next
+ * launch can tell whether it landed. Never throws: an update must not fail
+ * over its own bookkeeping. */
+export async function markUpdateInstalling(targetVersion: string): Promise<void> {
+  try {
+    await invokeVoicewave<void>("mark_update_installing", { targetVersion });
+  } catch {
+    // Outside Tauri, or a version that isn't plain semver: nothing recorded.
+  }
+}
+
+/** The update threw before the installer took over. Never throws. */
+export async function clearUpdateInstalling(): Promise<void> {
+  try {
+    await invokeVoicewave<void>("clear_update_installing");
+  } catch {
+    // Outside Tauri: nothing was recorded.
+  }
 }
 
 export async function openLogsFolder(): Promise<void> {
