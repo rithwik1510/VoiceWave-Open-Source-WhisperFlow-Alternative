@@ -298,6 +298,10 @@ jobs:
 
   publish-winget:
     needs: build-release
+    # Only a published (promoted) release goes to winget. A manual run builds a
+    # prerelease candidate, which winget users must never receive; resubmit a
+    # real release by hand with winget-release.yml.
+    if: github.event_name == 'release'
     runs-on: windows-latest
     steps:
       - name: Derive winget version from tag
