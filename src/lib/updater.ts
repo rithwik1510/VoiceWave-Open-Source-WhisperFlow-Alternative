@@ -84,6 +84,11 @@ export function classifyUpdateFailure(
  * setup in `passive` mode (progress UI, no prompts), and the plugin exits the
  * app as the installer starts.
  */
+/** What UpdatePrompt and Settings → Updates show when an install fails,
+ * whatever the cause (plan 024 section 8.3). */
+export const UPDATE_FAILED_MESSAGE =
+  "The update didn't install. VoiceWave will try again later, or you can download the latest version from voicewave.site.";
+
 export async function installPendingUpdate(
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<void> {

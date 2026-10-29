@@ -4,7 +4,8 @@ import {
   type AvailableUpdate,
   type DownloadProgress,
   checkForUpdate,
-  installPendingUpdate
+  installPendingUpdate,
+  UPDATE_FAILED_MESSAGE
 } from "../lib/updater";
 import { canUseTauri } from "../lib/tauri";
 
@@ -72,11 +73,8 @@ export function UpdateSection() {
       await installPendingUpdate((next) => setProgress(next));
       // On success the app relaunches into the new version.
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error && err.message
-          ? err.message
-          : "The update could not be installed. Please try again later."
-      );
+      console.warn("VoiceWave update install failed:", err);
+      setErrorMessage(UPDATE_FAILED_MESSAGE);
       setPhase("error");
     }
   };
