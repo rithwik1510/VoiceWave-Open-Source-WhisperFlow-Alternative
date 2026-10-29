@@ -648,6 +648,22 @@ Start now. The convention and the table of links are in v1. Always link the apex
 
 ## 11. README, privacy notice, website, changelog
 
+**Done 2026-10-29 (README, PRIVACY, changelog), written from the code rather than this section.** What changed
+from the text below:
+- README bullets use `-`, not `*`: the README already does, and CI runs `prettier --check` on Markdown, which
+  rewrites `*` to `-`. The anchor link in "Never leaves your PC" points at the renamed section.
+- The README and `docs/PRIVACY.md` both list the facts in `ANONYMOUS_USAGE_DETAILS`, but say "where you opened it"
+  instead of naming the pill, whose Something wrong button is still behind the quick controls experiment.
+- `docs/PRIVACY.md` drops v1's "The website" section: the GoatCounter only claim may no longer hold (the site
+  also has GA4), and the site is a separate repo. It adds the support file contents (including that `report.txt`
+  has the microphone name), the GitHub issue form, the registry key for the install ID, and the outbox limits
+  (500 entries, 14 days). No PostHog retention period is stated, because none is set in this plan.
+- The changelog uses the file's `### Added` / `### Changed` / `### Fixed` style instead of one "Privacy and
+  diagnostics" list, and adds the unclean exit banner, the update failure line and the TelemetryDeck sentence.
+
+**Website FAQ: left for the owner.** The site lives in the separate website repo, not in this tree, so the paragraph
+below was not applied.
+
 **`README.md`** L104 to L126: replace the "Anonymous usage count" section.
 - It names PostHog (EU), says IPs are discarded, and lists the same facts as `ANONYMOUS_USAGE_DETAILS` as `*` bullets.
 - Add the support file paragraph from v1 11.1.
@@ -719,7 +735,7 @@ Never audio, transcripts, app names or file paths.
 | P3 | Events: `session.rs` and `app_launched`, day accumulator and `active_day`, problem events, worker cause, `AppKind`, download, hotkey, onboarding `track` calls, `update_failed` | P1 | 2 to 2.5 days |
 | P4 | Install source (NSIS, guard steps) and acquisition question | P1 for `install_source` in base properties | 1 day |
 | P5 | Something wrong, support file, unclean exit banner, update failure line. **Done 2026-10-29** | P3 for the banner | 1.5 days |
-| P6 | README, PRIVACY, FAQ, changelog, PostHog dashboard, the manual checklist, release | all | 1 day |
+| P6 | README, PRIVACY, FAQ, changelog, PostHog dashboard, the manual checklist, release. **Docs and the 0.7.7 version bump done 2026-10-29** (section 11); the website FAQ is left for the owner (separate repo). Still to do: the PostHog dashboard (section 9), the manual checklist (section 14) and the release | all | 1 day |
 
 That's about 8 to 9 days for one person.
 - **With subagents:** P1 first, alone. Then P3, P4 and P5 in parallel worktrees, merged one at a time into

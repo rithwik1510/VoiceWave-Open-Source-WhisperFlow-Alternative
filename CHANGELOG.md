@@ -7,6 +7,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ## [Unreleased]
 
+## [0.7.7] – 2026-10-29
+
+Better problem reports, so we can find and fix what goes wrong for you, and
+a support file you can attach to an issue.
+
+### Added
+
+- **Something wrong? in Help → Report a problem.** Pick what happened, such
+  as wrong words, too slow, or the text didn't appear. If you share
+  anonymous reports, we get the reason you picked and nothing else. Then
+  tell us more on GitHub, with the reason already filled in, or save a
+  support file to attach.
+- **Save support file.** Settings → Diagnostics → Save support file writes
+  a zip to your Downloads folder with your diagnostics report, the newest
+  logs, and how the last run ended if VoiceWave closed unexpectedly. Your
+  Windows user folder is hidden in it, and it is never uploaded. Show in
+  folder finds it in Explorer.
+- **A note after VoiceWave closes unexpectedly.** If the last run crashed
+  or hit an internal error, Home says so and offers Save support file and
+  Open logs folder, until you dismiss it.
+- **Where did you hear about VoiceWave?** One optional question at the end
+  of setup on a new install, asked once and only while anonymous reports
+  are on.
+
+### Changed
+
+- **Anonymous usage and problem reports move to PostHog.** They go to
+  PostHog's EU Cloud, in a project set to discard IP addresses, and now say
+  how VoiceWave works for you: one summary for each day you dictate (how
+  many dictations worked or failed, how fast text appeared, and the kind of
+  app it went into, never its name), how the last run ended, model
+  downloads, failed updates and crashes. The full list is under What's sent
+  in the app and in the
+  [privacy notice](https://github.com/rithwik1510/VoiceWave-Open-Source-WhisperFlow-Alternative/blob/main/docs/PRIVACY.md).
+  Never audio, transcripts, app names, file paths or your IP address.
+- **Asked once, one switch.** If you shared the older usage count, a quick
+  privacy check asks once whether to keep sharing, and nothing new is
+  recorded until you answer. If you had it off, you aren't asked and
+  nothing is sent. One switch in Settings → Diagnostics turns everything
+  off and deletes anything waiting to be sent.
+- **Reports wait for a connection.** Reports made while you're offline are
+  kept on your PC for up to 14 days and sent later with the time they
+  happened, instead of being lost.
+- **TelemetryDeck for one more release.** 0.7.7 still sends the older
+  anonymous usage count through TelemetryDeck, under the same switch. That
+  stops in the next release.
+
+### Fixed
+
+- **A failed update says so plainly.** Instead of a raw error, the update
+  prompt and Settings → Updates now say the update didn't install, that
+  VoiceWave will try again later, and that you can download the latest
+  version from voicewave.site.
+
 ## [0.7.6] – 2026-10-27
 
 Speech model downloads now survive a bad connection, and say what went wrong
