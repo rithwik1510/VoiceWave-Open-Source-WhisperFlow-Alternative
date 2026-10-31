@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ## [Unreleased]
 
+## [0.7.8] – 2026-10-31
+
+The privacy check now reaches people who start VoiceWave with Windows, and
+nothing is lost while you decide.
+
+### Changed
+
+- **Your reports wait while you decide.** If you shared the older usage
+  count before 0.7.7 and haven't answered "A quick privacy check" yet,
+  VoiceWave now keeps the anonymous reports on your PC instead of
+  skipping them. Nothing is sent until you answer. Keep sharing sends
+  them; Turn off deletes them and sends nothing.
+- **The privacy check finds you.** If VoiceWave starts hidden with
+  Windows, the check could wait unseen. Now, after your first dictation
+  that works in each launch, the pill asks once, and Open shows it.
+- **Saying yes is counted.** Choosing to share, at the end of setup or on
+  the privacy check, is now one anonymous report. Choosing not to share
+  sends nothing.
+
 ## [0.7.7] – 2026-10-29
 
 Better problem reports, so we can find and fix what goes wrong for you, and

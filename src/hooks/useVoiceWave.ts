@@ -74,6 +74,7 @@ import {
   stopMicLevelMonitor,
   stopDictation as stopDictationCommand,
   startDictation,
+  track as trackAnalytics,
   tagSession as tagSessionCommand,
   toggleStarSession as toggleStarSessionCommand,
   triggerHotkeyAction,
@@ -1347,6 +1348,11 @@ export function useVoiceWave() {
   // `acquisitionAsked`: the done step showed "Where did you hear about
   // VoiceWave?", so it never shows again.
   const completeOnboarding = useCallback(async (acquisitionAsked: boolean) => {
+    // A first run (or one that never saw the current disclosure) finishing
+    // with sharing on; "Run setup again" is already at the current version.
+    const consentGiven =
+      settings.anonymousUsageOptIn &&
+      (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
     const nextSettings = {
       ...settings,
       onboardingCompleted: true,
@@ -1360,6 +1366,9 @@ export function useVoiceWave() {
     }
     try {
       setSettings(normalizeSettings(await updateSettings(nextSettings)));
+      if (consentGiven) {
+        void trackAnalytics({ event: "consent_given", surface: "onboarding" });
+      }
     } catch {
       // Non-fatal: the flow simply shows again next launch.
     }
@@ -1519,7 +1528,8 @@ export function useVoiceWave() {
 
   // "A quick privacy check" (plan 024): records the choice and the current
   // disclosure in one save so it never shows again. Until then the backend
-  // records nothing for PostHog.
+  // holds PostHog events on this PC: Keep sharing sends them (plus a
+  // `consent_given`), Turn off deletes them and sends nothing.
   const resolveAnalyticsConsent = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {
@@ -1533,6 +1543,9 @@ export function useVoiceWave() {
       }
       try {
         setSettings(normalizeSettings(await updateSettings(nextSettings)));
+        if (enabled) {
+          void trackAnalytics({ event: "consent_given", surface: "privacy_check" });
+        }
       } catch (persistErr) {
         setError(
           persistErr instanceof Error

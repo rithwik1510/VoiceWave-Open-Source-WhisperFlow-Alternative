@@ -180,8 +180,8 @@ pub struct VoiceWaveSettings {
     /// install that has not finished onboarding); 1 = saw the TelemetryDeck
     /// notice in onboarding or the existing-user prompt; 2 = saw the PostHog
     /// disclosure (plan 024), or has sharing off. PostHog sends only at
-    /// `ANALYTICS_CONSENT_VERSION` and records nothing at 1 (see
-    /// `analytics::set_consent`).
+    /// `ANALYTICS_CONSENT_VERSION`; below it, it records but holds the
+    /// events on this PC (see `analytics::set_consent`).
     #[serde(default)]
     pub analytics_consent_version: u32,
     /// The onboarding "Where did you hear about VoiceWave?" question was
@@ -424,7 +424,7 @@ pub const ANALYTICS_CONSENT_VERSION: u32 = 2;
 /// - On, onboarding done, never saw a notice: before analytics became
 ///   on-by-default, `true` could only come from the user flipping the
 ///   Settings switch, so that's explicit consent to the v1 notice. Version 1,
-///   so the v2 prompt asks before PostHog records anything.
+///   so the v2 prompt asks before PostHog sends anything.
 /// - On at version 1 stays at 1 until the v2 prompt is answered.
 ///
 /// Afterwards, sharing on at version 0 only means onboarding isn't finished.

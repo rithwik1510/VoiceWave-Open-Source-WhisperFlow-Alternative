@@ -147,7 +147,8 @@ pub struct PillNoticePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PillAction {
-    /// "copyTranscript" | "addDictionaryTerm" | "retryDictation" — selects the
+    /// "copyTranscript" | "addDictionaryTerm" | "retryDictation" |
+    /// "openPrivacyCheck" (sent only by the main window) — selects the
     /// frontend handler.
     pub kind: String,
     /// Button label, e.g. "Copy" or "Add \"foo\"".

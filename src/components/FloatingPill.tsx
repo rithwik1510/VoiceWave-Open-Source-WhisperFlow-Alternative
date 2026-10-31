@@ -547,6 +547,17 @@ export function FloatingPill() {
     }
   }, [clearNoticeDismiss]);
 
+  // The privacy check waits in the main window; the nudge has done its job.
+  const handleOpenPrivacyCheck = useCallback(async () => {
+    clearNoticeDismiss();
+    setNotice(null);
+    try {
+      await showMainWindow();
+    } catch {
+      // Never crash the overlay; the check shows whenever the window opens.
+    }
+  }, [clearNoticeDismiss]);
+
   // Hover pause is only wired for interactive rescue notices: holding the
   // pointer over the capsule clears the dismiss timer; leaving re-arms a short
   // 2s grace.
@@ -846,6 +857,14 @@ export function FloatingPill() {
                 type="button"
                 className="vw-pill-action vw-pill-action-retry"
                 onClick={() => void handleRetryDictation()}
+              >
+                {notice.action.label}
+              </button>
+            ) : notice?.action?.kind === "openPrivacyCheck" ? (
+              <button
+                type="button"
+                className="vw-pill-action vw-pill-action-open"
+                onClick={() => void handleOpenPrivacyCheck()}
               >
                 {notice.action.label}
               </button>

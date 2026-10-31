@@ -221,8 +221,8 @@ struct OutboxEntry {
 |---|---|---|
 | `Off` | `anonymous_usage_opt_in = false` | Nothing is recorded; the outbox and day file are deleted |
 | `On` | On, `analytics_consent_version >= 2` | Record and send |
-| `Hold` | On, version 0: a new install that hasn't finished onboarding | Record but **don't send**. Finishing or skipping onboarding (which shows the v2 disclosure) sets version 2 and the queue goes out with its real timestamps. Turning the switch off deletes it |
-| `Unknown` | Settings not loaded yet, or on at version 1: an existing user who hasn't answered the v2 prompt | Record **nothing** (no outbox, no day file) and delete nothing. The prompt shows on every launch until it's answered. TelemetryDeck carries on as under v1 |
+| `Hold` | On, version 0: a new install that hasn't finished onboarding; or (since 0.7.8) on at version 1: an existing user who hasn't answered the v2 prompt | Record but **don't send**. Finishing or skipping onboarding, or Keep sharing on the prompt, sets version 2 and the queue goes out with its real timestamps. Turning the switch off (or Turn off on the prompt) deletes it. The prompt shows on every launch until it's answered, and the pill nudges once per run after a successful dictation. TelemetryDeck carries on as under v1 |
+| `Unknown` | Settings not loaded yet | Record **nothing** (no outbox, no day file) and delete nothing |
 
 - `analytics::apply_settings` (which calls `set_consent(opt_in, version)`) runs after settings load and after every
   settings save, from the same Rust path that persists them, so turning the switch off purges at once.
@@ -239,7 +239,7 @@ through one Tauri command:
 fn track(event: AnalyticsEvent) // matched against an explicit allow-list
 ```
 
-- `track` accepts only `onboarding_step`, `onboarding_finished`, `acquisition_answered`, `feedback_reported` and
+- `track` accepts only `onboarding_step`, `onboarding_finished`, `consent_given` (0.7.8), `acquisition_answered`, `feedback_reported` and
   `update_failed` (with a `download`, `verify` or `install` stage and an `error_kind`). Any other variant is logged and dropped; a payload
   that doesn't deserialize never reaches it. The frontend can't invent events or values.
 - The TS side is `track(event: ClientEvent)` in `src/lib/tauri.ts`. `ClientEvent` lists the accepted variants in the
@@ -247,7 +247,7 @@ fn track(event: AnalyticsEvent) // matched against an explicit allow-list
 
 ## 4. Events
 
-There are 13 event names, all built. Per user per day, that's in practice 2 to 6 events. At 100 daily users it's under 20k
+There are 14 event names, all built (`consent_given` added in 0.7.8). Per user per day, that's in practice 2 to 6 events. At 100 daily users it's under 20k
 events a month. PostHog's free tier is 1M a month.
 
 ### 4.1 Lifecycle and "is this a real user"
@@ -366,6 +366,7 @@ from v1, with `ai_app` renamed `ai`:
 |---|---|---|---|
 | `onboarding_step` | Each onboarding step on arrival, `welcome` when the flow mounts. Time on a step is the gap to the next event's timestamp | `step`: `welcome`, `mic`, `speak`, `done` | TS `track` |
 | `onboarding_finished` | Done or skipped. Total time is the gap from `onboarding_step {welcome}` | `outcome`: `finished`, `skipped` | TS `track` |
+| `consent_given` | 0.7.8. Onboarding finished or skipped with sharing on (first time at v2), or Keep sharing on the privacy check. A no sends nothing | `surface`: `onboarding`, `privacy_check` | TS `track` |
 | `acquisition_answered` | Onboarding done step (section 7) | `answer`: the v1 list; also `$set_once: {acquisition: answer}` | TS `track` |
 | `feedback_reported` | A reason picked in "Something wrong?" (section 8.1), at most 10 a day (capped in `analytics/day.rs`, like `dictation_failed`) | `kind`: `wrong_words`, `missed_words`, `too_slow`, `text_did_not_appear`, `wrong_place`, `froze_or_crashed`, `hotkey`, `other`; `surface`: `pill` (the pill's quick menu), `settings` (the main window's Help) | TS `track` |
 

@@ -139,8 +139,10 @@ export interface VoiceWaveSnapshot {
 /** A typed one-tap action carried by a pill notice. The frontend switches on
  * `kind` to render the button and dispatch the handler. */
 export interface PillAction {
-  /** `retryDictation` reruns transcription on audio kept from a failed run. */
-  kind: "copyTranscript" | "addDictionaryTerm" | "retryDictation";
+  /** `retryDictation` reruns transcription on audio kept from a failed run.
+   * `openPrivacyCheck` shows the main window, where the privacy check waits
+   * (sent by the main window, see App.tsx). */
+  kind: "copyTranscript" | "addDictionaryTerm" | "retryDictation" | "openPrivacyCheck";
   /** Button label, e.g. "Copy" or 'Add "foo"'. */
   label: string;
   /** Action data (e.g. the term to add). `copyTranscript` reads the rescue
@@ -341,6 +343,7 @@ export type UpdateErrorKind = "network" | "signature" | "disk" | "permission" | 
 export type ClientEvent =
   | { event: "onboarding_step"; step: OnboardingStepName }
   | { event: "onboarding_finished"; outcome: "finished" | "skipped" }
+  | { event: "consent_given"; surface: "onboarding" | "privacy_check" }
   | { event: "acquisition_answered"; answer: AcquisitionAnswer }
   | { event: "feedback_reported"; kind: FeedbackKind; surface: FeedbackSurface }
   /** `target_version` is sent as `other` unless it's plain `major.minor.patch`. */
