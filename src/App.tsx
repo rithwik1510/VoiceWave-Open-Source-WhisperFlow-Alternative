@@ -841,35 +841,38 @@ function App() {
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
   // Started hidden at login, the window (and the check in it) may never be
   // opened, so the first dictation that works in each run asks on the pill,
-  // whose Open shows the window. A moment later, so the pill has settled.
+  // whose Open shows the window. The pill holds the notice until its
+  // "inserted" status has passed. Not while the pill is hidden.
   const privacyNudgedRef = useRef(false);
   useEffect(() => {
-    if (!showAnalyticsConsent || !lastInsertion?.success || privacyNudgedRef.current) {
+    if (
+      !showAnalyticsConsent ||
+      !settings.showFloatingHud ||
+      !lastInsertion?.success ||
+      privacyNudgedRef.current
+    ) {
       return;
     }
-    const timer = window.setTimeout(() => {
-      privacyNudgedRef.current = true;
-      void (async () => {
-        try {
-          const { emit } = await import("@tauri-apps/api/event");
-          const notice: PillNoticePayload = {
-            id: Date.now(),
-            severity: "info",
-            title: "A quick privacy question",
-            detail: "Open VoiceWave to choose whether to keep sharing usage counts.",
-            durationMs: 10000,
-            transcript: null,
-            action: { kind: "openPrivacyCheck", label: "Open", value: null },
-            recovery: false
-          };
-          await emit("voicewave://pill-notice", notice);
-        } catch {
-          // Best effort: the check still waits in the main window.
-        }
-      })();
-    }, 1500);
-    return () => window.clearTimeout(timer);
-  }, [lastInsertion, showAnalyticsConsent]);
+    privacyNudgedRef.current = true;
+    void (async () => {
+      try {
+        const { emit } = await import("@tauri-apps/api/event");
+        const notice: PillNoticePayload = {
+          id: Date.now(),
+          severity: "info",
+          title: "A quick privacy question",
+          detail: "Open VoiceWave to choose whether to keep sharing usage counts.",
+          durationMs: 10000,
+          transcript: null,
+          action: { kind: "openPrivacyCheck", label: "Open", value: null },
+          recovery: false
+        };
+        await emit("voicewave://pill-notice", notice);
+      } catch {
+        // Best effort: the check still waits in the main window.
+      }
+    })();
+  }, [lastInsertion, settings.showFloatingHud, showAnalyticsConsent]);
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU

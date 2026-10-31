@@ -1500,14 +1500,19 @@ export function useVoiceWave() {
   );
 
   // The switch's own description (Settings, onboarding welcome) is the
-  // current disclosure, so turning it on also records it as seen and PostHog
-  // can send. Turning it off keeps the version; the backend purges its outbox.
+  // current disclosure, so turning it on in Settings also records it as seen
+  // and PostHog can send. During onboarding, finishing records it instead
+  // (`completeOnboarding`), so setup's events keep waiting and the yes is
+  // counted once. Turning it off keeps the version; the backend purges its
+  // outbox.
   const setAnonymousUsageOptIn = useCallback(
     async (enabled: boolean) => {
       const nextSettings = {
         ...settings,
         anonymousUsageOptIn: enabled,
-        ...(enabled ? { analyticsConsentVersion: ANALYTICS_CONSENT_VERSION } : {})
+        ...(enabled && settings.onboardingCompleted
+          ? { analyticsConsentVersion: ANALYTICS_CONSENT_VERSION }
+          : {})
       };
       setSettings(nextSettings);
       if (!tauriAvailable) {

@@ -534,8 +534,8 @@ Buttons:  [Keep sharing]   [Turn off]
 Footer:   You can change this anytime in Settings → Diagnostics.
 ```
 
-- "Keep sharing" sets version 2; from then on PostHog records and sends. Nothing was recorded before the answer.
-- "Turn off" sets the switch off and version 2, and sends nothing.
+- "Keep sharing" sets version 2; from then on PostHog records and sends. Before the answer nothing was recorded (0.7.7); since 0.7.8 reports are held on the PC (`Hold`) and sent now with their real timestamps.
+- "Turn off" sets the switch off and version 2, deletes any held reports (0.7.8), and sends nothing.
 
 **Onboarding welcome toggle** (Onboarding.tsx, the existing toggle):
 
