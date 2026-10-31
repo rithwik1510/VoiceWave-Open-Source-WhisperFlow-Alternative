@@ -34,6 +34,10 @@ pub enum AnalyticsEvent {
     OnboardingStep { step: OnboardingStep },
     /// Onboarding finished or skipped (through `track`).
     OnboardingFinished { outcome: OnboardingOutcome },
+    /// The user accepted the current disclosure: finished onboarding with
+    /// sharing on, or picked Keep sharing on the privacy check (through
+    /// `track`). A no is never sent.
+    ConsentGiven { surface: ConsentSurface },
     /// "Where did you hear about VoiceWave?" on the onboarding done step
     /// (through `track`). Also stored on the person, see `enqueue`.
     AcquisitionAnswered { answer: Acquisition },
@@ -203,6 +207,14 @@ pub struct DaySummary {
     pub app_unknown: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_style: Option<PolishProfile>,
+}
+
+/// Where `consent_given` was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentSurface {
+    Onboarding,
+    PrivacyCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

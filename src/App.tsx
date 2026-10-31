@@ -70,6 +70,7 @@ import type {
   ModelCatalogItem,
   ModelStatus,
   ModelTier,
+  PillNoticePayload,
   PolishOutcome,
   PolishProfile,
   RetentionPolicy,
@@ -755,6 +756,7 @@ function App() {
     settings,
     switchToRecommendedInput,
     recommendedVadThreshold,
+    lastInsertion,
     snapshot,
     stopDictation,
     tauriAvailable,
@@ -828,8 +830,8 @@ function App() {
     tauriAvailable && !hasInstalledModel && setupCatalog.length > 0 && !showOnboarding;
   // "A quick privacy check" (plan 024): users sharing under an older
   // disclosure (the settings migration leaves them below version 2) see it
-  // after onboarding, on every launch until they answer; PostHog records
-  // nothing for them until then. The model gate goes first so the two never
+  // after onboarding, on every launch until they answer; PostHog holds their
+  // events on this PC until then. The model gate goes first so the two never
   // stack. Sharing off needs no check: nothing is sent.
   const showAnalyticsConsent =
     tauriAvailable &&
@@ -837,6 +839,40 @@ function App() {
     !showModelSetupGate &&
     settings.anonymousUsageOptIn &&
     (settings.analyticsConsentVersion ?? 0) < ANALYTICS_CONSENT_VERSION;
+  // Started hidden at login, the window (and the check in it) may never be
+  // opened, so the first dictation that works in each run asks on the pill,
+  // whose Open shows the window. The pill holds the notice until its
+  // "inserted" status has passed. Not while the pill is hidden.
+  const privacyNudgedRef = useRef(false);
+  useEffect(() => {
+    if (
+      !showAnalyticsConsent ||
+      !settings.showFloatingHud ||
+      !lastInsertion?.success ||
+      privacyNudgedRef.current
+    ) {
+      return;
+    }
+    privacyNudgedRef.current = true;
+    void (async () => {
+      try {
+        const { emit } = await import("@tauri-apps/api/event");
+        const notice: PillNoticePayload = {
+          id: Date.now(),
+          severity: "info",
+          title: "A quick privacy question",
+          detail: "Open VoiceWave to choose whether to keep sharing usage counts.",
+          durationMs: 10000,
+          transcript: null,
+          action: { kind: "openPrivacyCheck", label: "Open", value: null },
+          recovery: false
+        };
+        await emit("voicewave://pill-notice", notice);
+      } catch {
+        // Best effort: the check still waits in the main window.
+      }
+    })();
+  }, [lastInsertion, settings.showFloatingHud, showAnalyticsConsent]);
   // Home view: the one-time offer to switch to Parakeet for existing users
   // (0.7.5). Only where Parakeet runs (the backend lists it only there), never
   // during first-run flows, and not while another model downloads or a GPU
@@ -3826,6 +3862,10 @@ function App() {
               the reason you pick in “Something wrong?” and where you opened it.
             </p>
             <UsageCountDetails />
+            <p className="mt-3 text-sm leading-relaxed text-label">
+              Until you answer, these reports wait on your PC. Keep sharing sends them; Turn off deletes them and
+              nothing is sent.
+            </p>
             <p className="mt-3 text-sm leading-relaxed text-label">
               Never sent: audio, transcripts, dictionary or snippet content, window titles, app names, file paths,
               device names, error messages, or your IP address.

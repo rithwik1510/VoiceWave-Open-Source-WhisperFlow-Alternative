@@ -54,15 +54,16 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Consent {
-    /// Nothing is recorded or sent, and nothing is deleted: settings aren't
-    /// loaded yet, or the user shared under an older disclosure (version 1)
-    /// and hasn't answered the privacy check for the current one.
+    /// Settings aren't loaded yet: nothing is recorded, sent or deleted.
     Unknown,
     /// Sharing off: nothing is recorded, and the outbox and day file are
     /// deleted.
     Off,
-    /// A new install that hasn't finished onboarding (version 0): record, but
-    /// send only once onboarding has shown the current disclosure.
+    /// Sharing on below the current disclosure: a new install that hasn't
+    /// finished onboarding (version 0), or a user who shared under the older
+    /// notice (version 1) and hasn't answered the privacy check. Record, but
+    /// send only once the current disclosure is accepted; turning sharing
+    /// off deletes what was held.
     Hold,
     On,
 }
@@ -284,11 +285,9 @@ pub fn set_consent(opt_in: bool, version: u32) {
         Consent::Off
     } else if version >= ANALYTICS_CONSENT_VERSION {
         Consent::On
-    } else if version == 0 {
-        // After the settings migration, only an unfinished onboarding.
-        Consent::Hold
     } else {
-        Consent::Unknown
+        // An unfinished onboarding (0) or an unanswered privacy check (1).
+        Consent::Hold
     };
     let previous = std::mem::replace(&mut *lock(&CONSENT), next);
     if previous == next {
@@ -327,6 +326,7 @@ pub fn track(event: AnalyticsEvent) {
     match event {
         AnalyticsEvent::OnboardingStep { .. }
         | AnalyticsEvent::OnboardingFinished { .. }
+        | AnalyticsEvent::ConsentGiven { .. }
         | AnalyticsEvent::AcquisitionAnswered { .. }
         | AnalyticsEvent::FeedbackReported { .. }
         | AnalyticsEvent::UpdateFailed {

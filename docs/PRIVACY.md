@@ -37,6 +37,8 @@ whether the PC is a virtual machine. On top of that, VoiceWave sends only:
   got and how long they took;
 - failed updates: the step, the kind of error and the version;
 - shortcut setup problems;
+- that you chose to share, at the end of setup or on "A quick privacy check" (choosing not to
+  share sends nothing);
 - your answer to "Where did you hear about VoiceWave?", asked once at the end of setup on a new
   install;
 - the reason you pick in "Something wrong?", and where you opened it.
@@ -57,8 +59,9 @@ their text is never sent.
 - **New installs:** on by default. The first setup screen shows the switch. Reports made during
   setup wait on your PC until you finish or skip setup, and are deleted if you turn the switch off.
 - **If you shared the older usage count before 0.7.7:** "A quick privacy check" asks once whether
-  to keep sharing. Nothing new is recorded until you answer, and the question comes back each time
-  you open VoiceWave until you do.
+  to keep sharing. Until you answer, reports wait on your PC and nothing is sent. Keep sharing sends
+  them; Turn off deletes them. The question comes back each time you open VoiceWave until you
+  answer, and since 0.7.8 the pill also asks once per launch after a dictation works.
 - **If you had it off:** nothing changes. You aren't asked, and nothing is sent.
 
 Reports made while you're offline are kept in a file on your PC and sent later, with the time they

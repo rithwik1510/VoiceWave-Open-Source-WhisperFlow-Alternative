@@ -29,7 +29,8 @@ export const ANONYMOUS_USAGE_DETAILS =
   "(estimated for installs older than 0.7.7); whether the PC is a virtual machine. When the app starts: whether " +
   "it started with Windows, and whether the last run ended normally, crashed, hit an internal error, or was cut " +
   "off by a restart or an update, what it was doing then and how long it had run. Setup steps and whether setup " +
-  "was finished or skipped. Once for each day you dictate: how many dictations were started, worked, came back " +
+  "was finished or skipped, and that you chose to share (at setup or the privacy check; turning it off sends " +
+  "nothing). Once for each day you dictate: how many dictations were started, worked, came back " +
   "empty, failed, heard no speech, were retried or were hands free; how fast text appeared; how long you spoke; " +
   "how many words were inserted; how often speech ran on the graphics card; how the text got in (typed, pasted, " +
   "left on the clipboard, kept in History only, or held back from an app running as administrator); how many " +

@@ -105,8 +105,8 @@ Wispr Flow details from [wisprflow.ai/pricing](https://wisprflow.ai/pricing), Ap
 
 On by default for new installs. They show us whether setup and dictation work for you, and what
 breaks, so we can fix it. Reports go to [PostHog](https://posthog.com) on its EU Cloud, in a project
-set to discard IP addresses. If you shared the older usage count, 0.7.7 asks you once and records
-nothing new until you answer. One switch turns everything off, during setup or in
+set to discard IP addresses. If you shared the older usage count, VoiceWave asks you once; until
+you answer, reports wait on your PC and nothing is sent. One switch turns everything off, during setup or in
 **Settings → Diagnostics**. Details are in the [privacy notice](docs/PRIVACY.md).
 
 Every report carries a random install ID and a random ID for each launch, the app version, Windows

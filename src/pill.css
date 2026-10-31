@@ -836,12 +836,15 @@ body,
 }
 
 /* Copy button: mirrors the review-mode action buttons; "copied" adopts the
-   lime CTA tint used by the Approve button. */
-.vw-pill-action-copy {
+   lime CTA tint used by the Approve button. The privacy nudge's Open shares
+   its quiet look: it is an ask, not a recovery. */
+.vw-pill-action-copy,
+.vw-pill-action-open {
   flex: none;
 }
 
-.vw-pill-action-copy:hover:not(:disabled) {
+.vw-pill-action-copy:hover:not(:disabled),
+.vw-pill-action-open:hover:not(:disabled) {
   border-color: rgba(228, 228, 231, 0.32);
   background: rgba(63, 63, 70, 0.78);
 }
